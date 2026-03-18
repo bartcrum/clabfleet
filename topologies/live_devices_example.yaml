@@ -1,0 +1,57 @@
+# Example device inventory for export-live command.
+# Lists production devices to connect to via NAPALM,
+# pull running configs and LLDP neighbours, and generate
+# an EVE-NG topology YAML that mirrors the live network.
+#
+# Usage:
+#   eve-ng-automator export-live topologies/live_devices_example.yaml \
+#       -o topologies/imported_from_prod.yaml --lab-name "prod-mirror"
+
+devices:
+  - hostname: "core-rtr-01.example.com"
+    platform: "ios"           # NAPALM driver
+    username: "admin"
+    password: "changeme"      # or use env vars / vault
+    template: "vios"          # EVE-NG template
+    image: "vios-adventerprisek9-m.vmdk.SPA-15.9.3M6"
+    ram: 512
+    cpu: 1
+
+  - hostname: "core-rtr-02.example.com"
+    platform: "ios"
+    username: "admin"
+    password: "changeme"
+    template: "vios"
+    image: "vios-adventerprisek9-m.vmdk.SPA-15.9.3M6"
+    ram: 512
+    cpu: 1
+
+  - hostname: "dist-sw-01.example.com"
+    platform: "eos"
+    username: "admin"
+    password: "changeme"
+    template: "veos"
+    image: "veos-4.28.0F"
+    ram: 4096
+    cpu: 2
+    optional_args:
+      transport: "https"
+
+  - hostname: "dist-sw-02.example.com"
+    platform: "eos"
+    username: "admin"
+    password: "changeme"
+    template: "veos"
+    image: "veos-4.28.0F"
+    ram: 4096
+    cpu: 2
+    optional_args:
+      transport: "https"
+
+  - hostname: "fw-01.example.com"
+    platform: "panos"
+    username: "admin"
+    password: "changeme"
+    template: "paloalto"
+    ram: 4096
+    cpu: 2
