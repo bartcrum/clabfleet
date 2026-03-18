@@ -2,9 +2,12 @@
 
 Usage:
     eve-ng-automator deploy <topology.yaml> [--start] [--dry-run]
+    eve-ng-automator deploy <topology.yaml> --cluster <cluster.yaml> [--strategy bin-pack]
     eve-ng-automator teardown <lab-path> [--keep-lab] [--no-wipe]
+    eve-ng-automator teardown --cluster <cluster.yaml> <topology.yaml>
     eve-ng-automator export <lab-path> [-o output.yaml] [--no-configs]
     eve-ng-automator export-live <devices.yaml> [-o output.yaml]
+    eve-ng-automator cluster-status <cluster.yaml>
     eve-ng-automator list-templates
     eve-ng-automator list-labs [<folder>]
     eve-ng-automator status
@@ -20,7 +23,9 @@ from pathlib import Path
 import yaml
 
 from .api_client import EveNgClient
+from .cluster import load_cluster_config, create_client, probe_host_resources
 from .deployer import TopologyDeployer
+from .distributed import DistributedDeployer
 from .exporter import export_lab, export_from_live_network
 from .teardown import teardown_lab, stop_lab
 
@@ -53,14 +58,31 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="Start all nodes after deployment")
     p_deploy.add_argument("--dry-run", action="store_true",
                           help="Validate and show what would be created")
+    p_deploy.add_argument("--cluster", metavar="CLUSTER_YAML",
+                          help="Deploy across multiple hosts using cluster config")
+    p_deploy.add_argument("--strategy", default="bin-pack",
+                          choices=["bin-pack", "spread", "resource"],
+                          help="Placement strategy for multi-host (default: bin-pack)")
+    p_deploy.add_argument("--ssh-user", default="root",
+                          help="SSH username for tunnel setup (default: root)")
+    p_deploy.add_argument("--ssh-pass",
+                          help="SSH password for tunnel setup")
+    p_deploy.add_argument("--ssh-key",
+                          help="SSH private key file for tunnel setup")
 
     # --- teardown ---
     p_tear = sub.add_parser("teardown", help="Tear down a lab")
-    p_tear.add_argument("lab_path", help="Lab path (e.g. /my-lab)")
+    p_tear.add_argument("lab_path", help="Lab path (e.g. /my-lab) or topology YAML for cluster mode")
     p_tear.add_argument("--keep-lab", action="store_true",
                         help="Stop and wipe nodes but don't delete the lab")
     p_tear.add_argument("--no-wipe", action="store_true",
                         help="Don't wipe node NVRAM before deletion")
+    p_tear.add_argument("--cluster", metavar="CLUSTER_YAML",
+                        help="Tear down across multiple hosts using cluster config")
+    p_tear.add_argument("--ssh-user", default="root",
+                        help="SSH username for tunnel teardown")
+    p_tear.add_argument("--ssh-pass", help="SSH password for tunnel teardown")
+    p_tear.add_argument("--ssh-key", help="SSH private key file for tunnel teardown")
 
     # --- stop ---
     p_stop = sub.add_parser("stop", help="Stop all nodes in a lab")
@@ -80,6 +102,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("-o", "--output", help="Output YAML file")
     p_live.add_argument("--lab-name", default="imported-topology",
                         help="Name for the generated lab")
+
+    # --- cluster-status ---
+    p_cs = sub.add_parser("cluster-status",
+                          help="Show status of all hosts in a cluster")
+    p_cs.add_argument("cluster_config", help="Path to cluster YAML")
 
     # --- list-templates ---
     sub.add_parser("list-templates", help="List available node templates")
@@ -108,6 +135,24 @@ def main(argv: list[str] | None = None) -> int:
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    # Commands that use cluster config instead of a single --host
+    cluster_commands = {"cluster-status"}
+    uses_cluster = (
+        args.command in cluster_commands
+        or (args.command == "deploy" and getattr(args, "cluster", None))
+        or (args.command == "teardown" and getattr(args, "cluster", None))
+    )
+
+    if uses_cluster:
+        try:
+            return _dispatch_cluster(args)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            if args.verbose >= 2:
+                import traceback
+                traceback.print_exc()
+            return 1
 
     if not args.host:
         print("Error: --host is required (or set EVE_NG_HOST env var)", file=sys.stderr)
@@ -205,6 +250,67 @@ def _dispatch(args: argparse.Namespace, client: EveNgClient) -> int:
     elif cmd == "status":
         status = client.status()
         print(json.dumps(status, indent=2))
+
+    return 0
+
+
+def _dispatch_cluster(args: argparse.Namespace) -> int:
+    """Handle commands that operate on a cluster of EVE-NG hosts."""
+    cmd = args.command
+
+    if cmd == "cluster-status":
+        cluster = load_cluster_config(args.cluster_config)
+        print(f"Cluster: {len(cluster.hosts)} hosts, "
+              f"tunnel_mode={cluster.tunnel_mode}, pnet={cluster.tunnel_pnet}")
+        print()
+
+        for host_info in cluster.hosts:
+            client = create_client(host_info)
+            try:
+                client.login()
+                probe_host_resources(client, host_info)
+                status = client.status()
+                client.logout()
+                print(f"  {host_info.name} ({host_info.host})")
+                print(f"    CPU: {host_info.available_cpu} available"
+                      f" / {host_info.max_cpu} max")
+                print(f"    RAM: {host_info.available_ram}MB available"
+                      f" / {host_info.max_ram}MB max")
+                print(f"    Tags: {host_info.tags or '(none)'}")
+                if isinstance(status, dict):
+                    ver = status.get("version", "unknown")
+                    print(f"    Version: {ver}")
+                print()
+            except Exception as exc:
+                print(f"  {host_info.name} ({host_info.host}): UNREACHABLE — {exc}")
+                print()
+
+    elif cmd == "deploy":
+        cluster = load_cluster_config(args.cluster)
+        deployer = DistributedDeployer(
+            cluster,
+            ssh_username=getattr(args, "ssh_user", "root"),
+            ssh_password=getattr(args, "ssh_pass", None),
+            ssh_key_file=getattr(args, "ssh_key", None),
+        )
+        summary = deployer.deploy(
+            args.topology,
+            strategy=args.strategy,
+            start_nodes=args.start,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(summary, indent=2, default=str))
+
+    elif cmd == "teardown":
+        cluster = load_cluster_config(args.cluster)
+        deployer = DistributedDeployer(
+            cluster,
+            ssh_username=getattr(args, "ssh_user", "root"),
+            ssh_password=getattr(args, "ssh_pass", None),
+            ssh_key_file=getattr(args, "ssh_key", None),
+        )
+        summary = deployer.teardown(args.lab_path)
+        print(json.dumps(summary, indent=2, default=str))
 
     return 0
 

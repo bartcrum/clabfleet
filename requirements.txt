@@ -1,6 +1,7 @@
 requests>=2.28
 pyyaml>=6.0
 urllib3>=1.26
+paramiko>=3.0
 
 # Optional — for live network export
 # napalm>=4.0
