@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 #     cpu: 1
 #     console: "telnet"             # telnet | vnc
 #     icon: "Router.png"
-#     config: "Exported"            # "Exported" | "None"
+#     type: "qemu"                  # qemu | iol | dynamips | docker
+#     config: "Saved"               # "Saved" | "Unconfigured"
 #     startup_config: |             # inline config text (optional)
 #       hostname R1
 #       ...
@@ -160,7 +161,8 @@ def _validate_topology(topo: dict, base_dir: Path) -> None:
         node.setdefault("ethernet", 2)
         node.setdefault("serial", 0)
         node.setdefault("console", "telnet")
-        node.setdefault("config", "Exported" if node.get("startup_config") else "None")
+        node.setdefault("config", "Saved" if node.get("startup_config") else "Unconfigured")
+        node.setdefault("type", "qemu")  # qemu | iol | dynamips | docker
 
     # --- Networks ---
     networks = topo.get("networks", [])

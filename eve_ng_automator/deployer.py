@@ -152,16 +152,17 @@ class TopologyDeployer:
         logger.info("Creating node '%s' (template=%s)", name, node_def["template"])
 
         payload = {
+            "type": node_def.get("type", "qemu"),
             "template": node_def["template"],
             "name": name,
             "ethernet": node_def.get("ethernet", 2),
             "serial": node_def.get("serial", 0),
             "console": node_def.get("console", "telnet"),
-            "config": node_def.get("config", "None"),
+            "config": node_def.get("config", "Unconfigured"),
         }
 
         # Optional fields — only include if specified
-        for key in ("image", "ram", "cpu", "icon", "left", "top"):
+        for key in ("image", "ram", "cpu", "icon", "left", "top", "delay"):
             if key in node_def:
                 payload[key] = node_def[key]
 

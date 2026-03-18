@@ -155,6 +155,7 @@ class EveNgClient:
         """Create a node in a lab.
 
         ``node_data`` keys (common):
+            - type (str):      "qemu" | "iol" | "dynamips" | "docker"
             - template (str):  e.g. "vios", "csr1000v", "veos", "nxosv9k"
             - name (str):      display name
             - image (str):     image filename from /api/list/templates/<template>
@@ -162,12 +163,12 @@ class EveNgClient:
             - serial (int):    number of serial interfaces (optional)
             - ram (int):       RAM in MB (optional, uses template default)
             - cpu (int):       vCPU count (optional)
-            - config (str):    "Exported" | "None" — startup config source
-            - left (int):      X position on canvas (optional)
-            - top (int):       Y position on canvas (optional)
+            - config (str):    "Saved" | "Unconfigured"
+            - left (int|str):  X position on canvas (optional, int or "35%")
+            - top (int|str):   Y position on canvas (optional, int or "25%")
             - icon (str):      icon name (optional)
             - console (str):   "telnet" | "vnc" (optional)
-            - startup_config (str): base64/text of startup config (optional)
+            - delay (int):     boot delay in seconds (optional)
         """
         return self._post(f"/labs/{_norm_lab(lab_path)}/nodes", json=node_data)
 
@@ -194,10 +195,12 @@ class EveNgClient:
         return self._get(f"/labs/{_norm_lab(lab_path)}/nodes/{node_id}/wipe")
 
     def export_node_config(self, lab_path: str, node_id: int) -> dict:
-        """Export startup config from a running node."""
-        return self._put(
-            f"/labs/{_norm_lab(lab_path)}/nodes/{node_id}/export", json={}
-        )
+        """Export startup config from a running node into the lab file."""
+        return self._get(f"/labs/{_norm_lab(lab_path)}/nodes/{node_id}/export")
+
+    def export_all_configs(self, lab_path: str) -> dict:
+        """Export all running node configs into the lab file."""
+        return self._get(f"/labs/{_norm_lab(lab_path)}/nodes/export")
 
     def get_node_config(self, lab_path: str, node_id: int) -> dict:
         """Retrieve the saved startup config for a node."""
