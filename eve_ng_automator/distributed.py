@@ -84,6 +84,12 @@ class DistributedDeployer:
         networks = topo.get("networks", [])
         links = topo.get("links", [])
 
+        # --- Pro mode: deploy the full topology to the cluster master ---
+        # EVE-NG Pro handles node placement and inter-host networking
+        # internally, so we treat the cluster master as a single target.
+        if self.cluster.is_pro:
+            return self._deploy_pro(topo, start_nodes=start_nodes, dry_run=dry_run)
+
         summary = {
             "lab": lab["name"],
             "strategy": strategy,
@@ -210,6 +216,11 @@ class DistributedDeployer:
         """
         topo = load_topology(topology_file)
         lab = topo["lab"]
+
+        # Pro mode: teardown on the cluster master only
+        if self.cluster.is_pro:
+            return self._teardown_pro(topo)
+
         summary = {"lab": lab["name"], "hosts": {}}
 
         # Connect to all hosts
@@ -258,6 +269,81 @@ class DistributedDeployer:
 
         self._logout_all()
         return summary
+
+    def _deploy_pro(
+        self, topo: dict, start_nodes: bool, dry_run: bool
+    ) -> dict:
+        """Deploy to EVE-NG Pro cluster master.
+
+        Pro's native clustering handles node distribution and inter-host
+        networking automatically, so we deploy the full topology as-is
+        to the cluster master (first host in the inventory).
+        """
+        master = self.cluster.master
+        logger.info(
+            "Pro mode: deploying full topology to cluster master '%s' (%s)",
+            master.name, master.host,
+        )
+
+        client = create_client(master)
+        try:
+            client.login()
+        except Exception as exc:
+            raise DistributedDeploymentError(
+                f"Cannot connect to cluster master {master.name} "
+                f"({master.host}): {exc}"
+            ) from exc
+
+        deployer = TopologyDeployer(client)
+        try:
+            result = deployer._deploy(topo, start_nodes=start_nodes, dry_run=dry_run)
+        except DeploymentError as exc:
+            raise DistributedDeploymentError(
+                f"Deployment to cluster master failed: {exc}"
+            ) from exc
+        finally:
+            try:
+                client.logout()
+            except Exception:
+                pass
+
+        return {
+            "lab": topo["lab"]["name"],
+            "edition": "pro",
+            "master": master.name,
+            "hosts": {master.name: result},
+            "placement": "managed by EVE-NG Pro cluster",
+            "tunnels": [],
+        }
+
+    def _teardown_pro(self, topo: dict) -> dict:
+        """Tear down a lab on EVE-NG Pro cluster master."""
+        master = self.cluster.master
+        lab = topo["lab"]
+        lab_folder = lab.get("path", "/")
+        lab_path = f"{lab_folder.rstrip('/')}/{lab['name']}"
+
+        logger.info(
+            "Pro mode: tearing down lab '%s' on cluster master '%s'",
+            lab_path, master.name,
+        )
+
+        client = create_client(master)
+        try:
+            client.login()
+            result = teardown_lab(client, lab_path)
+            client.logout()
+        except Exception as exc:
+            raise DistributedDeploymentError(
+                f"Teardown on cluster master failed: {exc}"
+            ) from exc
+
+        return {
+            "lab": lab["name"],
+            "edition": "pro",
+            "master": master.name,
+            "hosts": {master.name: result},
+        }
 
     def _split_topology(self, topo: dict) -> dict[str, dict]:
         """Split a topology into per-host sub-topologies.

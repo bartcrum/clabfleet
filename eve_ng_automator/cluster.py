@@ -8,9 +8,10 @@ cloud (pnet) networks.
 Cluster inventory YAML format::
 
     cluster:
-      tunnel_mode: "gre"          # gre | vxlan
-      tunnel_pnet: "pnet9"        # which cloud interface to use for tunnels
-      tunnel_subnet: "172.16.255.0/24"  # point-to-point tunnel IPs
+      edition: "pro"              # "pro" | "community" (default: community)
+      tunnel_mode: "gre"          # gre | vxlan (community only)
+      tunnel_pnet: "pnet9"        # which cloud interface to use for tunnels (community only)
+      tunnel_subnet: "172.16.255.0/24"  # point-to-point tunnel IPs (community only)
 
     hosts:
       - name: "eve-1"
@@ -98,9 +99,19 @@ class HostInfo:
 class ClusterConfig:
     """Parsed cluster inventory."""
     hosts: list[HostInfo]
-    tunnel_mode: str = "gre"        # gre | vxlan
-    tunnel_pnet: str = "pnet9"      # cloud network for tunnel traffic
-    tunnel_subnet: str = "172.16.255.0/24"
+    edition: str = "community"      # "pro" | "community"
+    tunnel_mode: str = "gre"        # gre | vxlan (community only)
+    tunnel_pnet: str = "pnet9"      # cloud network for tunnel traffic (community only)
+    tunnel_subnet: str = "172.16.255.0/24"  # (community only)
+
+    @property
+    def is_pro(self) -> bool:
+        return self.edition.lower() == "pro"
+
+    @property
+    def master(self) -> "HostInfo":
+        """The cluster master (first host). Used in Pro mode."""
+        return self.hosts[0]
 
 
 def load_cluster_config(file_path: str | Path) -> ClusterConfig:
@@ -144,8 +155,15 @@ def load_cluster_config(file_path: str | Path) -> ClusterConfig:
             tags=h.get("tags", []),
         ))
 
+    edition = cluster_section.get("edition", "community")
+    if edition not in ("pro", "community"):
+        raise ClusterConfigError(
+            f"Invalid edition '{edition}' — must be 'pro' or 'community'"
+        )
+
     return ClusterConfig(
         hosts=hosts,
+        edition=edition,
         tunnel_mode=cluster_section.get("tunnel_mode", "gre"),
         tunnel_pnet=cluster_section.get("tunnel_pnet", "pnet9"),
         tunnel_subnet=cluster_section.get("tunnel_subnet", "172.16.255.0/24"),

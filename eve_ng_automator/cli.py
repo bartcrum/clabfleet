@@ -260,8 +260,11 @@ def _dispatch_cluster(args: argparse.Namespace) -> int:
 
     if cmd == "cluster-status":
         cluster = load_cluster_config(args.cluster_config)
-        print(f"Cluster: {len(cluster.hosts)} hosts, "
-              f"tunnel_mode={cluster.tunnel_mode}, pnet={cluster.tunnel_pnet}")
+        print(f"Cluster: {len(cluster.hosts)} hosts, edition={cluster.edition}")
+        if cluster.is_pro:
+            print(f"  Mode: EVE-NG Pro (native clustering via master '{cluster.master.name}')")
+        else:
+            print(f"  Mode: Community (DIY tunnels: {cluster.tunnel_mode}, pnet={cluster.tunnel_pnet})")
         print()
 
         for host_info in cluster.hosts:

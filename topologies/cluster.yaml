@@ -11,9 +11,10 @@
 #   eve-ng-automator cluster-status topologies/cluster.yaml
 
 cluster:
-  tunnel_mode: "gre"              # gre | vxlan
-  tunnel_pnet: "pnet9"            # cloud interface used for inter-host tunnels
-  tunnel_subnet: "172.16.255.0/24"
+  edition: "pro"                  # "pro" (native clustering) | "community" (DIY tunnels)
+  tunnel_mode: "gre"              # gre | vxlan — only used when edition is "community"
+  tunnel_pnet: "pnet9"            # cloud interface for inter-host tunnels (community only)
+  tunnel_subnet: "172.16.255.0/24"  # (community only)
 
 hosts:
   - name: "eve-1"
