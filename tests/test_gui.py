@@ -1,0 +1,190 @@
+import asyncio
+import time
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("aiohttp")
+
+from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
+
+from clab_automator.cluster import ClusterConfig, HostInfo  # noqa: E402
+from clab_automator.gui import server, state  # noqa: E402
+from clab_automator.gui.state import (  # noqa: E402
+    JobManager,
+    Workspace,
+    access_modes,
+    find_topologies,
+    parse_inspect,
+    terminal_command,
+    topology_view,
+)
+from clab_automator.topology import topology_from_dict  # noqa: E402
+
+TOPO = """\
+name: t
+topology:
+  nodes:
+    a: {kind: linux, image: alpine}
+    b: {kind: linux, image: alpine}
+"""
+
+
+def test_find_topologies_skips_lab_and_hidden_dirs(tmp_path):
+    (tmp_path / "labs").mkdir()
+    (tmp_path / "labs" / "one.clab.yml").write_text(TOPO)
+    (tmp_path / "two.clab.yaml").write_text(TOPO)
+    for skipped in ("clab-t", ".venv", ".git", "node_modules"):
+        (tmp_path / skipped).mkdir()
+        (tmp_path / skipped / "x.clab.yml").write_text(TOPO)
+    (tmp_path / "not-a-topology.yml").write_text(TOPO)
+
+    assert sorted(find_topologies([tmp_path])) == ["labs/one.clab.yml", "two.clab.yaml"]
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "three.clab.yml").write_text(TOPO)
+    ids = find_topologies([tmp_path / "labs", other])
+    assert sorted(ids) == ["labs/one.clab.yml", "other/three.clab.yml"]
+
+
+def test_topology_view_links_and_special_endpoints():
+    topo = topology_from_dict({
+        "name": "t",
+        "topology": {
+            "nodes": {
+                "s1": {"kind": "arista_ceos", "labels": {"lab.host": "h1", "graph-posX": "10", "graph-posY": "20"}},
+                "l1": {"kind": "linux"},
+            },
+            "links": [
+                {"endpoints": ["s1:eth1", "l1:eth1"]},
+                {"endpoints": ["l1:eth2", "host:l1-eth2"]},
+                {"type": "dummy", "endpoint": {"node": "s1", "interface": "eth9"}},
+            ],
+        },
+    })
+    view = topology_view(topo)
+    s1 = view["nodes"][0]
+    assert s1["host_pin"] == "h1"
+    assert s1["pos"] == [10.0, 20.0]
+    assert s1["modes"] == ["cli", "shell", "ssh"]
+    assert [(l["a"], l["b"]) for l in view["links"]] == [
+        ({"node": "s1", "iface": "eth1"}, {"node": "l1", "iface": "eth1"}),
+        ({"node": "l1", "iface": "eth2"}, {"special": "host", "iface": "l1-eth2"}),
+        ({"node": "s1", "iface": "eth9"}, {"special": "dummy", "iface": ""}),
+    ]
+
+
+def test_parse_inspect_details():
+    data = {"lab1": [{
+        "Names": ["clab-lab1-r1"],
+        "Labels": {"containerlab": "lab1", "clab-node-name": "r1", "clab-node-kind": "arista_ceos",
+                   "clab-topo-file": "/x/lab1.clab.yml"},
+        "State": "running", "Status": "Up 5 minutes", "Image": "ceos:4.35.6M",
+        "NetworkSettings": {"IPv4addr": "172.20.20.2"},
+    }]}
+    assert parse_inspect(data, "h1") == [{
+        "lab": "lab1", "node": "r1", "container": "clab-lab1-r1", "kind": "arista_ceos",
+        "image": "ceos:4.35.6M", "state": "running", "status": "Up 5 minutes",
+        "ipv4": "172.20.20.2", "topo_file": "/x/lab1.clab.yml", "host": "h1",
+    }]
+    assert parse_inspect({}, "h1") == []
+
+
+def test_access_modes_and_commands():
+    assert access_modes("arista_ceos") == ["cli", "shell", "ssh"]
+    assert access_modes("cisco_iol") == ["ssh", "shell"]
+    assert access_modes("linux") == ["shell", "ssh"]
+    assert access_modes("bridge") == []
+    assert terminal_command("cli", "arista_ceos", "c1", "") == ["docker", "exec", "-it", "c1", "Cli"]
+    assert terminal_command("shell", "linux", "c1", "")[:4] == ["docker", "exec", "-it", "c1"]
+    assert terminal_command("ssh", "cisco_iol", "c1", "172.20.20.3")[-1] == "admin@172.20.20.3"
+    with pytest.raises(ValueError):
+        terminal_command("cli", "linux", "c1", "")
+    with pytest.raises(ValueError):
+        terminal_command("ssh", "linux", "c1", "")
+
+
+def _workspace(tmp_path):
+    (tmp_path / "t.clab.yml").write_text(TOPO)
+    return Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+
+
+def test_job_manager_streams_output_and_blocks_concurrent_jobs(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeDeployer:
+        def __init__(self, cluster, on_output=None, interactive_sudo=True):
+            assert interactive_sudo is False
+            self.on_output = on_output
+
+        def deploy(self, path, reconfigure=False):
+            calls.append(("deploy", Path(path).name, reconfigure))
+            self.on_output("\x1b[1mINFO\x1b[0m Creating container")
+            time.sleep(0.2)
+            return {"hosts": {"localhost": {"status": "deployed"}}}
+
+        def destroy(self, path):
+            return {"hosts": {"localhost": {"error": "boom"}}}
+
+    monkeypatch.setattr(state, "LabDeployer", FakeDeployer)
+    ws = _workspace(tmp_path)
+    ws.topologies()
+    jobs = JobManager(ws)
+
+    job = jobs.start("redeploy", "t.clab.yml")
+    with pytest.raises(RuntimeError, match="Another job"):
+        jobs.start("destroy", "t.clab.yml")
+    for _ in range(50):
+        if job.status != "running":
+            break
+        time.sleep(0.05)
+    assert job.status == "ok"
+    assert calls == [("deploy", "t.clab.yml", True)]
+    assert "INFO Creating container" in job.lines  # ANSI codes stripped
+
+    job2 = jobs.start("destroy", "t.clab.yml")
+    for _ in range(50):
+        if job2.status != "running":
+            break
+        time.sleep(0.05)
+    assert job2.status == "error"
+    assert "✗ localhost: boom" in job2.lines
+
+    with pytest.raises(ValueError):
+        jobs.start("format-disk", "t.clab.yml")
+    with pytest.raises(KeyError):
+        jobs.start("deploy", "../../etc/passwd")
+
+
+def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
+    ws = _workspace(tmp_path)
+    monkeypatch.setattr(Workspace, "runtime", lambda self: [])
+
+    async def scenario():
+        app = server.create_app(ws, "secret-token")
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.get("/api/state")).status == 401
+            assert (await client.get("/")).status == 401
+            assert (await client.get("/?token=wrong", allow_redirects=False)).status == 401
+
+            resp = await client.get("/?token=secret-token", allow_redirects=False)
+            assert resp.status == 302
+            assert "SameSite=Strict" in resp.headers["Set-Cookie"]
+
+            resp = await client.get("/api/state")
+            assert resp.status == 200
+            body = await resp.json()
+            assert [t["id"] for t in body["topologies"]] == ["t.clab.yml"]
+
+            assert (await client.get("/static/app.js")).status == 200
+            resp = await client.post("/api/jobs", json={"action": "save", "topology": "t.clab.yml"},
+                                     headers={"Origin": "http://evil.example"})
+            assert resp.status == 403
+            resp = await client.post("/api/jobs", json={"action": "nope", "topology": "t.clab.yml"})
+            assert resp.status == 400
+            resp = await client.get("/api/topologies/t.clab.yml")
+            assert (await resp.json())["nodes"][0]["name"] == "a"
+            assert (await client.get("/api/topologies/missing.clab.yml")).status == 404
+
+    asyncio.run(scenario())

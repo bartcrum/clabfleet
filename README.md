@@ -21,6 +21,9 @@ deploys with plain `containerlab deploy`.
   running configs and LLDP neighbours, writes a matching containerlab topology
 - **Dry-run** — see the placement plan and the per-host topology files
   without deploying
+- **Web GUI** — browse topologies, see live node state on a diagram,
+  deploy/destroy with live output, and open CLI/shell/SSH terminals to nodes
+  in the browser
 
 ## Requirements
 
@@ -67,6 +70,45 @@ clab-automator --sudo destroy topologies/spine_leaf.clab.yml
 The topology and every file it references (startup configs, licenses,
 bind-mount sources, env files) are copied to `~/clab-automator/<lab>/` on the
 host, and containerlab runs there. `destroy` removes that directory.
+
+## Web GUI
+
+```bash
+pip install -e ".[gui]"
+
+cd ~/Work/lab-automation
+clab-automator --sudo gui                     # this machine
+clab-automator gui --cluster topologies/cluster.yaml   # all cluster hosts
+```
+
+It opens your browser at a `http://localhost:8650/?token=...` link (also
+printed in the terminal). Stop it with Ctrl+C.
+
+- **Sidebar:** every `*.clab.yml` under the current directory (or each
+  `--dir`), with live state, plus any other labs running on your hosts
+- **Diagram:** nodes coloured by state, interface names on links, the host
+  each node runs on (multi-host), and cross-host VXLAN links highlighted.
+  Drag nodes to arrange them (positions are remembered per topology),
+  scroll to zoom, double-click a node to open its terminal
+- **Deploy / Redeploy / Save configs / Destroy** with containerlab's output
+  streamed into the Activity panel
+- **Terminals** in tabs at the bottom:
+  - **CLI**: the node's own CLI via `docker exec` (`Cli` on cEOS, `sr_cli`
+    on SR Linux, `cli` on cRPD)
+  - **Shell**: a shell inside the container
+  - **SSH**: `ssh` to the node's management IP. This is the CLI for VM-based
+    kinds such as Cisco IOL. It needs a login on the node: containerlab's
+    default configs create `admin`/`admin`, but your own `startup-config`
+    must include a user
+- Nodes on remote hosts are reached over the host's SSH connection, so the
+  SSH user there needs Docker access (the `docker` group)
+
+Security: terminals are shell access, so the GUI listens on `127.0.0.1`
+only and needs the random token from its start-up URL. Requests from other
+websites are refused. Use `--bind` with care.
+
+For the CLI and Shell buttons, your user must be able to run `docker`
+(member of the `docker` group, in a session started after you were added).
 
 ## Multi-host cluster deployment
 
@@ -225,7 +267,7 @@ See `topologies/live_devices_example.yaml` for the inventory format.
 | `CLAB_SSH_USER` | your SSH config | SSH username |
 | `CLAB_SSH_KEY` | SSH agent / defaults | SSH private key |
 | `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
-| `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable) |
+| `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
 
 ## Development
 
@@ -246,6 +288,11 @@ clab_automator/
   runner.py        # Run commands locally or over SSH
   exporter.py      # Build a topology from live devices (NAPALM)
   cli.py           # CLI entrypoint
+  gui/
+    server.py      # aiohttp app: API, auth, terminal websockets
+    state.py       # Topology discovery, running labs, deploy/destroy jobs
+    terminals.py   # Local pty and SSH-channel terminal sessions
+    static/        # Web UI (vanilla JS; xterm.js bundled in vendor/)
 topologies/        # Example topologies and cluster inventory
 tests/             # pytest suite
 ```
