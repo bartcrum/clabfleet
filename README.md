@@ -296,3 +296,7 @@ clab_automator/
 topologies/        # Example topologies and cluster inventory
 tests/             # pytest suite
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
