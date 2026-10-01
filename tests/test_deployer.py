@@ -84,6 +84,7 @@ def test_cluster_example_loads():
 def test_cli_cluster_dry_run_writes_host_files(tmp_path, monkeypatch, capsys):
     # No SSH in tests: use the inventory limits as-is, and another lab holds VNI 1000
     monkeypatch.setattr(deployer, "probe_host_resources", lambda runner, host: {})
+    monkeypatch.setattr(deployer, "inspect_all", lambda runner: {})
     monkeypatch.setattr(deployer, "scan_used_vnis",
                         lambda runner, host: {"other": {1000}} if host.name == "clab-2" else {})
 
@@ -197,3 +198,55 @@ def test_vni_scan_failure_is_not_fatal(monkeypatch, caplog):
     summary = LabDeployer(cluster).deploy("t.clab.yml", dry_run=True)
     assert summary["vni_range"] == [1000, 1000]
     assert "Could not check VNIs in use on h1" in caplog.text
+
+
+def _running(lab, *nodes):
+    """inspect --all JSON for running containers: (name, kind[, labels])."""
+    items = []
+    for node in nodes:
+        name, kind, *extra = node
+        labels = {"containerlab": lab, "clab-node-name": name, "clab-node-kind": kind}
+        labels.update(extra[0] if extra else {})
+        items.append({"Names": [f"clab-{lab}-{name}"], "Labels": labels, "State": "running"})
+    return {lab: items}
+
+
+def test_running_usage_estimates_per_lab():
+    from clabfleet.nodes import running_usage
+    data = {**_running("dc", ("s1", "arista_ceos"), ("h1", "linux", {"lab.cpu": "2", "lab.ram": "100"})),
+            **_running("t", ("x", "arista_ceos"))}
+    data["dc"].append({"Labels": {"containerlab": "dc", "clab-node-kind": "linux"}, "State": "exited"})
+    assert running_usage(data, exclude_lab="t") == {"dc": {"nodes": 2, "cpu": 3.0, "ram": 2148}}
+    assert set(running_usage(data)) == {"dc", "t"}
+
+
+def test_placement_reserves_other_labs(monkeypatch):
+    # h1 has 4 vCPU but another lab's three cEOS nodes use 3 of them
+    busy = _running("dc", ("s1", "arista_ceos"), ("s2", "arista_ceos"), ("s3", "arista_ceos"))
+    inspected = {"h1": {**busy, **_running("t", ("a", "linux"))}, "h2": {}}
+    hosts = [HostInfo("h1", "10.0.0.1", max_cpu=4, max_ram=65536),
+             HostInfo("h2", "10.0.0.2", max_cpu=4)]
+    class Named:
+        def __init__(self, name):
+            self.name = name
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(deployer, "create_runner", lambda host: Named(host.name))
+    monkeypatch.setattr(deployer, "inspect_all", lambda runner: inspected[runner.name])
+    probed = {"h2": 8192}
+
+    def probe(runner, host):
+        if host.max_ram <= 0:
+            host.max_ram = probed[host.name]
+        return {}
+    monkeypatch.setattr(deployer, "probe_host_resources", probe)
+
+    dep = LabDeployer(ClusterConfig(hosts=hosts))
+    topo = topology_from_dict({"name": "t", "topology": {
+        "nodes": {"a": {"kind": "linux", "labels": {"lab.cpu": "2"}}}}})
+    plan = dep._plan(topo, "bin-pack")
+    assert plan.host_for_node("a") == "h2"  # only 1 vCPU left on h1
+    assert hosts[0].used_cpu == 3 and hosts[0].used_ram == 3 * 2048  # explicit max_ram
+    assert hosts[1].used_cpu == 2 and hosts[1].used_ram == 128  # just this lab's node

@@ -4,7 +4,6 @@ Everything here is synchronous; the web server calls it from worker threads.
 """
 
 import copy
-import json
 import logging
 import os
 import re
@@ -17,7 +16,7 @@ from typing import Optional
 
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
-from ..nodes import access_modes, parse_inspect
+from ..nodes import InspectError, access_modes, inspect_all, parse_inspect
 from ..runner import Runner
 from ..topology import (
     LABEL_HOST,
@@ -209,15 +208,10 @@ class Workspace:
         for host in self.cluster.hosts:
             state = HostState(host.name)
             try:
-                result = self.runner(host).containerlab(
-                    ["inspect", "--all", "--details", "--format", "json"], check=False
-                )
-                if result.exit_code != 0:
-                    state.error = (result.stderr or result.stdout).strip()[-500:]
-                else:
-                    out = result.stdout.strip()
-                    state.containers = parse_inspect(json.loads(out) if out else {}, host.name)
-                    state.ok = True
+                state.containers = parse_inspect(inspect_all(self.runner(host)), host.name)
+                state.ok = True
+            except InspectError as exc:
+                state.error = str(exc)
             except Exception as exc:
                 state.error = str(exc)
                 self.drop_runner(host)  # reconnect next time

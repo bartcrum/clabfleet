@@ -4,7 +4,21 @@ Shared by the CLI (``clabfleet exec``, ``clabfleet validate``) and the GUI
 (terminals, node tables).
 """
 
-from .topology import KIND_ALIASES, KIND_RESOURCE_ESTIMATES
+import json
+
+from .topology import (
+    KIND_ALIASES,
+    KIND_RESOURCE_ESTIMATES,
+    LABEL_CPU,
+    LABEL_RAM,
+    kind_estimate,
+)
+
+INSPECT_ARGS = ["inspect", "--all", "--details", "--format", "json"]
+
+
+class InspectError(Exception):
+    """`containerlab inspect` failed on a host."""
 
 # Command that gives a node's native CLI via `docker exec` (interactive)
 KIND_CLI = {
@@ -103,3 +117,46 @@ def parse_inspect(data: dict, host_name: str) -> list[dict]:
                 "host": host_name,
             })
     return containers
+
+
+def inspect_all(runner) -> dict:
+    """Raw `containerlab inspect --all --details` JSON for a host ({} if no labs)."""
+    result = runner.containerlab(INSPECT_ARGS, check=False)
+    if result.exit_code != 0:
+        raise InspectError((result.stderr or result.stdout).strip()[-500:])
+    out = result.stdout.strip()
+    if not out:
+        return {}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return {}  # e.g. "no containers found" from older versions
+    return data if isinstance(data, dict) else {}
+
+
+def running_usage(data: dict, exclude_lab: str | None = None) -> dict[str, dict]:
+    """Estimated resources of running lab containers, per lab.
+
+    Uses a container's ``lab.cpu`` / ``lab.ram`` labels when it has them,
+    else the per-kind estimate. Returns {lab: {"nodes", "cpu", "ram"}}.
+    """
+    usage: dict[str, dict] = {}
+    for lab_name, items in (data or {}).items():
+        for c in items or []:
+            labels = c.get("Labels") or {}
+            lab = labels.get("containerlab", lab_name)
+            state = c.get("State") or c.get("state", "")
+            if lab == exclude_lab or state != "running":
+                continue
+            kind = labels.get("clab-node-kind") or c.get("kind", "")
+            cpu, ram = kind_estimate(kind)
+            try:
+                cpu = float(labels.get(LABEL_CPU, cpu))
+                ram = int(labels.get(LABEL_RAM, ram))
+            except (TypeError, ValueError):
+                pass
+            entry = usage.setdefault(lab, {"nodes": 0, "cpu": 0.0, "ram": 0})
+            entry["nodes"] += 1
+            entry["cpu"] += cpu
+            entry["ram"] += ram
+    return usage

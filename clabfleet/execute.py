@@ -12,7 +12,6 @@ Each node is reached the best way its kind allows:
 """
 
 import fnmatch
-import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +27,8 @@ from .nodes import (
     KIND_SSH_USER,
     NO_SHELL_KINDS,
     SSH_CLI_KINDS,
+    InspectError,
+    inspect_all,
     parse_inspect,
 )
 from .runner import Runner, SSHRunner
@@ -169,19 +170,13 @@ class LabExecutor:
         errors: dict[str, str] = {}
         for host in hosts_for_lab(self.cluster, topo):
             try:
-                result = self._runner(host).containerlab(
-                    ["inspect", "--all", "--details", "--format", "json"], check=False
-                )
+                data = inspect_all(self._runner(host))
+            except InspectError as exc:
+                errors[host.name] = str(exc)
+                continue
             except Exception as exc:
                 errors[host.name] = f"unreachable: {exc}"
                 continue
-            if result.exit_code != 0:
-                errors[host.name] = (result.stderr or result.stdout).strip()[-500:]
-                continue
-            try:
-                data = json.loads(result.stdout) if result.stdout.strip() else {}
-            except json.JSONDecodeError:
-                data = {}  # e.g. "no containers found"
             for c in parse_inspect(data, host.name):
                 if c["lab"] == topo.name:
                     found[c["node"]] = c

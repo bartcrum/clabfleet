@@ -47,6 +47,7 @@ from .cluster import (
     create_runner,
     probe_host_resources,
 )
+from .nodes import inspect_all, running_usage
 from .placement import NodePlacement, PlacementError, PlacementPlan, compute_placement
 from .runner import CommandError, OutputCallback, Runner
 from .topology import Topology, dump_yaml, load_topology, topology_from_dict
@@ -263,12 +264,16 @@ class LabDeployer:
 
         logger.info("Probing %d cluster hosts", len(self.cluster.hosts))
         for host in self.cluster.hosts:
+            # A RAM budget from the inventory is for labs in total; a probed
+            # one (MemAvailable) already excludes what running labs use
+            explicit_ram = host.max_ram > 0
             try:
                 probe_host_resources(self._runner(host), host)
             except Exception as exc:
                 raise DeploymentError(
                     f"Host {host.name} ({host.host}) unreachable: {exc}"
                 ) from exc
+            self._reserve_running_labs(host, topo.name, reserve_ram=explicit_ram)
 
         logger.info("Computing placement with strategy '%s'", strategy)
         try:
@@ -280,6 +285,24 @@ class LabDeployer:
             )
         except PlacementError as exc:
             raise DeploymentError(f"Placement failed: {exc}") from exc
+
+    def _reserve_running_labs(self, host: HostInfo, lab: str, reserve_ram: bool) -> None:
+        """Reserve the estimated CPU (and RAM) of other labs running on a host."""
+        try:
+            usage = running_usage(inspect_all(self._runner(host)), exclude_lab=lab)
+        except Exception as exc:
+            logger.warning("Could not list running labs on %s (%s); placement "
+                           "ignores them", host.name, exc)
+            return
+        if not usage:
+            return
+        cpu = sum(u["cpu"] for u in usage.values())
+        ram = sum(u["ram"] for u in usage.values()) if reserve_ram else 0
+        host.reserve(cpu, ram)
+        logger.info(
+            "Host %s: running labs %s reserve %.1f vCPU%s", host.name,
+            ", ".join(sorted(usage)), cpu, f" / {ram}MB" if reserve_ram else "",
+        )
 
     def _allocate_vnis(self, topo: Topology, count: int) -> int:
         """First VNI of a free block of ``count`` VNIs for this lab."""

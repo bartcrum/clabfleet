@@ -36,6 +36,7 @@ from .cluster import (
 )
 from .deployer import LabDeployer
 from .execute import LabExecutor
+from .nodes import inspect_all, running_usage
 from .exporter import export_from_live_network
 from .topology import dump_yaml
 from .validate import validate_topology
@@ -354,6 +355,15 @@ def _status(cluster: ClusterConfig) -> int:
         print(f"  RAM:  {facts.get('MemAvailable_mb', '?')}MB available"
               f" / {facts.get('MemTotal_mb', '?')}MB total"
               f" (placement limit {host.max_ram or 'unlimited'}MB)")
+        try:
+            with create_runner(host) as runner:
+                usage = running_usage(inspect_all(runner))
+        except Exception as exc:
+            print(f"  Labs: could not list ({exc})")
+        else:
+            for lab, u in sorted(usage.items()):
+                print(f"  Lab {lab}: {u['nodes']} running nodes, about "
+                      f"{u['cpu']:g} vCPU / {u['ram']}MB")
         if len(cluster.hosts) > 1:
             print(f"  VTEP: {host.vtep or 'NOT SET — set vtep_ip for cross-host links'}")
             print(f"  Tags: {', '.join(host.tags) or '(none)'}")

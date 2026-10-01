@@ -164,8 +164,7 @@ class Topology:
         """(vCPU, RAM MB) the placement engine should reserve for a node."""
         node = self.effective_node(name)
         labels = node["labels"]
-        kind = KIND_ALIASES.get(node["kind"], node["kind"])
-        est_cpu, est_ram = KIND_RESOURCE_ESTIMATES.get(kind, DEFAULT_RESOURCES)
+        est_cpu, est_ram = kind_estimate(node["kind"])
 
         if LABEL_CPU in labels:
             cpu = float(labels[LABEL_CPU])
@@ -250,6 +249,11 @@ class Topology:
 
     def to_yaml(self) -> str:
         return dump_yaml(self.data)
+
+
+def kind_estimate(kind: str) -> tuple[float, int]:
+    """Rough (vCPU, RAM MB) a node of this kind needs."""
+    return KIND_RESOURCE_ESTIMATES.get(KIND_ALIASES.get(kind, kind), DEFAULT_RESOURCES)
 
 
 def _relative_file(value, node_name: str) -> Optional[PurePosixPath]:

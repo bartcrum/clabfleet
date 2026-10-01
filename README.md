@@ -283,6 +283,13 @@ topology:
 Without `lab.cpu`/`lab.ram`, placement uses the node's `cpu`/`memory`
 limits, then a per-kind estimate (e.g. cEOS 1 vCPU / 2 GB, IOL 0.5 / 512 MB).
 
+Labs already running on a host count against it. Their nodes are
+estimated the same way, from their `lab.cpu`/`lab.ram` labels or per-kind
+estimates, and that CPU is reserved before placing the new lab. Their RAM
+is reserved only when the inventory sets `max_ram`: a probed host's
+`MemAvailable` already reflects what running labs use. `clabfleet status`
+lists the running labs on each host with these estimates.
+
 ### Placement strategies
 
 | Strategy | Behaviour |
