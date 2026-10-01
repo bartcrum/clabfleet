@@ -1,0 +1,252 @@
+# Large campus network — designed for multi-host deployment.
+#
+# Cisco IOL routers (core, distribution) and IOL-L2 switches (access).
+# Placement hints are node labels: lab.host pins a node to a cluster host,
+# lab.host-tags prefers hosts with matching tags. Nodes without hints are
+# placed automatically. Plain `containerlab deploy` ignores these labels,
+# so this file also deploys fine on a single host.
+#
+# Deploy:
+#   clab-automator deploy topologies/large_campus.clab.yml \
+#       --cluster topologies/cluster.yaml --strategy bin-pack -v
+#
+# Preview placement and the per-host topology files:
+#   clab-automator deploy topologies/large_campus.clab.yml \
+#       --cluster topologies/cluster.yaml --dry-run --output-dir /tmp/campus
+#
+# Destroy:
+#   clab-automator destroy topologies/large_campus.clab.yml \
+#       --cluster topologies/cluster.yaml
+
+name: campus-network
+
+topology:
+  kinds:
+    cisco_iol:
+      image: vrnetlab/cisco_iol:17.12.01
+
+  nodes:
+    # === CORE LAYER (pinned to clab-1) ===
+    Core-1:
+      kind: cisco_iol
+      startup-config: |
+        hostname Core-1
+        !
+        interface Loopback0
+         ip address 10.255.0.1 255.255.255.255
+        !
+        interface Ethernet0/1
+         description to-Core-2
+         ip address 10.0.0.0 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet0/2
+         description to-Dist-1
+         ip address 10.0.1.0 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet0/3
+         description to-Dist-2
+         ip address 10.0.1.2 255.255.255.254
+         no shutdown
+        !
+        router ospf 1
+         router-id 10.255.0.1
+         network 10.0.0.0 0.0.255.255 area 0
+      labels:
+        lab.host: clab-1
+
+    Core-2:
+      kind: cisco_iol
+      startup-config: |
+        hostname Core-2
+        !
+        interface Loopback0
+         ip address 10.255.0.2 255.255.255.255
+        !
+        interface Ethernet0/1
+         description to-Core-1
+         ip address 10.0.0.1 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet0/2
+         description to-Dist-1
+         ip address 10.0.1.4 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet0/3
+         description to-Dist-2
+         ip address 10.0.1.6 255.255.255.254
+         no shutdown
+        !
+        router ospf 1
+         router-id 10.255.0.2
+         network 10.0.0.0 0.0.255.255 area 0
+      labels:
+        lab.host: clab-1
+
+    # === DISTRIBUTION LAYER (tag affinity) ===
+    Dist-1:
+      kind: cisco_iol
+      startup-config: |
+        hostname Dist-1
+        !
+        interface Loopback0
+         ip address 10.255.1.1 255.255.255.255
+        !
+        interface Ethernet0/1
+         description to-Core-1
+         ip address 10.0.1.1 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet0/2
+         description to-Core-2
+         ip address 10.0.1.5 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet0/3
+         description to-Access-1
+         ip address 10.0.2.0 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet1/0
+         description to-Access-2
+         ip address 10.0.2.2 255.255.255.254
+         no shutdown
+        !
+        router ospf 1
+         router-id 10.255.1.1
+         network 10.0.0.0 0.0.255.255 area 0
+      labels:
+        lab.host-tags: distribution
+
+    Dist-2:
+      kind: cisco_iol
+      startup-config: |
+        hostname Dist-2
+        !
+        interface Loopback0
+         ip address 10.255.1.2 255.255.255.255
+        !
+        interface Ethernet0/1
+         description to-Core-1
+         ip address 10.0.1.3 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet0/2
+         description to-Core-2
+         ip address 10.0.1.7 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet0/3
+         description to-Access-3
+         ip address 10.0.2.4 255.255.255.254
+         no shutdown
+        !
+        interface Ethernet1/0
+         description to-Access-4
+         ip address 10.0.2.6 255.255.255.254
+         no shutdown
+        !
+        router ospf 1
+         router-id 10.255.1.2
+         network 10.0.0.0 0.0.255.255 area 0
+      labels:
+        lab.host-tags: distribution
+
+    # === ACCESS LAYER (IOL-L2, tag affinity) ===
+    Access-1:
+      kind: cisco_iol
+      type: L2
+      image: vrnetlab/cisco_iol:L2-17.12.01
+      startup-config: |
+        hostname Access-1
+        !
+        interface Ethernet0/1
+         description to-Dist-1
+         no switchport
+         ip address 10.0.2.1 255.255.255.254
+         no shutdown
+        !
+        vlan 10
+         name Users
+        vlan 20
+         name VoIP
+      labels:
+        lab.host-tags: access
+
+    Access-2:
+      kind: cisco_iol
+      type: L2
+      image: vrnetlab/cisco_iol:L2-17.12.01
+      startup-config: |
+        hostname Access-2
+        !
+        interface Ethernet0/1
+         description to-Dist-1
+         no switchport
+         ip address 10.0.2.3 255.255.255.254
+         no shutdown
+        !
+        vlan 10
+         name Users
+        vlan 20
+         name VoIP
+      labels:
+        lab.host-tags: access
+
+    Access-3:
+      kind: cisco_iol
+      type: L2
+      image: vrnetlab/cisco_iol:L2-17.12.01
+      startup-config: |
+        hostname Access-3
+        !
+        interface Ethernet0/1
+         description to-Dist-2
+         no switchport
+         ip address 10.0.2.5 255.255.255.254
+         no shutdown
+        !
+        vlan 10
+         name Users
+        vlan 20
+         name VoIP
+      labels:
+        lab.host-tags: access
+
+    Access-4:
+      kind: cisco_iol
+      type: L2
+      image: vrnetlab/cisco_iol:L2-17.12.01
+      startup-config: |
+        hostname Access-4
+        !
+        interface Ethernet0/1
+         description to-Dist-2
+         no switchport
+         ip address 10.0.2.7 255.255.255.254
+         no shutdown
+        !
+        vlan 10
+         name Users
+        vlan 20
+         name VoIP
+      labels:
+        lab.host-tags: access
+
+  links:
+    # Core interconnect
+    - endpoints: ["Core-1:Ethernet0/1", "Core-2:Ethernet0/1"]
+
+    # Core to distribution
+    - endpoints: ["Core-1:Ethernet0/2", "Dist-1:Ethernet0/1"]
+    - endpoints: ["Core-1:Ethernet0/3", "Dist-2:Ethernet0/1"]
+    - endpoints: ["Core-2:Ethernet0/2", "Dist-1:Ethernet0/2"]
+    - endpoints: ["Core-2:Ethernet0/3", "Dist-2:Ethernet0/2"]
+
+    # Distribution to access
+    - endpoints: ["Dist-1:Ethernet0/3", "Access-1:Ethernet0/1"]
+    - endpoints: ["Dist-1:Ethernet1/0", "Access-2:Ethernet0/1"]
+    - endpoints: ["Dist-2:Ethernet0/3", "Access-3:Ethernet0/1"]
+    - endpoints: ["Dist-2:Ethernet1/0", "Access-4:Ethernet0/1"]

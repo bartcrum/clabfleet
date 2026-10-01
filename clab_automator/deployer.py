@@ -1,0 +1,385 @@
+"""Deploy, destroy, save and inspect containerlab labs on one or more hosts.
+
+Single host:
+  - Local:  ``containerlab`` runs directly against your topology file, so the
+    lab directory (``clab-<name>/``) is created next to it, exactly as if you
+    had run containerlab yourself.
+  - Remote: the topology and the files it references (startup configs,
+    licenses, bind sources) are copied to ``~/clab-automator/<lab>/`` on the
+    host over SSH and containerlab runs there.
+
+Multiple hosts (cluster):
+  1. Probe each host's CPU/RAM
+  2. Run the placement engine → decide which nodes go where
+  3. Split the topology into one sub-topology per host. Links between nodes
+     on different hosts become a pair of ``vxlan-stitch`` (or ``vxlan``)
+     links — one on each host, pointing at the other host's VTEP address,
+     sharing a unique VNI
+  4. Copy each sub-topology to its host and run ``containerlab deploy``
+
+containerlab creates and removes the VXLAN links itself, so ``destroy``
+only needs to run ``containerlab destroy`` on every host.
+"""
+
+import copy
+import json
+import logging
+from collections import defaultdict
+from pathlib import Path
+from typing import Optional
+
+from .cluster import (
+    ClusterConfig,
+    HostInfo,
+    create_runner,
+    probe_host_resources,
+)
+from .placement import NodePlacement, PlacementError, PlacementPlan, compute_placement
+from .runner import CommandError, Runner
+from .topology import Topology, dump_yaml, load_topology, topology_from_dict
+
+logger = logging.getLogger(__name__)
+
+
+class DeploymentError(Exception):
+    """Raised when a deployment step fails."""
+
+
+class LabDeployer:
+    """Run containerlab lifecycle commands across the hosts of a cluster.
+
+    A single-host setup is simply a cluster with one host.
+    """
+
+    def __init__(self, cluster: ClusterConfig):
+        if not cluster.hosts:
+            raise DeploymentError("No hosts configured")
+        self.cluster = cluster
+        self._runners: dict[str, Runner] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def deploy(
+        self,
+        topology_file: str | Path,
+        strategy: str = "bin-pack",
+        reconfigure: bool = False,
+        dry_run: bool = False,
+        output_dir: Optional[str | Path] = None,
+    ) -> dict:
+        """Deploy a topology.
+
+        Args:
+            topology_file: Path to a containerlab topology file.
+            strategy: Placement strategy for multi-host ("bin-pack", "spread", "resource").
+            reconfigure: Pass ``--reconfigure`` to containerlab (redeploy from scratch).
+            dry_run: Compute placement and per-host topologies without deploying.
+            output_dir: Also write the per-host topology files here.
+
+        Returns:
+            Summary dict with placement, cross-host links and per-host results.
+        """
+        topo = load_topology(topology_file)
+        summary: dict = {"lab": topo.name, "hosts": {}}
+
+        try:
+            plan = self._plan(topo, strategy)
+            host_topos, cross_links = split_topology(topo, plan, self.cluster)
+            summary["placement"] = plan.summary()["placements"]
+            summary["cross_host_links"] = cross_links
+
+            if output_dir:
+                summary["written"] = _write_host_topologies(
+                    topo, host_topos, Path(output_dir), multi=self._multi_host
+                )
+
+            if dry_run:
+                summary["dry_run"] = True
+                return summary
+
+            for host in self.cluster.hosts:
+                data = host_topos.get(host.name)
+                if data is None:
+                    continue
+                try:
+                    summary["hosts"][host.name] = self._deploy_on_host(
+                        host, topo, data, reconfigure
+                    )
+                except Exception as exc:
+                    logger.error("Deployment failed on %s: %s", host.name, exc)
+                    summary["hosts"][host.name] = {"error": str(exc)}
+        finally:
+            self._close_runners()
+
+        return summary
+
+    def destroy(self, topology_file: str | Path, cleanup: bool = True) -> dict:
+        """Destroy a lab on every host it may be deployed on.
+
+        Args:
+            cleanup: Remove the lab directory (and, for copied labs, the
+                uploaded topology and config files) as well.
+        """
+        topo = load_topology(topology_file)
+        summary: dict = {"lab": topo.name, "hosts": {}}
+        try:
+            for host in self.cluster.hosts:
+                summary["hosts"][host.name] = self._on_host(
+                    host, topo, "destroy", ["--cleanup"] if cleanup else []
+                )
+                if cleanup and not self._in_place(host, topo):
+                    result = summary["hosts"][host.name]
+                    if result.get("status") == "ok":
+                        self._runner(host).remove_tree(host.lab_dir(topo.name))
+        finally:
+            self._close_runners()
+        return summary
+
+    def save(self, topology_file: str | Path) -> dict:
+        """Save running configs of all nodes (``containerlab save``) on every host."""
+        topo = load_topology(topology_file)
+        summary: dict = {"lab": topo.name, "hosts": {}}
+        try:
+            for host in self.cluster.hosts:
+                summary["hosts"][host.name] = self._on_host(host, topo, "save", [])
+        finally:
+            self._close_runners()
+        return summary
+
+    def inspect(self, topology_file: Optional[str | Path] = None) -> dict:
+        """Show running containers for a lab (or all labs) on every host."""
+        topo = load_topology(topology_file) if topology_file else None
+        summary: dict = {"hosts": {}}
+        try:
+            for host in self.cluster.hosts:
+                if topo:
+                    result = self._on_host(
+                        host, topo, "inspect", ["--format", "json"], parse_json=True
+                    )
+                else:
+                    result = self._run_clab(
+                        host, ["inspect", "--all", "--format", "json"],
+                        cwd=None, parse_json=True,
+                    )
+                summary["hosts"][host.name] = result
+        finally:
+            self._close_runners()
+        return summary
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    @property
+    def _multi_host(self) -> bool:
+        return len(self.cluster.hosts) > 1
+
+    def _in_place(self, host: HostInfo, topo: Topology) -> bool:
+        """Single local host: run containerlab directly on the user's file."""
+        return not self._multi_host and host.is_local and topo.path is not None
+
+    def _plan(self, topo: Topology, strategy: str) -> PlacementPlan:
+        if not self._multi_host:
+            host = self.cluster.hosts[0]
+            plan = PlacementPlan()
+            for node in topo.placement_nodes():
+                plan.placements.append(
+                    NodePlacement(node["name"], host.name, node["cpu"], node["ram"])
+                )
+            return plan
+
+        logger.info("Probing %d cluster hosts", len(self.cluster.hosts))
+        for host in self.cluster.hosts:
+            try:
+                probe_host_resources(self._runner(host), host)
+            except Exception as exc:
+                raise DeploymentError(
+                    f"Host {host.name} ({host.host}) unreachable: {exc}"
+                ) from exc
+
+        logger.info("Computing placement with strategy '%s'", strategy)
+        try:
+            return compute_placement(
+                topo.placement_nodes(),
+                topo.link_memberships(),
+                self.cluster.hosts,
+                strategy,
+            )
+        except PlacementError as exc:
+            raise DeploymentError(f"Placement failed: {exc}") from exc
+
+    def _deploy_on_host(
+        self, host: HostInfo, topo: Topology, data: dict, reconfigure: bool
+    ) -> dict:
+        extra = ["--reconfigure"] if reconfigure else []
+        nodes = list(data["topology"]["nodes"])
+        runner = self._runner(host)
+
+        if self._in_place(host, topo):
+            logger.info("Deploying '%s' locally from %s", topo.name, topo.path)
+            self._run_clab(
+                host, ["deploy", "-t", topo.path.name, *extra],
+                cwd=str(topo.base_dir.resolve()), check=True,
+            )
+            return {"status": "deployed", "nodes": nodes,
+                    "lab_dir": str(topo.base_dir.resolve() / f"clab-{topo.name}")}
+
+        lab_dir = host.lab_dir(topo.name)
+        host_topo = topology_from_dict(data, base_dir=topo.base_dir)
+        logger.info("Copying '%s' (%d nodes) to %s:%s", topo.name, len(nodes), host.name, lab_dir)
+        runner.makedirs(lab_dir)
+        for rel in host_topo.referenced_files():
+            runner.put_file(topo.base_dir / rel, f"{lab_dir}/{rel.as_posix()}")
+        topo_file = f"{topo.name}.clab.yml"
+        runner.write_text(f"{lab_dir}/{topo_file}", dump_yaml(data))
+
+        logger.info("Running containerlab deploy on %s", host.name)
+        self._run_clab(host, ["deploy", "-t", topo_file, *extra], cwd=lab_dir, check=True)
+        return {"status": "deployed", "nodes": nodes, "lab_dir": lab_dir}
+
+    def _on_host(
+        self,
+        host: HostInfo,
+        topo: Topology,
+        command: str,
+        extra: list[str],
+        parse_json: bool = False,
+    ) -> dict:
+        """Run ``containerlab <command> -t <topo>`` wherever the lab lives on a host."""
+        if self._in_place(host, topo):
+            return self._run_clab(
+                host, [command, "-t", topo.path.name, *extra],
+                cwd=str(topo.base_dir.resolve()), parse_json=parse_json,
+            )
+
+        lab_dir = host.lab_dir(topo.name)
+        topo_file = f"{topo.name}.clab.yml"
+        try:
+            deployed = self._runner(host).exists(f"{lab_dir}/{topo_file}")
+        except Exception as exc:
+            return {"status": "error", "error": f"unreachable: {exc}"}
+        if not deployed:
+            return {"status": "not-deployed"}
+        return self._run_clab(
+            host, [command, "-t", topo_file, *extra], cwd=lab_dir, parse_json=parse_json
+        )
+
+    def _run_clab(
+        self,
+        host: HostInfo,
+        args: list[str],
+        cwd: Optional[str],
+        check: bool = False,
+        parse_json: bool = False,
+    ) -> dict:
+        try:
+            result = self._runner(host).containerlab(args, cwd=cwd, check=check)
+        except CommandError:
+            raise
+        except Exception as exc:
+            if check:
+                raise
+            return {"status": "error", "error": str(exc)}
+
+        if result.exit_code != 0:
+            return {"status": "error", "error": result.stderr.strip() or result.stdout.strip()}
+        out: dict = {"status": "ok"}
+        if parse_json:
+            try:
+                out["data"] = json.loads(result.stdout) if result.stdout.strip() else {}
+            except json.JSONDecodeError:
+                out["output"] = result.stdout
+        return out
+
+    def _runner(self, host: HostInfo) -> Runner:
+        if host.name not in self._runners:
+            self._runners[host.name] = create_runner(host)
+        return self._runners[host.name]
+
+    def _close_runners(self) -> None:
+        for runner in self._runners.values():
+            runner.close()
+        self._runners.clear()
+
+
+def split_topology(
+    topo: Topology, plan: PlacementPlan, cluster: ClusterConfig
+) -> tuple[dict[str, dict], list[dict]]:
+    """Split a topology into one containerlab topology per host.
+
+    Returns (host name → topology dict, list of cross-host link descriptions).
+    Hosts with no nodes are omitted.
+    """
+    hosts = {h.name: h for h in cluster.hosts}
+    host_links: dict[str, list[dict]] = defaultdict(list)
+    cross_links: list[dict] = []
+    vni = cluster.vni_base
+
+    for link in topo.links:
+        link_hosts = {plan.host_for_node(n) for n in link.node_names}
+        if len(link_hosts) == 1:
+            host_links[link_hosts.pop()].append(link.raw)
+            continue
+
+        # Two lab nodes on different hosts → one VXLAN link on each side
+        a, b = link.endpoints
+        host_a = hosts[plan.host_for_node(a.node)]
+        host_b = hosts[plan.host_for_node(b.node)]
+        for ep, local, remote in ((a, host_a, host_b), (b, host_b, host_a)):
+            if not remote.vtep:
+                raise DeploymentError(
+                    f"Link {a.node}:{a.interface} ↔ {b.node}:{b.interface} crosses "
+                    f"hosts, but host '{remote.name}' has no reachable address — "
+                    f"set 'vtep_ip' for it in the cluster config"
+                )
+            vx_link = {
+                "type": cluster.link_type,
+                "endpoint": {"node": ep.node, "interface": ep.interface, **ep.extra},
+                "remote": remote.vtep,
+                "vni": vni,
+                "dst-port": cluster.dst_port,
+            }
+            mtu = link.raw.get("mtu") or cluster.mtu
+            if mtu:
+                vx_link["mtu"] = mtu
+            for key in ("vars", "labels"):
+                if key in link.raw:
+                    vx_link[key] = copy.deepcopy(link.raw[key])
+            host_links[local.name].append(vx_link)
+
+        cross_links.append({
+            "a": f"{a.node}:{a.interface}",
+            "b": f"{b.node}:{b.interface}",
+            "hosts": [host_a.name, host_b.name],
+            "vni": vni,
+        })
+        vni += 1
+
+    host_topos: dict[str, dict] = {}
+    for host in cluster.hosts:
+        node_names = [n for n in topo.nodes if plan.host_for_node(n) == host.name]
+        if not node_names:
+            continue
+        data = copy.deepcopy(topo.data)
+        data["topology"]["nodes"] = {n: data["topology"]["nodes"][n] for n in node_names}
+        data["topology"]["links"] = host_links.get(host.name, [])
+        if not data["topology"]["links"]:
+            del data["topology"]["links"]
+        host_topos[host.name] = data
+
+    return host_topos, cross_links
+
+
+def _write_host_topologies(
+    topo: Topology, host_topos: dict[str, dict], output_dir: Path, multi: bool
+) -> list[str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for host_name, data in host_topos.items():
+        suffix = f".{host_name}" if multi else ""
+        path = output_dir / f"{topo.name}{suffix}.clab.yml"
+        path.write_text(dump_yaml(data))
+        written.append(str(path))
+    return written

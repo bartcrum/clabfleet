@@ -1,25 +1,23 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "eve-ng-automator"
-version = "0.1.0"
-description = "Automate EVE-NG lab topology deployment and teardown"
+name = "clab-automator"
+version = "0.2.0"
+description = "Automate containerlab lab deployment across one or many hosts"
 requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.28",
     "pyyaml>=6.0",
-    "urllib3>=1.26",
     "paramiko>=3.0",
 ]
 
 [project.optional-dependencies]
 napalm = ["napalm>=4.0"]
-dev = ["pytest>=7.0", "pytest-mock", "responses>=0.23"]
+dev = ["pytest>=7.0"]
 
 [project.scripts]
-eve-ng-automator = "eve_ng_automator.cli:main"
+clab-automator = "clab_automator.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["eve_ng_automator*"]
+include = ["clab_automator*"]

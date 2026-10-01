@@ -1,48 +1,46 @@
-# Cluster inventory — defines your pool of EVE-NG servers.
+# Cluster inventory — your pool of containerlab hosts.
 #
-# The automator will spread nodes across these hosts based on available
-# resources and placement strategy. Cross-host links are stitched with
-# GRE or VXLAN tunnels automatically.
+# Each host needs Docker and containerlab installed, plus SSH access for the
+# user below (key-based auth recommended). The automator spreads nodes
+# across the hosts based on available resources and placement strategy;
+# links between hosts become VXLAN links that containerlab sets up itself.
 #
 # Usage:
-#   eve-ng-automator deploy topologies/large_campus.yaml \
-#       --cluster topologies/cluster.yaml --strategy bin-pack --start
-#
-#   eve-ng-automator cluster-status topologies/cluster.yaml
+#   clab-automator status --cluster topologies/cluster.yaml
+#   clab-automator deploy topologies/large_campus.clab.yml \
+#       --cluster topologies/cluster.yaml --strategy bin-pack -v
 
 cluster:
-  edition: "pro"                  # "pro" (native clustering) | "community" (DIY tunnels)
-  tunnel_mode: "gre"              # gre | vxlan — only used when edition is "community"
-  tunnel_pnet: "pnet9"            # cloud interface for inter-host tunnels (community only)
-  tunnel_subnet: "172.16.255.0/24"  # (community only)
+  link_type: "vxlan-stitch"       # vxlan-stitch | vxlan
+  vni_base: 1000                  # each cross-host link gets the next VNI
+  dst_port: 14789                 # VXLAN UDP port — must be open between hosts
+  mtu: 1450                       # leave room for the 50-byte VXLAN overhead
 
 hosts:
-  - name: "eve-1"
-    host: "192.168.1.101"
-    username: "admin"
-    password: "eve"
-    port: 443
-    ssl: true
-    max_cpu: 16                   # vCPUs available for lab nodes
-    max_ram: 65536                # MB available for lab nodes
+  - name: "clab-1"
+    host: "192.168.1.101"         # SSH address; also the VXLAN endpoint
+    ssh_user: "netops"
+    ssh_key: "~/.ssh/id_ed25519"
+    sudo: true                    # needs passwordless sudo (or clab_admins group + sudo: false)
+    max_cpu: 16                   # vCPUs available for lab nodes (default: nproc)
+    max_ram: 65536                # MB available for lab nodes (default: MemAvailable)
     tags: ["core", "spine"]       # for affinity-based placement
 
-  - name: "eve-2"
+  - name: "clab-2"
     host: "192.168.1.102"
-    username: "admin"
-    password: "eve"
-    port: 443
-    ssl: true
+    ssh_user: "netops"
+    ssh_key: "~/.ssh/id_ed25519"
+    sudo: true
     max_cpu: 16
     max_ram: 65536
     tags: ["distribution", "leaf"]
 
-  - name: "eve-3"
+  - name: "clab-3"
     host: "192.168.1.103"
-    username: "admin"
-    password: "eve"
-    port: 443
-    ssl: true
+    vtep_ip: "10.10.10.3"         # use a dedicated underlay address for VXLAN
+    ssh_user: "netops"
+    ssh_key: "~/.ssh/id_ed25519"
+    sudo: true
     max_cpu: 8
     max_ram: 32768
     tags: ["access", "leaf"]

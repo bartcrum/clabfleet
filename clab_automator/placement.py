@@ -1,14 +1,14 @@
 """Node placement engine for multi-host deployments.
 
-Decides which EVE-NG host each node should run on, based on:
-  1. Explicit ``host:`` pinning in the topology YAML
-  2. Tag affinity (node ``host_tags`` matches host ``tags``)
+Decides which containerlab host each node should run on, based on:
+  1. Explicit pinning (``lab.host`` node label)
+  2. Tag affinity (``lab.host-tags`` label matches host ``tags``)
   3. Resource availability (CPU + RAM best-fit)
   4. Link locality — tries to keep connected nodes on the same host
-     to minimise cross-host tunnels
+     to minimise cross-host VXLAN links
 
 Strategies:
-  - "bin-pack":   fill each host before moving to the next (fewer tunnels)
+  - "bin-pack":   fill each host before moving to the next (fewer VXLAN links)
   - "spread":     distribute nodes evenly across hosts (balanced load)
   - "resource":   always pick the host with the most available resources
 """
@@ -71,8 +71,8 @@ def compute_placement(
     """Compute where each node should be placed.
 
     Args:
-        nodes: Node definitions from the topology YAML.
-        links: Expanded link definitions (node, interface, network).
+        nodes: Node summaries from Topology.placement_nodes().
+        links: Link memberships from Topology.link_memberships().
         hosts: Available cluster hosts (with current resource usage).
         strategy: "bin-pack" | "spread" | "resource".
 

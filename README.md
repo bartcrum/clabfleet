@@ -1,260 +1,251 @@
-# EVE-NG Lab Automation
+# containerlab Lab Automation
 
-Automate deployment and teardown of EVE-NG lab topologies. Define your network
-in YAML — or pull it from a running EVE-NG lab / live production network — and
-deploy it with a single command. Supports **multi-host clusters** for large
-topologies that exceed a single server's capacity.
+Deploy and tear down [containerlab](https://containerlab.dev) topologies on
+one host — or spread a large topology across a **cluster of hosts** with
+automatic, resource-aware placement and VXLAN links between hosts. You can
+also generate a topology from a live production network.
+
+Topology files are **standard containerlab files** (`*.clab.yml`). Anything
+containerlab accepts works here, and every file in `topologies/` still
+deploys with plain `containerlab deploy`.
 
 ## Features
 
-- **Deploy** topologies from version-controlled YAML files
-- **Multi-host clusters** — spread nodes across multiple EVE-NG servers with
-  automatic resource-aware placement and GRE/VXLAN tunnels for cross-host links
-- **Teardown** labs cleanly (stop, wipe, delete) — single or multi-host
-- **Export** existing EVE-NG labs to reusable YAML
+- **Deploy / destroy / save / inspect** labs locally or on a remote host over SSH
+- **Multi-host clusters** — spread nodes across several containerlab servers;
+  links between hosts become `vxlan-stitch` links that containerlab creates
+  and removes itself
+- **Placement strategies** — bin-pack, spread, or resource-based
+- **Host pinning & tag affinity** — via ordinary node `labels`
 - **Import from live network** — connects to real devices via NAPALM, pulls
-  running configs and LLDP/CDP neighbors, generates a matching topology
-- **Placement strategies** — bin-pack, spread, or resource-based node placement
-- **Host pinning & tag affinity** — control which nodes land on which servers
-- **Point-to-point link shorthand** — auto-creates bridge networks
-- **Startup configs** — inline in YAML or loaded from external files
-- **Dry-run mode** — validate topology and see placement plan without deploying
+  running configs and LLDP neighbours, writes a matching containerlab topology
+- **Dry-run** — see the placement plan and the per-host topology files
+  without deploying
+
+## Requirements
+
+- Python 3.10+
+- On every lab host: Docker and containerlab
+  (`bash -c "$(curl -sL https://get.containerlab.dev)"`)
+- Remote hosts: SSH access (key-based recommended). containerlab needs root,
+  so either set `sudo: true` (with passwordless sudo for containerlab) or
+  add the SSH user to the `clab_admins` group.
+- Node images (e.g. Cisco IOL, cEOS) are not public — build or import them on
+  each host that will run those nodes.
 
 ## Quick start
 
 ```bash
 pip install -e .
 
-# Set connection details (or use CLI flags)
-export EVE_NG_HOST=192.168.1.100
-export EVE_NG_USER=admin
-export EVE_NG_PASS=eve
+# Deploy on this machine (runs containerlab against the file in place;
+# the lab directory clab-<name>/ is created next to it)
+clab-automator --sudo deploy topologies/three_router_triangle.clab.yml
 
-# Deploy a topology
-eve-ng-automator -v deploy topologies/three_router_triangle.yaml --start
+# What's running?
+clab-automator --sudo inspect topologies/three_router_triangle.clab.yml
 
-# Check server status
-eve-ng-automator status
+# Save running configs into the lab directory
+clab-automator --sudo save topologies/three_router_triangle.clab.yml
 
-# List available templates/images
-eve-ng-automator list-templates
-
-# Export a running lab to YAML
-eve-ng-automator export /three-router-triangle -o exported.yaml
-
-# Tear it down
-eve-ng-automator teardown /three-router-triangle
+# Tear it down (add --keep-lab-dir to keep saved configs)
+clab-automator --sudo destroy topologies/three_router_triangle.clab.yml
 ```
+
+### Single remote host
+
+```bash
+export CLAB_HOST=192.168.1.101
+export CLAB_SSH_USER=netops
+export CLAB_SSH_KEY=~/.ssh/id_ed25519
+
+clab-automator status
+clab-automator --sudo deploy topologies/spine_leaf.clab.yml
+clab-automator --sudo destroy topologies/spine_leaf.clab.yml
+```
+
+The topology and every file it references (startup configs, licenses,
+bind-mount sources, env files) are copied to `~/clab-automator/<lab>/` on the
+host, and containerlab runs there. `destroy` removes that directory.
 
 ## Multi-host cluster deployment
 
-When a single EVE-NG server doesn't have enough CPU/RAM, spread the topology
-across multiple servers.
+When one server doesn't have enough CPU/RAM, spread the topology across
+several.
 
 ### 1. Define your cluster
-
-Create a cluster inventory listing your EVE-NG servers and their capacity:
 
 ```yaml
 # cluster.yaml
 cluster:
-  tunnel_mode: "gre"           # gre | vxlan
-  tunnel_pnet: "pnet9"         # cloud interface for inter-host tunnels
+  link_type: "vxlan-stitch"   # vxlan-stitch | vxlan
+  vni_base: 1000              # each cross-host link gets the next VNI
+  dst_port: 14789             # VXLAN UDP port — must be open between hosts
+  mtu: 1450                   # leave room for the 50-byte VXLAN overhead
 
 hosts:
-  - name: "eve-1"
-    host: "192.168.1.101"
-    username: "admin"
-    password: "eve"
-    max_cpu: 16
-    max_ram: 65536             # MB
+  - name: "clab-1"
+    host: "192.168.1.101"     # SSH address, also the VXLAN endpoint
+    ssh_user: "netops"
+    ssh_key: "~/.ssh/id_ed25519"
+    sudo: true
+    max_cpu: 16               # optional — defaults to nproc
+    max_ram: 65536            # optional, MB — defaults to MemAvailable
     tags: ["core"]
 
-  - name: "eve-2"
+  - name: "clab-2"
     host: "192.168.1.102"
-    username: "admin"
-    password: "eve"
-    max_cpu: 16
-    max_ram: 65536
-    tags: ["distribution"]
-
-  - name: "eve-3"
-    host: "192.168.1.103"
-    username: "admin"
-    password: "eve"
-    max_cpu: 8
-    max_ram: 32768
+    vtep_ip: "10.10.10.2"     # optional — separate underlay address for VXLAN
+    ssh_user: "netops"
+    ssh_key: "~/.ssh/id_ed25519"
+    sudo: true
     tags: ["access"]
 ```
 
-### 2. Check cluster status
+A host may be `localhost` (runs locally, no SSH). If any link crosses to or
+from it, set its `vtep_ip` to an address the other hosts can reach.
+
+### 2. Check the hosts
 
 ```bash
-eve-ng-automator cluster-status topologies/cluster.yaml
+clab-automator status --cluster topologies/cluster.yaml
 ```
 
 ### 3. Deploy across the cluster
 
 ```bash
-# Auto-place nodes based on resources (bin-pack minimises cross-host links)
-eve-ng-automator deploy topologies/large_campus.yaml \
-    --cluster topologies/cluster.yaml \
-    --strategy bin-pack --start -vv
+# Preview placement and write the per-host topology files
+clab-automator deploy topologies/large_campus.clab.yml \
+    --cluster topologies/cluster.yaml --dry-run --output-dir /tmp/campus
 
-# Preview placement without deploying
-eve-ng-automator deploy topologies/large_campus.yaml \
-    --cluster topologies/cluster.yaml --dry-run
+# Deploy
+clab-automator -v deploy topologies/large_campus.clab.yml \
+    --cluster topologies/cluster.yaml --strategy bin-pack
 
-# Tear down from all hosts
-eve-ng-automator teardown topologies/large_campus.yaml \
+# Destroy on all hosts
+clab-automator destroy topologies/large_campus.clab.yml \
     --cluster topologies/cluster.yaml
 ```
 
 ### 4. Control node placement
 
-In your topology YAML, you can pin nodes to specific hosts or use tag affinity:
+Placement hints are node labels, so they work anywhere labels do (`defaults`,
+`kinds`, `groups`, nodes). containerlab itself ignores them.
 
 ```yaml
-nodes:
-  - name: "Core-1"
-    template: "csr1000v"
-    host: "eve-1"              # pin to a specific host
-
-  - name: "Access-1"
-    template: "iosvl2"
-    host_tags: ["access"]      # prefer hosts tagged "access"
-
-  - name: "Server-1"
-    template: "linux"
-    # no host/host_tags → auto-placed by the placement engine
+topology:
+  groups:
+    access:
+      labels:
+        lab.host-tags: access       # prefer hosts tagged "access"
+  nodes:
+    Core-1:
+      kind: cisco_iol
+      labels:
+        lab.host: clab-1            # pin to a specific host
+    Access-1:
+      kind: cisco_iol
+      type: L2
+      group: access
+    Server-1:
+      kind: linux
+      labels:
+        lab.cpu: "2"                # override the placement estimate
+        lab.ram: "2048"             # (MB)
 ```
+
+| Label | Meaning |
+|-------|---------|
+| `lab.host` | Pin the node to this cluster host |
+| `lab.host-tags` | Comma-separated tags; prefer hosts with any of them |
+| `lab.cpu` / `lab.ram` | vCPU / MB to reserve when placing the node |
+
+Without `lab.cpu`/`lab.ram`, placement uses the node's `cpu`/`memory`
+limits, then a per-kind estimate (e.g. cEOS 1 vCPU / 2 GB, IOL 0.5 / 512 MB).
 
 ### Placement strategies
 
 | Strategy | Behaviour |
 |----------|-----------|
-| `bin-pack` | Fill each host before moving to the next. Minimises cross-host tunnels. **(default)** |
-| `spread` | Distribute nodes evenly across hosts. Balanced load. |
+| `bin-pack` | Fill each host before moving to the next, keeping neighbours together. Fewest cross-host links. **(default)** |
+| `spread` | Distribute nodes evenly across hosts. |
 | `resource` | Always pick the host with the most free resources. |
 
 ### How cross-host links work
 
-When two connected nodes land on different servers, the automator:
-
-1. Creates a GRE (or VXLAN) tunnel between the two EVE-NG hosts via SSH
-2. Bridges the tunnel into a `pnet` (cloud) network on each host
-3. Connects the node interfaces to that cloud network
-
-This is transparent — the nodes see a normal L2 link. The tunnel is torn down
-automatically on teardown.
+Each host gets a containerlab topology with only its own nodes. A link
+whose ends land on different hosts is replaced by a `vxlan-stitch` link on
+each side, pointing at the other host and sharing a VNI:
 
 ```
-Host eve-1                          Host eve-2
-┌──────────────────┐                ┌──────────────────┐
-│  Core-1          │                │  Dist-1          │
-│   Gi2 ───────────┤                ├─────────── Gi0/0 │
-│                  │                │                  │
-│  pnet9 ──────────┼── GRE tunnel ──┼────────── pnet9  │
-└──────────────────┘                └──────────────────┘
+Host clab-1                              Host clab-2
+┌────────────────────┐                  ┌────────────────────┐
+│ Core-1             │                  │             Dist-1 │
+│  Ethernet0/2 ──────┤                  ├────── Ethernet0/1  │
+│      vxlan-stitch  │── VNI 1000 ──────│  vxlan-stitch      │
+│ remote: clab-2     │   UDP 14789      │  remote: clab-1    │
+└────────────────────┘                  └────────────────────┘
 ```
 
-## Topology YAML format
-
-```yaml
-lab:
-  name: "my-lab"
-  description: "Lab description"
-  author: "netops"
-  path: "/"
-
-nodes:
-  - name: "R1"
-    template: "vios"                  # EVE-NG template name
-    image: "vios-adventerprisek9..."  # specific image (optional)
-    type: "qemu"                      # qemu | iol | dynamips | docker
-    ethernet: 4                       # number of ethernet interfaces
-    ram: 512
-    cpu: 1
-    host: "eve-1"                     # pin to cluster host (optional)
-    host_tags: ["core"]               # tag affinity (optional)
-    startup_config: |                 # inline config
-      hostname R1
-      ...
-    # or: startup_config_file: "configs/R1.cfg"
-
-networks:
-  - name: "Mgmt"
-    type: "pnet1"                     # bridge, ovs, pnet0-pnet9
-
-links:
-  # Explicit network reference
-  - node: "R1"
-    interface: "Gi0/0"
-    network: "Mgmt"
-
-  # Point-to-point shorthand (auto-creates a bridge)
-  - endpoints:
-      - node: "R1"
-        interface: "Gi0/1"
-      - node: "R2"
-        interface: "Gi0/1"
-```
+containerlab builds the VXLAN tunnels on deploy and removes them on destroy.
+The nodes see an ordinary point-to-point link.
 
 ## Import from live network
 
-Create a device inventory YAML and export the topology:
-
 ```bash
-# Install NAPALM support
 pip install -e ".[napalm]"
 
-# Export from production devices
-eve-ng-automator export-live topologies/live_devices_example.yaml \
-    -o topologies/prod_mirror.yaml --lab-name "prod-mirror"
+clab-automator export-live topologies/live_devices_example.yaml \
+    -o imported/prod_mirror.clab.yml --lab-name prod-mirror
 
-# Deploy the mirror into EVE-NG (single host)
-eve-ng-automator deploy topologies/prod_mirror.yaml --start
-
-# Or deploy across a cluster if it's large
-eve-ng-automator deploy topologies/prod_mirror.yaml \
-    --cluster topologies/cluster.yaml --start
+clab-automator --sudo deploy imported/prod_mirror.clab.yml
 ```
 
-See `topologies/live_devices_example.yaml` for the device inventory format.
+Each device becomes a node (kind from the NAPALM platform unless you set
+`kind`) with its running config saved to `configs/<node>.cfg`. Each LLDP
+adjacency between two inventoried devices becomes a link. Check that the
+interface names match what each containerlab kind accepts before deploying.
+See `topologies/live_devices_example.yaml` for the inventory format.
 
 ## Example topologies
 
 | File | Description |
 |------|-------------|
-| `topologies/three_router_triangle.yaml` | 3x IOSv routers in full mesh with OSPF |
-| `topologies/spine_leaf.yaml` | 2-spine 4-leaf fabric with BGP (Arista vEOS) |
-| `topologies/large_campus.yaml` | 9-node campus network for multi-host deployment |
-| `topologies/cluster.yaml` | 3-server cluster inventory |
+| `topologies/three_router_triangle.clab.yml` | 3x Cisco IOL routers in a full mesh with OSPF |
+| `topologies/spine_leaf.clab.yml` | 2-spine 4-leaf fabric with BGP (Arista cEOS) |
+| `topologies/large_campus.clab.yml` | 8-node IOL/IOL-L2 campus with placement labels for multi-host |
+| `topologies/cluster.yaml` | 3-host cluster inventory |
 | `topologies/live_devices_example.yaml` | Device inventory for live network export |
 
 ## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EVE_NG_HOST` | — | EVE-NG server hostname or IP (single-host mode) |
-| `EVE_NG_USER` | `admin` | API username |
-| `EVE_NG_PASS` | `eve` | API password |
-| `EVE_NG_PORT` | `443` | API port |
+| `CLAB_HOST` | `localhost` | Lab host for single-host commands |
+| `CLAB_SSH_USER` | your SSH config | SSH username |
+| `CLAB_SSH_KEY` | SSH agent / defaults | SSH private key |
+| `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
+| `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable) |
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
 ## Project structure
 
 ```
-eve_ng_automator/
-  __init__.py          # Package init
-  api_client.py        # EVE-NG REST API client
-  topology_schema.py   # YAML schema, validation, interface resolution
-  deployer.py          # Build labs from topology definitions (single host)
-  distributed.py       # Multi-host deployment orchestrator
-  cluster.py           # Cluster inventory and host management
-  placement.py         # Resource-aware node placement engine
-  interconnect.py      # Cross-host GRE/VXLAN tunnel manager
-  exporter.py          # Export labs from EVE-NG or live networks
-  teardown.py          # Clean teardown of labs
-  cli.py               # CLI entrypoint
-topologies/            # Example topology and cluster YAML files
+clab_automator/
+  __init__.py      # Package init
+  topology.py      # Load containerlab topologies, inheritance, placement hints
+  cluster.py       # Cluster inventory and host probing
+  placement.py     # Resource-aware node placement engine
+  deployer.py      # Deploy/destroy/save/inspect; split topology per host
+  runner.py        # Run commands locally or over SSH
+  exporter.py      # Build a topology from live devices (NAPALM)
+  cli.py           # CLI entrypoint
+topologies/        # Example topologies and cluster inventory
+tests/             # pytest suite
 ```
