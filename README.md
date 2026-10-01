@@ -271,6 +271,8 @@ See `topologies/live_devices_example.yaml` for the inventory format.
 
 ## Development
 
+Tests run automatically on every pull request (GitHub Actions, Python 3.10, 3.12 and 3.14).
+
 ```bash
 pip install -e ".[dev]"
 pytest
