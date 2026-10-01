@@ -92,9 +92,13 @@ recomputed one.
 Touches `clabfleet/deployer.py`, `clabfleet/gui/state.py`,
 `clabfleet/gui/static/app.js`.
 
-## Phase 2 — cluster robustness and GUI depth
+## Phase 2 — cluster robustness and GUI depth (done)
 
 ### 2.1 Account for labs already running — M
+
+**Done.** CPU of other running labs is always reserved. Their RAM is
+reserved only when the inventory sets `max_ram`, because a probed
+`MemAvailable` already reflects it. `status` lists running labs per host.
 
 Placement uses `nproc` and `MemAvailable`, so CPU reserved by labs already
 running is invisible. In `probe_host_resources()` (or a new step in
@@ -102,6 +106,9 @@ running is invisible. In `probe_host_resources()` (or a new step in
 returned by `inspect --all` and reserve them before placing new nodes.
 
 ### 2.2 Cross-host connectivity check — S
+
+**Done.** The UDP probe uses a short `python3` listener on the
+destination. Probes that cannot run are reported as not tested.
 
 `status` prints VTEP addresses but never tests them. Before a multi-host
 deploy, run a reachability probe between every pair of VTEPs (ICMP, and a
@@ -112,12 +119,18 @@ Touches `clabfleet/cluster.py`, `clabfleet/cli.py`.
 
 ### 2.3 Rollback on partial failure — M
 
+**Done.** Opt-in with `--rollback` or the GUI checkbox. The failing host
+is rolled back too. Summaries carry a `status`.
+
 If the second host fails mid-deploy, the first is left running with
 dangling VXLAN endpoints. Add `deploy --rollback` that destroys what
 already deployed when any host fails, and record partial state in the
 summary so the GUI can show it.
 
 ### 2.4 Readiness wait — M
+
+**Done.** Docker health checks count first. The GUI probes in the
+background so the page never waits on a booting node.
 
 containerlab returns when containers start, but IOL and cEOS need a
 minute to boot. Add a per-kind readiness probe (SSH port open, or the
@@ -129,11 +142,16 @@ Touches `clabfleet/deployer.py`, `clabfleet/gui/state.py`,
 
 ### 2.5 Link-aware spread strategy — S
 
+**Done.**
+
 `_pick_host()` with `spread` ignores adjacency entirely. Apply the
 bin-pack locality score as a tiebreaker among the least-loaded hosts, so
 balanced placements still minimise cross-host links.
 
 ### 2.6 YAML editing in the browser — M
+
+**Done.** Plain text editor. Positions are saved with ruamel.yaml so
+comments and formatting are kept.
 
 The YAML tab is read-only and node positions live only in browser local
 storage. Add an editor with save, validation feedback from 1.3, and write
@@ -145,10 +163,16 @@ Touches `clabfleet/gui/server.py` (PUT endpoint), `clabfleet/gui/state.py`,
 
 ### 2.7 Node logs tab — S
 
+**Done.** Also works for stopped containers.
+
 `docker logs --follow` per node over the existing terminal websocket,
 useful for boot problems on VM-based kinds.
 
 ### 2.8 Job history and parallel jobs — M
+
+**Done.** Up to four jobs at once, one per lab, last 50 kept. Planning
+runs under a lock with in-flight deploys counted, so parallel deploys do
+not share VNIs or overcommit hosts.
 
 `JobManager` allows one job at a time and forgets everything on restart.
 Keep a history file under the workspace, allow concurrent jobs on
