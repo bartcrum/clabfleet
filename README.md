@@ -23,6 +23,8 @@ deploys with plain `containerlab deploy`.
   image is missing on its host, or pull it with `--pull`
 - **Dry-run** — see the placement plan and the per-host topology files
   without deploying
+- **Exec** — run a command on all or some nodes of a lab at once, through
+  each kind's CLI, SSH or a shell
 - **Validate** — check topology files (and placement labels against a
   cluster) without touching any host, e.g. in CI
 - **Web GUI** — browse topologies, see live node state on a diagram,
@@ -58,6 +60,33 @@ clabfleet --sudo save topologies/three_router_triangle.clab.yml
 # Tear it down (add --keep-lab-dir to keep saved configs)
 clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 ```
+
+### Run a command on every node
+
+```bash
+clabfleet exec topologies/spine_leaf.clab.yml "show ip bgp summary"
+clabfleet exec topologies/spine_leaf.clab.yml --nodes 'leaf*' "show version"
+clabfleet exec topologies/three_router_triangle.clab.yml "show ip ospf neighbor"
+clabfleet exec lab.clab.yml --mode shell -- ip -br addr
+```
+
+Nodes run in parallel and each node's output is printed under its name.
+The exit code is 1 if any node failed. Add `--json` for machine-readable
+output. Each node is reached the best way its kind allows (`--mode auto`):
+
+| Mode | Used for | How |
+|------|----------|-----|
+| `cli` | cEOS, SR Linux, cRPD | The node's CLI through `docker exec` |
+| `ssh` | VM-based kinds such as Cisco IOL | SSH to the management address, tunnelled through the host's SSH connection for remote hosts |
+| `shell` | Everything else | `sh -c` inside the container |
+
+SSH mode logs in with containerlab's default `admin`/`admin`, or `root`
+for cRPD. Use `--user` and `--password`, or set `CLAB_NODE_PASSWORD`, if
+your startup configs create other logins. Words after the topology are
+joined with spaces, as `ssh` does, so quote the command or put it after
+`--` when it has options of its own. Like the GUI terminals, the CLI and
+shell modes need Docker access on the host. If Docker refuses and the
+host uses `sudo`, clabfleet retries with `sudo`.
 
 ### Check a topology before deploying
 
@@ -345,6 +374,9 @@ clabfleet/
   deployer.py      # Deploy/destroy/save/inspect; split topology per host
   runner.py        # Run commands locally or over SSH
   exporter.py      # Build a topology from live devices (NAPALM)
+  execute.py       # Run a command on lab nodes (clabfleet exec)
+  nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
+  validate.py      # Topology checks (clabfleet validate)
   cli.py           # CLI entrypoint
   gui/
     server.py      # aiohttp app: API, auth, terminal websockets
