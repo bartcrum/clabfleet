@@ -146,3 +146,15 @@ def test_destroy_targets_recorded_hosts_and_removes_record(topo_file, monkeypatc
     _write_record(topo_file, ["h2", "bad"])
     LabDeployer(_cluster("h2", "bad")).destroy(topo_file, cleanup=False)
     assert record_file.exists()
+
+
+def test_redeploy_keeps_hosts_the_lab_moved_off(topo_file, monkeypatch):
+    _write_record(topo_file, ["h1", "h3"])
+    _stub_deploy(monkeypatch, {"a": "h1", "b": "h1", "c": "h2"}, [])
+    LabDeployer(_cluster("h1", "h2", "h3")).deploy(topo_file, reconfigure=True,
+                                                   check_images=False)
+    record = read_placement_record(load_topology(topo_file))
+    assert record["hosts"]["h3"] == {"nodes": [], "stale": True}
+    assert set(record["hosts"]) == {"h1", "h2", "h3"}
+    assert "stale" not in record["hosts"]["h1"]
+    assert record["nodes"] == {"a": "h1", "b": "h1", "c": "h2"}

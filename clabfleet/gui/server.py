@@ -17,7 +17,8 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
-from .state import JobManager, Workspace, access_modes, terminal_command
+from ..nodes import access_modes, terminal_command
+from .state import JobManager, Workspace
 from .terminals import LocalTerminal, SSHTerminal
 
 logger = logging.getLogger(__name__)

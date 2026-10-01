@@ -17,7 +17,7 @@ from typing import Optional
 
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
-from ..nodes import access_modes, parse_inspect, terminal_command  # noqa: F401 (re-exported)
+from ..nodes import access_modes, parse_inspect
 from ..runner import Runner
 from ..topology import (
     LABEL_HOST,

@@ -157,6 +157,12 @@ class LabDeployer:
 
             record = self._placement_record(topo, plan, host_topos, cross_links,
                                             strategy, summary.get("vni_range"))
+            # Redeploying over a running lab can move nodes off a host; keep
+            # such hosts listed so destroy still cleans up what is left there
+            previous = read_placement_record(topo) or {}
+            for name, entry in (previous.get("hosts") or {}).items():
+                if name not in record["hosts"] and isinstance(entry, dict):
+                    record["hosts"][name] = {**entry, "nodes": [], "stale": True}
             path = write_placement_record(topo, record)
             if path:
                 summary["placement_record"] = str(path)

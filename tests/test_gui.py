@@ -13,12 +13,10 @@ from clabfleet.gui import server, state  # noqa: E402
 from clabfleet.gui.state import (  # noqa: E402
     JobManager,
     Workspace,
-    access_modes,
     find_topologies,
-    parse_inspect,
-    terminal_command,
     topology_view,
 )
+from clabfleet.nodes import access_modes, parse_inspect, terminal_command  # noqa: E402
 from clabfleet.topology import topology_from_dict  # noqa: E402
 
 TOPO = """\
