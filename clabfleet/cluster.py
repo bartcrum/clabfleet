@@ -115,6 +115,7 @@ class ClusterConfig:
     vni_base: int = 1000
     dst_port: int = 14789
     mtu: Optional[int] = None
+    source: Optional[str] = None  # inventory file it was loaded from
 
 
 def load_cluster_config(file_path: str | Path) -> ClusterConfig:
@@ -169,6 +170,7 @@ def load_cluster_config(file_path: str | Path) -> ClusterConfig:
         vni_base=cluster_section.get("vni_base", 1000),
         dst_port=cluster_section.get("dst_port", 14789),
         mtu=cluster_section.get("mtu"),
+        source=str(file_path),
     )
 
 

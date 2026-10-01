@@ -209,6 +209,15 @@ clabfleet destroy topologies/large_campus.clab.yml \
     --cluster topologies/cluster.yaml
 ```
 
+Each deploy writes `<lab>.placement.json` next to the topology file. It
+records the host of every node, the VNI range, the cross-host links and
+the cluster file used. `destroy`, `save`, `inspect` and `exec` then only
+contact the hosts listed there, so an unrelated host being down does not
+get in the way. A clean `destroy` removes the file. Without it, those
+commands try every host in the cluster, as before. The web GUI uses the
+record to show each node's host and the VNI of each cross-host link even
+when it cannot reach a host.
+
 ### 4. Control node placement
 
 Placement hints are node labels, so they work anywhere labels do (`defaults`,

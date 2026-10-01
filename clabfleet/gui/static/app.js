@@ -78,6 +78,24 @@ function nodeRuntime(lab, node) {
   return labContainers(lab).find((c) => c.node === node);
 }
 
+// Host the last deploy placed a node on (from the lab's placement record)
+function placedHost(node) {
+  return S.detail?.placement?.nodes?.[node] || "";
+}
+
+function nodeHost(lab, node) {
+  return nodeRuntime(lab, node)?.host || placedHost(node);
+}
+
+// VNI of each cross-host link from the placement record, keyed by "node:iface|node:iface"
+function crossLinkVnis() {
+  const vnis = {};
+  for (const c of S.detail?.placement?.cross_host_links || []) {
+    vnis[`${c.a}|${c.b}`] = vnis[`${c.b}|${c.a}`] = c.vni;
+  }
+  return vnis;
+}
+
 function labStatus(lab, total) {
   const cs = labContainers(lab);
   const running = cs.filter((c) => c.state === "running").length;
@@ -200,6 +218,23 @@ async function selectTopology(id) {
   renderNodeCard();
 }
 
+// Re-fetch the selected topology (e.g. after a job changed its placement record)
+async function reloadDetail() {
+  if (S.selected?.type !== "topo") return;
+  const id = S.selected.id;
+  let detail;
+  try {
+    detail = await api(`/api/topologies/${encodeURIComponent(id).replace(/%2F/g, "/")}`);
+  } catch (e) {
+    return;
+  }
+  if (S.selected?.type !== "topo" || S.selected.id !== id) return;
+  S.detail = detail;
+  renderDiagram(false);
+  renderNodesTable();
+  renderNodeCard();
+}
+
 function selectOtherLab(lab) {
   S.selected = { type: "lab", lab };
   S.detail = null;
@@ -297,7 +332,7 @@ function renderNodesTable() {
       h("td", {}, h("strong", {}, n.name)),
       h("td", { class: "mono small" }, n.kind + (n.type ? ` (${n.type})` : "")),
       h("td", { class: "img" }, n.rt?.image || n.image || ""),
-      multi ? h("td", { class: "mono small" }, n.rt?.host || (n.host_pin ? `${n.host_pin} (pinned)` : "")) : null,
+      multi ? h("td", { class: "mono small" }, n.rt?.host || placedHost(n.name) || (n.host_pin ? `${n.host_pin} (pinned)` : "")) : null,
       h("td", {}, h("span", { class: `dot ${running ? "running" : n.rt ? "partial" : ""}` }), " ",
         n.rt ? n.rt.status || n.rt.state : "not deployed"),
       h("td", { class: "mono small" }, n.rt?.ipv4 || ""),
@@ -525,6 +560,7 @@ function renderDiagram(fit) {
   const lab = S.detail.name;
   const multi = S.state?.multi_host;
   const P = S.positions;
+  const vnis = crossLinkVnis();
 
   const g = s("g", { id: "viewport", transform: `translate(${S.view.x},${S.view.y}) scale(${S.view.k})` });
 
@@ -545,12 +581,14 @@ function renderDiagram(fit) {
     const len = Math.hypot(dx, dy) || 1;
     const off = (idx - (pairCount[key] - 1) / 2) * 26 * (l.a.id < l.b.id ? 1 : -1);
     const c = [(p0[0] + p1[0]) / 2 - (dy / len) * off, (p0[1] + p1[1]) / 2 + (dx / len) * off];
-    const ha = nodeRuntime(lab, l.a.id)?.host, hb = nodeRuntime(lab, l.b.id)?.host;
+    const ha = nodeHost(lab, l.a.id), hb = nodeHost(lab, l.b.id);
     const cross = multi && ha && hb && ha !== hb;
+    const vni = vnis[`${l.a.id}:${l.a.iface}|${l.b.id}:${l.b.iface}`];
+    const vxlan = cross ? `  (VXLAN ${ha} ↔ ${hb}${vni !== undefined ? `, VNI ${vni}` : ""})` : "";
     g.append(s("path", {
       class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}`,
       d: `M${p0[0]},${p0[1]} Q${c[0]},${c[1]} ${p1[0]},${p1[1]}`,
-    }, s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${cross ? `  (VXLAN ${ha} ↔ ${hb})` : ""}`)));
+    }, s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}`)));
     for (const [end, from, alt] of [[l.a, p0, false], [l.b, p1, true]]) {
       if (!end.iface) continue;
       const pseudo = end.id.startsWith("~");
@@ -577,8 +615,8 @@ function renderDiagram(fit) {
       s("circle", { class: `status ${stClass}`, cx: -NODE_W / 2 + 13, cy: -7, r: 4.5 }),
       s("text", { class: "name", x: -NODE_W / 2 + 24, y: -2 }, truncate(nd.id, 14)),
       s("text", { class: "kind", x: -NODE_W / 2 + 24, y: 13 }, truncate(nd.node.kind, 17)),
-      multi && (rt?.host || nd.node.host_pin)
-        ? s("text", { class: "hostbadge", x: NODE_W / 2 - 6, y: NODE_H / 2 + 13, "text-anchor": "end" }, `@${rt?.host || nd.node.host_pin}`)
+      multi && (nodeHost(lab, nd.id) || nd.node.host_pin)
+        ? s("text", { class: "hostbadge", x: NODE_W / 2 - 6, y: NODE_H / 2 + 13, "text-anchor": "end" }, `@${nodeHost(lab, nd.id) || nd.node.host_pin}`)
         : null,
       s("title", {}, `${nd.id} (${nd.node.kind})${rt ? ` — ${rt.status}` : " — not deployed"}`));
     g.append(el);
@@ -701,7 +739,7 @@ function renderNodeCard() {
     ["State", rt ? rt.status : "not deployed"],
     ["Mgmt", rt?.ipv4],
     ["Container", rt?.container],
-    S.state?.multi_host ? ["Host", rt?.host || (node.host_pin && `${node.host_pin} (pinned)`) || (node.host_tags && `tags: ${node.host_tags}`)] : null,
+    S.state?.multi_host ? ["Host", rt?.host || placedHost(node.name) || (node.host_pin && `${node.host_pin} (pinned)`) || (node.host_tags && `tags: ${node.host_tags}`)] : null,
   ].filter((r) => r && r[1]);
   card.replaceChildren(
     h("h3", {},
@@ -774,6 +812,7 @@ function trackJob(id, fromStart) {
     $("#activity-dot").className = `dot ${job.status === "ok" ? "running" : "error"}`;
     if (job.status !== "ok") toast(`${job.action} failed — see Activity`);
     await refreshState();
+    await reloadDetail();
     refreshHosts();
   };
   poll();

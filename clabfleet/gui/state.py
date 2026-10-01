@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
-from ..deployer import LabDeployer
+from ..deployer import LabDeployer, read_placement_record
 from ..nodes import access_modes, parse_inspect, terminal_command  # noqa: F401 (re-exported)
 from ..runner import Runner
 from ..topology import (
@@ -193,7 +193,10 @@ class Workspace:
         path = self.topology_path(topo_id)
         detail = {"id": topo_id, "path": str(path), "yaml": path.read_text()}
         try:
-            detail.update(topology_view(load_topology(path)))
+            topo = load_topology(path)
+            detail.update(topology_view(topo))
+            # Where the last deploy put each node (None if not deployed)
+            detail["placement"] = read_placement_record(topo)
         except Exception as exc:
             detail["error"] = str(exc)
         return detail

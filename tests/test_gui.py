@@ -184,7 +184,13 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
             resp = await client.post("/api/jobs", json={"action": "nope", "topology": "t.clab.yml"})
             assert resp.status == 400
             resp = await client.get("/api/topologies/t.clab.yml")
-            assert (await resp.json())["nodes"][0]["name"] == "a"
+            detail = await resp.json()
+            assert detail["nodes"][0]["name"] == "a"
+            assert detail["placement"] is None
+            (tmp_path / "t.placement.json").write_text(
+                '{"lab": "t", "hosts": {"localhost": {}}, "nodes": {"a": "localhost"}}')
+            detail = await (await client.get("/api/topologies/t.clab.yml")).json()
+            assert detail["placement"]["nodes"] == {"a": "localhost"}
             assert (await client.get("/api/topologies/missing.clab.yml")).status == 404
 
     asyncio.run(scenario())
