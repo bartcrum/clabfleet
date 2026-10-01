@@ -68,7 +68,7 @@ def export_from_live_network(
     except ImportError:
         raise ExportError(
             "NAPALM is required for live network export. "
-            "Install it with: pip install 'clab-automator[napalm]'"
+            "Install it with: pip install 'clabfleet[napalm]'"
         )
 
     kinds = {**PLATFORM_KIND_MAP, **(kind_map or {})}
@@ -163,7 +163,7 @@ def export_from_live_network(
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         header = (
-            f"# Imported from live network ({len(nodes)} devices) by clab-automator.\n"
+            f"# Imported from live network ({len(nodes)} devices) by clabfleet.\n"
             "# Interface names come from the devices; check they match the naming\n"
             "# each containerlab kind accepts before deploying.\n"
         )

@@ -5,7 +5,7 @@
 # puts it in a management VRF), so data links start at Ethernet0/1.
 #
 # Deploy:
-#   clab-automator deploy topologies/three_router_triangle.clab.yml
+#   clabfleet deploy topologies/three_router_triangle.clab.yml
 
 name: three-router-triangle
 

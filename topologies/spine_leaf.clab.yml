@@ -9,7 +9,7 @@
 # would otherwise drop (needed for SSH).
 #
 # Deploy:
-#   clab-automator deploy topologies/spine_leaf.clab.yml
+#   clabfleet deploy topologies/spine_leaf.clab.yml
 
 name: spine-leaf-fabric
 

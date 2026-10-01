@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "clab-automator"
+name = "clabfleet"
 version = "0.2.0"
 description = "Automate containerlab lab deployment across one or many hosts"
 license = "MIT"
@@ -19,10 +19,10 @@ gui = ["aiohttp>=3.9"]
 dev = ["pytest>=7.0", "aiohttp>=3.9"]
 
 [project.scripts]
-clab-automator = "clab_automator.cli:main"
+clabfleet = "clabfleet.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["clab_automator*"]
+include = ["clabfleet*"]
 
 [tool.setuptools.package-data]
-"clab_automator.gui" = ["static/*", "static/vendor/*"]
+"clabfleet.gui" = ["static/*", "static/vendor/*"]

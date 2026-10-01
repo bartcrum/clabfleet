@@ -8,7 +8,7 @@
 # (ios → cisco_iol, eos → arista_ceos, junos → juniper_vjunosrouter, ...).
 #
 # Usage:
-#   clab-automator export-live topologies/live_devices_example.yaml \
+#   clabfleet export-live topologies/live_devices_example.yaml \
 #       -o imported/prod_mirror.clab.yml --lab-name "prod-mirror"
 
 devices:

@@ -3,11 +3,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from clab_automator import cli, deployer
-from clab_automator.cluster import ClusterConfig, HostInfo, load_cluster_config
-from clab_automator.deployer import DeploymentError, split_topology
-from clab_automator.placement import NodePlacement, PlacementPlan
-from clab_automator.topology import topology_from_dict
+from clabfleet import cli, deployer
+from clabfleet.cluster import ClusterConfig, HostInfo, load_cluster_config
+from clabfleet.deployer import DeploymentError, split_topology
+from clabfleet.placement import NodePlacement, PlacementPlan
+from clabfleet.topology import topology_from_dict
 
 TOPOLOGIES = Path(__file__).parent.parent / "topologies"
 

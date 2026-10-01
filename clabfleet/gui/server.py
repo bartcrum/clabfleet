@@ -1,4 +1,4 @@
-"""aiohttp web server for the clab-automator GUI.
+"""aiohttp web server for the clabfleet GUI.
 
 Security: the GUI can open shells on lab nodes, so it only listens on
 localhost by default and every request must carry the random token printed
@@ -23,7 +23,7 @@ from .terminals import LocalTerminal, SSHTerminal
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-COOKIE = "clab_gui_token"
+COOKIE = "clabfleet_token"
 
 WORKSPACE = web.AppKey("workspace", Workspace)
 JOBS = web.AppKey("jobs", JobManager)
@@ -54,7 +54,7 @@ def run(workspace: Workspace, host: str = "127.0.0.1", port: int = 8650,
     url = f"http://{'localhost' if host in ('127.0.0.1', '::1') else host}:{port}/?token={token}"
 
     async def _announce(_app):
-        print(f"clab-automator GUI running at:\n\n    {url}\n\nPress Ctrl+C to stop.", flush=True)
+        print(f"clabfleet GUI running at:\n\n    {url}\n\nPress Ctrl+C to stop.", flush=True)
         if open_browser:
             asyncio.get_running_loop().run_in_executor(None, webbrowser.open, url)
 
@@ -91,7 +91,7 @@ async def _auth_middleware(request: web.Request, handler):
             return web.Response(
                 status=401, content_type="text/html",
                 text="<p>Open the GUI with the URL (including <code>?token=</code>) "
-                     "printed by <code>clab-automator gui</code>.</p>",
+                     "printed by <code>clabfleet gui</code>.</p>",
             )
         raise web.HTTPUnauthorized(text="missing or invalid token")
 

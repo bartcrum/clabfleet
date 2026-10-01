@@ -6,8 +6,8 @@
 # links between hosts become VXLAN links that containerlab sets up itself.
 #
 # Usage:
-#   clab-automator status --cluster topologies/cluster.yaml
-#   clab-automator deploy topologies/large_campus.clab.yml \
+#   clabfleet status --cluster topologies/cluster.yaml
+#   clabfleet deploy topologies/large_campus.clab.yml \
 #       --cluster topologies/cluster.yaml --strategy bin-pack -v
 
 cluster:

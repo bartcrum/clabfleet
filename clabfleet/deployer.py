@@ -5,7 +5,7 @@ Single host:
     lab directory (``clab-<name>/``) is created next to it, exactly as if you
     had run containerlab yourself.
   - Remote: the topology and the files it references (startup configs,
-    licenses, bind sources) are copied to ``~/clab-automator/<lab>/`` on the
+    licenses, bind sources) are copied to ``~/clabfleet/<lab>/`` on the
     host over SSH and containerlab runs there.
 
 Multiple hosts (cluster):
