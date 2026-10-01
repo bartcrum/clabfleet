@@ -5,13 +5,17 @@ Each item names the gap in the current code that motivates it and the
 modules it would touch. Sizes are rough: **S** is an afternoon, **M** a
 few days, **L** a week or more.
 
-Nothing here is committed work. Phases are a suggested order: phase 1
-fixes real problems and adds the most-used commands, phase 2 deepens the
-cluster and GUI, phase 3 is the longer tail.
+Phases are a suggested order: phase 1 fixes real problems and adds the
+most-used commands, phase 2 deepens the cluster and GUI, phase 3 is the
+longer tail. Items marked **Done** are implemented and documented in the
+README; everything else is a proposal, not committed work.
 
-## Phase 1 — foundations and daily use
+## Phase 1 — foundations and daily use (done)
 
 ### 1.1 Per-lab VNI allocation (bug) — S
+
+**Done.** VNIs used by other labs are read from the hosts' lab
+directories before splitting; see "How cross-host links work" in the README.
 
 `split_topology()` in `clabfleet/deployer.py` restarts VNI numbering at
 `cluster.vni_base` on every deploy. Two labs on the same cluster therefore
@@ -25,6 +29,8 @@ get the same VNIs and the second deploy clashes with the first.
 
 ### 1.2 Placement engine tests — S
 
+**Done.** `tests/test_placement.py`.
+
 `clabfleet/placement.py` has no dedicated test module; only
 `tests/test_deployer.py` builds a `PlacementPlan` by hand. Add
 `tests/test_placement.py` covering pinning, tag affinity with and without
@@ -32,6 +38,10 @@ a match, resource exhaustion errors, and the three strategies on a small
 topology with fake `HostInfo` objects.
 
 ### 1.3 `clabfleet validate` — S
+
+**Done.** Missing `startup-config`, `license` and `env-files` files are
+errors, since containerlab cannot deploy without them; it also flags an
+interface used by two links.
 
 `load_topology()` already checks names, groups, kinds and link endpoints.
 Expose it as a subcommand that never touches a host, and extend it to warn on:
@@ -45,6 +55,10 @@ Touches `clabfleet/cli.py`, `clabfleet/topology.py`.
 
 ### 1.4 `clabfleet exec` — M
 
+**Done.** Adds an `ssh` mode for VM-based kinds such as IOL, tunnelled
+through the host's SSH connection. The access tables now live in
+`clabfleet/nodes.py`.
+
 There is no way to run a command on nodes. Add
 `clabfleet exec <topology> "<command>" [--nodes glob] [--mode cli|shell]`
 that fans out over `docker exec` on each node's host, reusing `KIND_CLI`
@@ -55,6 +69,9 @@ Touches `clabfleet/cli.py`, `clabfleet/deployer.py`, `clabfleet/runner.py`.
 
 ### 1.5 Pre-flight image check — S
 
+**Done.** Also adds `--skip-image-check`. Public images that containerlab
+would pull on its own now need `--pull` or a manual `docker pull`.
+
 Deploys fail late when an image is missing on a host. Before deploying,
 run `docker image inspect` for every image on its target host and report
 the gaps in one message. Add `--pull` to fetch them first.
@@ -62,6 +79,8 @@ the gaps in one message. Add `--pull` to fetch them first.
 Touches `clabfleet/deployer.py` (new step before `_deploy_on_host`).
 
 ### 1.6 Persist the placement plan — M
+
+**Done.** `exec` uses the record too.
 
 Nothing records which host each node landed on; `destroy`, `save` and
 `inspect` probe every host for a lab directory instead. Write
