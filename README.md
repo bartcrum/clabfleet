@@ -19,6 +19,8 @@ deploys with plain `containerlab deploy`.
 - **Host pinning & tag affinity** — via ordinary node `labels`
 - **Import from live network** — connects to real devices via NAPALM, pulls
   running configs and LLDP neighbours, writes a matching containerlab topology
+- **Image pre-flight** — fail before anything is created when a node's
+  image is missing on its host, or pull it with `--pull`
 - **Dry-run** — see the placement plan and the per-host topology files
   without deploying
 - **Validate** — check topology files (and placement labels against a
@@ -76,6 +78,22 @@ clabfleet validate topologies/large_campus.clab.yml --cluster topologies/cluster
   matches and cluster hosts without a VXLAN address.
 
 Add `--strict` to fail on warnings as well.
+
+### Node images
+
+Before deploying, clabfleet checks that every node's image exists on the
+host the node is placed on, and stops with one message listing what is
+missing per host. Nothing is created until the check passes.
+
+- `--pull` runs `docker pull` for missing images first, then fails only
+  on the ones that could not be pulled. Public images such as `alpine`
+  need this, or a manual `docker pull`, because the check runs before
+  containerlab would pull them itself.
+- `--skip-image-check` turns the check off.
+- Nodes with `image-pull-policy: always` are not checked, since
+  containerlab pulls those on every deploy.
+- If Docker cannot be reached on a host, even with `sudo` when the host
+  uses it, the check is skipped there with a warning.
 
 ### Single remote host
 

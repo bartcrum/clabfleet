@@ -2,6 +2,7 @@
 
 Usage:
     clabfleet deploy <topology.clab.yml> [--reconfigure] [--dry-run] [--output-dir DIR]
+                     [--pull] [--skip-image-check]
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
@@ -78,6 +79,10 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="Show placement and per-host topologies without deploying")
     p_deploy.add_argument("--output-dir", metavar="DIR",
                           help="Write the per-host topology files to DIR")
+    p_deploy.add_argument("--pull", action="store_true",
+                          help="docker pull node images that are missing on their host")
+    p_deploy.add_argument("--skip-image-check", action="store_true",
+                          help="Deploy without first checking that node images exist")
 
     # --- destroy ---
     p_destroy = sub.add_parser("destroy", aliases=["teardown"], help="Destroy a lab")
@@ -209,6 +214,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             reconfigure=args.reconfigure,
             dry_run=args.dry_run,
             output_dir=args.output_dir,
+            check_images=not args.skip_image_check,
+            pull_images=args.pull,
         )
     elif cmd in ("destroy", "teardown"):
         summary = deployer.destroy(args.topology, cleanup=not args.keep_lab_dir)

@@ -48,6 +48,13 @@ from .topology import Topology, dump_yaml, load_topology, topology_from_dict
 logger = logging.getLogger(__name__)
 
 
+# Prints NODOCKER if Docker is unreachable, else MISSING <image> per absent image
+_IMAGE_CHECK_SCRIPT = (
+    "docker version --format '{{.Server.Version}}' >/dev/null 2>&1 "
+    "|| { echo NODOCKER; exit 0; }\n"
+    'for i in "$@"; do docker image inspect "$i" >/dev/null 2>&1 || echo "MISSING $i"; done'
+)
+
 MAX_VNI = 2**24 - 1
 # A `vni: 1234` line in a per-host topology file written by clabfleet
 _VNI_LINE = re.compile(r"^(?P<path>.+?):\s*vni:\s*(?P<vni>\d+)\s*$")
@@ -94,6 +101,8 @@ class LabDeployer:
         reconfigure: bool = False,
         dry_run: bool = False,
         output_dir: Optional[str | Path] = None,
+        check_images: bool = True,
+        pull_images: bool = False,
     ) -> dict:
         """Deploy a topology.
 
@@ -103,6 +112,9 @@ class LabDeployer:
             reconfigure: Pass ``--reconfigure`` to containerlab (redeploy from scratch).
             dry_run: Compute placement and per-host topologies without deploying.
             output_dir: Also write the per-host topology files here.
+            check_images: Before deploying, fail if a node's image is missing
+                on the host it is placed on.
+            pull_images: ``docker pull`` missing images before checking.
 
         Returns:
             Summary dict with placement, cross-host links and per-host results.
@@ -131,6 +143,9 @@ class LabDeployer:
             if dry_run:
                 summary["dry_run"] = True
                 return summary
+
+            if check_images:
+                self._check_images(topo, host_topos, pull_images)
 
             for host in self.cluster.hosts:
                 data = host_topos.get(host.name)
@@ -262,6 +277,55 @@ class LabDeployer:
         logger.info("Using VNIs %d-%d for '%s'", base, base + count - 1, topo.name)
         return base
 
+    def _check_images(self, topo: Topology, host_topos: dict[str, dict], pull: bool) -> None:
+        """Raise DeploymentError listing every image missing on its target host."""
+        problems: dict[str, dict[str, list[str]]] = {}
+        for host in self.cluster.hosts:
+            data = host_topos.get(host.name)
+            if data is None:
+                continue
+            images = node_images(topo, data["topology"]["nodes"])
+            if not images:
+                continue
+            runner = self._runner(host)
+            sudo = False
+            missing = missing_images(runner, list(images), sudo=False)
+            if missing is None and host.sudo:
+                sudo = True
+                missing = missing_images(runner, list(images), sudo=True)
+            if missing is None:
+                logger.warning(
+                    "Cannot reach Docker on %s to check images; skipping the check there",
+                    host.name,
+                )
+                continue
+            if missing and pull:
+                for image in missing:
+                    logger.info("Pulling %s on %s", image, host.name)
+                    runner.run(["docker", "pull", image], check=False, sudo=sudo,
+                               on_output=self._output_for(host))
+                missing = missing_images(runner, missing, sudo=sudo) or []
+            if missing:
+                problems[host.name] = {image: images[image] for image in missing}
+
+        if problems:
+            lines = ["Images missing on lab hosts:"]
+            for host_name, images in problems.items():
+                for image, nodes in images.items():
+                    lines.append(f"  {host_name}: {image} ({', '.join(nodes)})")
+            lines.append(
+                "Build or import them on those hosts"
+                + ("" if pull else ", re-run with --pull to pull them from their registry")
+                + ", or skip this check with --skip-image-check."
+            )
+            raise DeploymentError("\n".join(lines))
+
+    def _output_for(self, host: HostInfo) -> Optional[OutputCallback]:
+        if not self.on_output:
+            return None
+        prefix = f"[{host.name}] " if self._multi_host else ""
+        return lambda line: self.on_output(prefix + line)
+
     def _deploy_on_host(
         self, host: HostInfo, topo: Topology, data: dict, reconfigure: bool
     ) -> dict:
@@ -330,10 +394,7 @@ class LabDeployer:
         parse_json: bool = False,
         stream: bool = False,
     ) -> dict:
-        on_output = None
-        if stream and self.on_output:
-            prefix = f"[{host.name}] " if self._multi_host else ""
-            on_output = lambda line: self.on_output(prefix + line)  # noqa: E731
+        on_output = self._output_for(host) if stream else None
         try:
             result = self._runner(host).containerlab(
                 args, cwd=cwd, check=check, on_output=on_output
@@ -366,6 +427,34 @@ class LabDeployer:
         for runner in self._runners.values():
             runner.close()
         self._runners.clear()
+
+
+def node_images(topo: Topology, node_names) -> dict[str, list[str]]:
+    """image → nodes using it, for nodes whose image containerlab won't pull itself.
+
+    Nodes without an image (bridges, kinds with a built-in default) and
+    nodes with ``image-pull-policy: always`` are left out.
+    """
+    images: dict[str, list[str]] = {}
+    for name in node_names:
+        node = topo.effective_node(name)
+        image = node.get("image")
+        if not image:
+            continue
+        if str(node.get("image-pull-policy", "")).lower() == "always":
+            continue
+        images.setdefault(str(image), []).append(name)
+    return images
+
+
+def missing_images(runner: Runner, images: list[str], sudo: bool) -> Optional[list[str]]:
+    """Images not present on a host, or None when Docker cannot be reached."""
+    result = runner.run(["sh", "-c", _IMAGE_CHECK_SCRIPT, "sh", *images],
+                        check=False, sudo=sudo)
+    lines = result.stdout.splitlines()
+    if "NODOCKER" in lines or result.exit_code != 0:
+        return None
+    return [line[len("MISSING "):] for line in lines if line.startswith("MISSING ")]
 
 
 def count_cross_host_links(topo: Topology, plan: PlacementPlan) -> int:
