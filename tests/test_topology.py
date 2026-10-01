@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from clab_automator.topology import (
+from clabfleet.topology import (
     TopologyError,
     load_topology,
     parse_memory_mb,

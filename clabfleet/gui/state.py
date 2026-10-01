@@ -356,7 +356,7 @@ class Job:
 
 
 class _JobLogHandler(logging.Handler):
-    """Copies clab_automator log records from the job's thread into the job."""
+    """Copies clabfleet log records from the job's thread into the job."""
 
     def __init__(self, job: Job, thread_id: int):
         super().__init__(logging.INFO)
@@ -364,7 +364,7 @@ class _JobLogHandler(logging.Handler):
         self.thread_id = thread_id
 
     def emit(self, record):
-        if record.thread == self.thread_id and not record.name.startswith("clab_automator.gui"):
+        if record.thread == self.thread_id and not record.name.startswith("clabfleet.gui"):
             self.job.add(f"» {record.getMessage()}")
 
 
@@ -394,7 +394,7 @@ class JobManager:
 
     def _run(self, job: Job, path: Path) -> None:
         handler = _JobLogHandler(job, threading.get_ident())
-        pkg_logger = logging.getLogger("clab_automator")
+        pkg_logger = logging.getLogger("clabfleet")
         pkg_logger.addHandler(handler)
         if pkg_logger.getEffectiveLevel() > logging.INFO:
             pkg_logger.setLevel(logging.INFO)

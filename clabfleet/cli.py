@@ -1,14 +1,14 @@
-"""CLI entrypoint for clab-automator.
+"""CLI entrypoint for clabfleet.
 
 Usage:
-    clab-automator deploy <topology.clab.yml> [--reconfigure] [--dry-run] [--output-dir DIR]
-    clab-automator deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
-    clab-automator destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
-    clab-automator save <topology.clab.yml> [--cluster <cluster.yaml>]
-    clab-automator inspect [<topology.clab.yml>] [--cluster <cluster.yaml>]
-    clab-automator status [--cluster <cluster.yaml>]
-    clab-automator export-live <devices.yaml> [-o output.clab.yml]
-    clab-automator gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
+    clabfleet deploy <topology.clab.yml> [--reconfigure] [--dry-run] [--output-dir DIR]
+    clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
+    clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
+    clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
+    clabfleet inspect [<topology.clab.yml>] [--cluster <cluster.yaml>]
+    clabfleet status [--cluster <cluster.yaml>]
+    clabfleet export-live <devices.yaml> [-o output.clab.yml]
+    clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
 
 Without --cluster, commands target a single host: this machine by default,
 or a remote server over SSH with --host.
@@ -38,7 +38,7 @@ from .topology import dump_yaml
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="clab-automator",
+        prog="clabfleet",
         description="Automate containerlab deployments on one or many hosts",
     )
 
@@ -220,7 +220,7 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
     except ImportError as exc:
         raise RuntimeError(
             f"The GUI needs extra packages ({exc.name}). "
-            "Install them with: pip install 'clab-automator[gui]'"
+            "Install them with: pip install 'clabfleet[gui]'"
         ) from exc
     roots = [Path(d).expanduser() for d in (args.dir or ["."])]
     for root in roots:

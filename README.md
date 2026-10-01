@@ -1,4 +1,4 @@
-# containerlab Lab Automation
+# clabfleet
 
 Deploy and tear down [containerlab](https://containerlab.dev) topologies on
 one host — or spread a large topology across a **cluster of hosts** with
@@ -43,16 +43,16 @@ pip install -e .
 
 # Deploy on this machine (runs containerlab against the file in place;
 # the lab directory clab-<name>/ is created next to it)
-clab-automator --sudo deploy topologies/three_router_triangle.clab.yml
+clabfleet --sudo deploy topologies/three_router_triangle.clab.yml
 
 # What's running?
-clab-automator --sudo inspect topologies/three_router_triangle.clab.yml
+clabfleet --sudo inspect topologies/three_router_triangle.clab.yml
 
 # Save running configs into the lab directory
-clab-automator --sudo save topologies/three_router_triangle.clab.yml
+clabfleet --sudo save topologies/three_router_triangle.clab.yml
 
 # Tear it down (add --keep-lab-dir to keep saved configs)
-clab-automator --sudo destroy topologies/three_router_triangle.clab.yml
+clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 ```
 
 ### Single remote host
@@ -62,13 +62,13 @@ export CLAB_HOST=192.168.1.101
 export CLAB_SSH_USER=netops
 export CLAB_SSH_KEY=~/.ssh/id_ed25519
 
-clab-automator status
-clab-automator --sudo deploy topologies/spine_leaf.clab.yml
-clab-automator --sudo destroy topologies/spine_leaf.clab.yml
+clabfleet status
+clabfleet --sudo deploy topologies/spine_leaf.clab.yml
+clabfleet --sudo destroy topologies/spine_leaf.clab.yml
 ```
 
 The topology and every file it references (startup configs, licenses,
-bind-mount sources, env files) are copied to `~/clab-automator/<lab>/` on the
+bind-mount sources, env files) are copied to `~/clabfleet/<lab>/` on the
 host, and containerlab runs there. `destroy` removes that directory.
 
 ## Web GUI
@@ -76,9 +76,9 @@ host, and containerlab runs there. `destroy` removes that directory.
 ```bash
 pip install -e ".[gui]"
 
-cd ~/Work/lab-automation
-clab-automator --sudo gui                     # this machine
-clab-automator gui --cluster topologies/cluster.yaml   # all cluster hosts
+cd ~/Work/clabfleet
+clabfleet --sudo gui                     # this machine
+clabfleet gui --cluster topologies/cluster.yaml   # all cluster hosts
 ```
 
 It opens your browser at a `http://localhost:8650/?token=...` link (also
@@ -150,22 +150,22 @@ from it, set its `vtep_ip` to an address the other hosts can reach.
 ### 2. Check the hosts
 
 ```bash
-clab-automator status --cluster topologies/cluster.yaml
+clabfleet status --cluster topologies/cluster.yaml
 ```
 
 ### 3. Deploy across the cluster
 
 ```bash
 # Preview placement and write the per-host topology files
-clab-automator deploy topologies/large_campus.clab.yml \
+clabfleet deploy topologies/large_campus.clab.yml \
     --cluster topologies/cluster.yaml --dry-run --output-dir /tmp/campus
 
 # Deploy
-clab-automator -v deploy topologies/large_campus.clab.yml \
+clabfleet -v deploy topologies/large_campus.clab.yml \
     --cluster topologies/cluster.yaml --strategy bin-pack
 
 # Destroy on all hosts
-clab-automator destroy topologies/large_campus.clab.yml \
+clabfleet destroy topologies/large_campus.clab.yml \
     --cluster topologies/cluster.yaml
 ```
 
@@ -237,10 +237,10 @@ The nodes see an ordinary point-to-point link.
 ```bash
 pip install -e ".[napalm]"
 
-clab-automator export-live topologies/live_devices_example.yaml \
+clabfleet export-live topologies/live_devices_example.yaml \
     -o imported/prod_mirror.clab.yml --lab-name prod-mirror
 
-clab-automator --sudo deploy imported/prod_mirror.clab.yml
+clabfleet --sudo deploy imported/prod_mirror.clab.yml
 ```
 
 Each device becomes a node (kind from the NAPALM platform unless you set
@@ -279,7 +279,7 @@ pytest
 ## Project structure
 
 ```
-clab_automator/
+clabfleet/
   __init__.py      # Package init
   topology.py      # Load containerlab topologies, inheritance, placement hints
   cluster.py       # Cluster inventory and host probing

@@ -7,15 +7,15 @@
 # so this file also deploys fine on a single host.
 #
 # Deploy:
-#   clab-automator deploy topologies/large_campus.clab.yml \
+#   clabfleet deploy topologies/large_campus.clab.yml \
 #       --cluster topologies/cluster.yaml --strategy bin-pack -v
 #
 # Preview placement and the per-host topology files:
-#   clab-automator deploy topologies/large_campus.clab.yml \
+#   clabfleet deploy topologies/large_campus.clab.yml \
 #       --cluster topologies/cluster.yaml --dry-run --output-dir /tmp/campus
 #
 # Destroy:
-#   clab-automator destroy topologies/large_campus.clab.yml \
+#   clabfleet destroy topologies/large_campus.clab.yml \
 #       --cluster topologies/cluster.yaml
 
 name: campus-network

@@ -8,9 +8,9 @@ pytest.importorskip("aiohttp")
 
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
-from clab_automator.cluster import ClusterConfig, HostInfo  # noqa: E402
-from clab_automator.gui import server, state  # noqa: E402
-from clab_automator.gui.state import (  # noqa: E402
+from clabfleet.cluster import ClusterConfig, HostInfo  # noqa: E402
+from clabfleet.gui import server, state  # noqa: E402
+from clabfleet.gui.state import (  # noqa: E402
     JobManager,
     Workspace,
     access_modes,
@@ -19,7 +19,7 @@ from clab_automator.gui.state import (  # noqa: E402
     terminal_command,
     topology_view,
 )
-from clab_automator.topology import topology_from_dict  # noqa: E402
+from clabfleet.topology import topology_from_dict  # noqa: E402
 
 TOPO = """\
 name: t

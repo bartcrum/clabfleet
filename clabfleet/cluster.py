@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 LOCAL_HOSTNAMES = {"localhost", "local", "127.0.0.1", "::1"}
 LINK_TYPES = {"vxlan-stitch", "vxlan"}
-DEFAULT_WORKDIR = "clab-automator"
+DEFAULT_WORKDIR = "clabfleet"
 
 
 class ClusterConfigError(Exception):
