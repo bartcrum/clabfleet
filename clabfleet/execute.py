@@ -30,6 +30,7 @@ from .nodes import (
     InspectError,
     inspect_all,
     parse_inspect,
+    run_docker,
 )
 from .runner import Runner, SSHRunner
 from .topology import Topology, load_topology
@@ -37,7 +38,6 @@ from .topology import Topology, load_topology
 logger = logging.getLogger(__name__)
 
 MODES = ("auto", "cli", "shell", "ssh")
-DOCKER_DENIED = "permission denied while trying to connect to the docker"
 
 
 @dataclass
@@ -190,9 +190,7 @@ class LabExecutor:
                 code, output = self._ssh_exec(runner, result.kind, container["ipv4"], command)
             else:
                 argv = docker_exec_argv(result.mode, result.kind, container["container"], command)
-                res = runner.run(argv, check=False, sudo=False)
-                if res.exit_code != 0 and host.sudo and DOCKER_DENIED in res.stderr.lower():
-                    res = runner.run(argv, check=False, sudo=True)
+                res = run_docker(runner, argv, host.sudo)
                 code, output = res.exit_code, res.stdout + res.stderr
         except Exception as exc:  # noqa: BLE001 - one node failing must not stop the rest
             result.error = str(exc) or type(exc).__name__

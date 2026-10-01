@@ -117,6 +117,7 @@ button { font: inherit; color: inherit; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; display: inline-block; }
 .dot.running { background: var(--accent); }
 .dot.partial, .dot.busy { background: var(--warn); }
+.dot.booting { background: var(--warn); animation: pulse 1.6s infinite; }
 .dot.error { background: var(--danger); }
 .dot.busy { animation: pulse 1s infinite; }
 @keyframes pulse { 50% { opacity: .3; } }
@@ -139,6 +140,7 @@ button { font: inherit; color: inherit; }
 }
 .badge.running { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
 .badge.partial { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.badge.booting { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .actions .opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); cursor: pointer; }
 
@@ -166,6 +168,7 @@ button { font: inherit; color: inherit; }
 .diagram .node .status { fill: var(--line); }
 .diagram .node .status.running { fill: var(--accent); }
 .diagram .node .status.other { fill: var(--warn); }
+.diagram .node .status.booting { fill: var(--warn); animation: pulse 1.6s infinite; }
 .diagram .node .hostbadge { font-size: 9.5px; fill: var(--blue); font-family: var(--mono); }
 .diagram .pseudo rect { fill: var(--bg); stroke: var(--node-line); stroke-dasharray: 3 3; }
 .diagram .pseudo .name { font-size: 11px; font-weight: 400; fill: var(--muted); }

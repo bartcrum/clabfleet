@@ -3,6 +3,7 @@
 Usage:
     clabfleet deploy <topology.clab.yml> [--reconfigure] [--dry-run] [--output-dir DIR]
                      [--pull] [--skip-image-check] [--skip-link-check] [--rollback]
+                     [--wait [--wait-timeout SECONDS]]
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
@@ -87,6 +88,10 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="docker pull node images that are missing on their host")
     p_deploy.add_argument("--skip-image-check", action="store_true",
                           help="Deploy without first checking that node images exist")
+    p_deploy.add_argument("--wait", action="store_true",
+                          help="Wait until every node's CLI or SSH answers")
+    p_deploy.add_argument("--wait-timeout", type=float, default=900, metavar="SECONDS",
+                          help="How long --wait waits (default: 900)")
     p_deploy.add_argument("--rollback", action="store_true",
                           help="If any host fails, destroy the lab everywhere it was "
                                "deployed instead of leaving it partly running")
@@ -262,6 +267,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             pull_images=args.pull,
             check_connectivity=not args.skip_link_check,
             rollback=args.rollback,
+            wait=args.wait,
+            wait_timeout=args.wait_timeout,
         )
     elif cmd in ("destroy", "teardown"):
         summary = deployer.destroy(args.topology, cleanup=not args.keep_lab_dir)
@@ -277,7 +284,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         name for name, result in summary.get("hosts", {}).items()
         if "error" in result
     ]
-    return 1 if failed else 0
+    not_ready = summary.get("readiness", {}).get("ready") is False
+    return 1 if failed or not_ready else 0
 
 
 def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:

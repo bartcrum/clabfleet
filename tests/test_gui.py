@@ -82,7 +82,7 @@ def test_parse_inspect_details():
         "NetworkSettings": {"IPv4addr": "172.20.20.2"},
     }]}
     assert parse_inspect(data, "h1") == [{
-        "lab": "lab1", "node": "r1", "container": "clab-lab1-r1", "kind": "arista_ceos",
+        "id": "", "lab": "lab1", "node": "r1", "container": "clab-lab1-r1", "kind": "arista_ceos",
         "image": "ceos:4.35.6M", "state": "running", "status": "Up 5 minutes",
         "ipv4": "172.20.20.2", "topo_file": "/x/lab1.clab.yml", "host": "h1",
     }]

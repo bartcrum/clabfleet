@@ -37,6 +37,7 @@ import posixpath
 import re
 import shlex
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
@@ -48,8 +49,9 @@ from .cluster import (
     probe_host_resources,
 )
 from .linkcheck import check_links, describe, failures, vxlan_pairs
-from .nodes import inspect_all, running_usage
+from .nodes import NO_SHELL_KINDS, inspect_all, parse_inspect, running_usage
 from .placement import NodePlacement, PlacementError, PlacementPlan, compute_placement
+from .readiness import check_ready, wait_until_ready
 from .runner import CommandError, OutputCallback, Runner
 from .topology import Topology, dump_yaml, load_topology, topology_from_dict
 
@@ -115,6 +117,8 @@ class LabDeployer:
         pull_images: bool = False,
         check_connectivity: bool = True,
         rollback: bool = False,
+        wait: bool = False,
+        wait_timeout: float = 900,
     ) -> dict:
         """Deploy a topology.
 
@@ -132,6 +136,10 @@ class LabDeployer:
             rollback: If any host fails, destroy the lab on every host it was
                 deployed to (including the failed one, which may hold
                 partly created nodes) instead of leaving it partly running.
+
+            wait: After deploying, wait until every node is ready (its CLI or
+                SSH answers, see clabfleet.readiness), up to ``wait_timeout``
+                seconds. The result is in the summary's ``readiness``.
 
         The summary's ``status`` is ``deployed``, ``partial`` (some hosts
         failed), ``failed`` (all failed), ``rolled-back`` or
@@ -217,6 +225,11 @@ class LabDeployer:
                 )
             else:
                 summary["status"] = "failed"
+
+            if wait and summary["status"] in ("deployed", "partial"):
+                deployed_on = [h for h in attempted if "error" not in summary["hosts"][h.name]]
+                summary["readiness"] = self._wait_ready(topo, deployed_on, host_topos,
+                                                        wait_timeout)
         finally:
             self._close_runners()
 
@@ -323,6 +336,39 @@ class LabDeployer:
             )
         except PlacementError as exc:
             raise DeploymentError(f"Placement failed: {exc}") from exc
+
+    def _wait_ready(
+        self, topo: Topology, hosts: list[HostInfo], host_topos: dict[str, dict],
+        timeout: float,
+    ) -> dict:
+        """Wait until the lab's nodes on ``hosts`` are ready (see readiness)."""
+        expected = [
+            n for h in hosts for n in host_topos[h.name]["topology"]["nodes"]
+            if topo.effective_node(n)["kind"] not in NO_SHELL_KINDS
+        ]
+        logger.info("Waiting up to %ds for %d nodes to be ready", timeout, len(expected))
+
+        def poll(pending: list[str]) -> dict[str, tuple[bool, str]]:
+            found: dict[str, tuple[HostInfo, dict]] = {}
+            for host in hosts:
+                try:
+                    data = inspect_all(self._runner(host))
+                except Exception as exc:
+                    logger.warning("Could not inspect %s: %s", host.name, exc)
+                    continue
+                for c in parse_inspect(data, host.name):
+                    if c["lab"] == topo.name and c["node"] in pending:
+                        found[c["node"]] = (host, c)
+            if not found:
+                return {}
+            with ThreadPoolExecutor(max_workers=min(16, len(found))) as pool:
+                checks = pool.map(
+                    lambda item: check_ready(self._runner(item[0]), item[1], item[0].sudo),
+                    found.values(),
+                )
+                return dict(zip(found, checks))
+
+        return wait_until_ready(poll, expected, timeout)
 
     def _rollback(self, topo: Topology, hosts: list[HostInfo]) -> dict[str, str]:
         """Destroy the lab on hosts after a failed deploy. Returns host → outcome."""

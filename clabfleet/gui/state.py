@@ -10,6 +10,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,7 @@ from typing import Optional
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
 from ..nodes import InspectError, access_modes, inspect_all, parse_inspect
+from ..readiness import ReadinessCache, check_ready
 from ..runner import Runner
 from ..topology import (
     LABEL_HOST,
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 TOPOLOGY_SUFFIXES = (".clab.yml", ".clab.yaml")
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox"}
 MAX_SCAN_DEPTH = 5
+GUI_PROBE_TIMEOUT = 5  # seconds; the GUI re-probes not-ready nodes anyway
 
 # ANSI escape sequences (colors, bold) in containerlab output
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -135,6 +138,8 @@ class Workspace:
         self._runners: dict[str, Runner] = {}
         self._runner_lock = threading.Lock()
         self._topologies: dict[str, Path] = {}
+        self.readiness = ReadinessCache()
+        self._probes = ThreadPoolExecutor(max_workers=8, thread_name_prefix="readiness")
 
     @property
     def multi_host(self) -> bool:
@@ -161,6 +166,7 @@ class Workspace:
             runner.close()
 
     def close(self) -> None:
+        self._probes.shutdown(wait=False, cancel_futures=True)
         with self._runner_lock:
             for runner in self._runners.values():
                 runner.close()
@@ -205,6 +211,7 @@ class Workspace:
     def runtime(self) -> list[HostState]:
         """Containers running on each host (one `containerlab inspect` per host)."""
         states = []
+        live: set[tuple] = set()
         for host in self.cluster.hosts:
             state = HostState(host.name)
             try:
@@ -215,8 +222,39 @@ class Workspace:
             except Exception as exc:
                 state.error = str(exc)
                 self.drop_runner(host)  # reconnect next time
+            self._annotate_ready(host, state.containers, live)
             states.append(state)
+        self.readiness.prune(live)
         return states
+
+    def _annotate_ready(self, host: HostInfo, containers: list[dict], live: set) -> None:
+        """Set ``ready`` (True/False, None = not known yet) on each container.
+
+        Probes run in the background so a slow node never delays the page.
+        """
+        for c in containers:
+            key = (host.name, c["id"] or c["container"])
+            live.add(key)
+            if c["state"] != "running":
+                c["ready"], c["ready_detail"] = False, c["state"] or "not running"
+                continue
+            last, due = self.readiness.get(key)
+            c["ready"], c["ready_detail"] = last if last else (None, "checking")
+            if due and self.readiness.claim(key):
+                try:
+                    self._probes.submit(self._probe_ready, key, host, dict(c))
+                except RuntimeError:  # shutting down
+                    self.readiness.release(key)
+
+    def _probe_ready(self, key: tuple, host: HostInfo, container: dict) -> None:
+        try:
+            ok, detail = check_ready(self.runner(host), container, host.sudo,
+                                     timeout=GUI_PROBE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - try again on the next refresh
+            logger.debug("Readiness probe of %s failed: %s", container["container"], exc)
+            self.readiness.release(key)
+            return
+        self.readiness.store(key, ok, detail)
 
     def find_node(self, lab: str, node: str) -> dict:
         for state in self.runtime():

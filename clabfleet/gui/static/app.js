@@ -99,10 +99,25 @@ function crossLinkVnis() {
 function labStatus(lab, total) {
   const cs = labContainers(lab);
   const running = cs.filter((c) => c.state === "running").length;
+  const booting = cs.filter((c) => c.state === "running" && c.ready === false).length;
   let state = "stopped";
-  if (cs.length && running === (total ?? cs.length) && running === cs.length) state = "running";
+  if (cs.length && running === (total ?? cs.length) && running === cs.length) state = booting ? "booting" : "running";
   else if (cs.length) state = "partial";
-  return { running, total: total ?? cs.length, state, deployed: cs.length };
+  return { running, booting, ready: running - booting, total: total ?? cs.length, state, deployed: cs.length };
+}
+
+// Node state for dots and labels: running (ready), booting (container up,
+// CLI/SSH not yet), partial (container not running), or "" (not deployed)
+function nodeState(rt) {
+  if (!rt) return "";
+  if (rt.state !== "running") return "partial";
+  return rt.ready === false ? "booting" : "running";
+}
+
+function nodeStateText(rt) {
+  if (!rt) return "not deployed";
+  if (rt.state === "running" && rt.ready === false) return `booting · ${rt.ready_detail || ""}`;
+  return rt.status || rt.state;
 }
 
 function jobRunning() {
@@ -262,7 +277,9 @@ function renderLabHead() {
   $("#lab-name").textContent = lab || "";
   const badge = $("#lab-state");
   badge.className = `badge ${st.state}`;
-  badge.textContent = st.state === "stopped" ? "not deployed" : `${st.state} · ${st.running}/${st.total}`;
+  badge.textContent = st.state === "stopped" ? "not deployed"
+    : st.state === "booting" ? `booting · ${st.ready}/${st.total} ready`
+    : `${st.state} · ${st.running}/${st.total}`;
 
   const topoFile = labContainers(lab)[0]?.topo_file;
   $("#lab-path").textContent = isTopo ? S.detail?.path || "" : topoFile ? `deployed from ${topoFile}` : "";
@@ -333,8 +350,8 @@ function renderNodesTable() {
       h("td", { class: "mono small" }, n.kind + (n.type ? ` (${n.type})` : "")),
       h("td", { class: "img" }, n.rt?.image || n.image || ""),
       multi ? h("td", { class: "mono small" }, n.rt?.host || placedHost(n.name) || (n.host_pin ? `${n.host_pin} (pinned)` : "")) : null,
-      h("td", {}, h("span", { class: `dot ${running ? "running" : n.rt ? "partial" : ""}` }), " ",
-        n.rt ? n.rt.status || n.rt.state : "not deployed"),
+      h("td", { title: n.rt?.ready_detail || "" }, h("span", { class: `dot ${nodeState(n.rt)}` }), " ",
+        nodeStateText(n.rt)),
       h("td", { class: "mono small" }, n.rt?.ipv4 || ""),
       h("td", {}, openButtons(lab, n.name, n.modes, running)));
   }));
@@ -606,7 +623,7 @@ function renderDiagram(fit) {
       continue;
     }
     const rt = nodeRuntime(lab, nd.id);
-    const stClass = rt ? (rt.state === "running" ? "running" : "other") : "";
+    const stClass = { running: "running", booting: "booting", partial: "other" }[nodeState(rt)] || "";
     const el = s("g", {
       class: `node${S.selectedNode === nd.id ? " selected" : ""}`,
       transform: `translate(${x},${y})`, "data-id": nd.id,
@@ -618,7 +635,7 @@ function renderDiagram(fit) {
       multi && (nodeHost(lab, nd.id) || nd.node.host_pin)
         ? s("text", { class: "hostbadge", x: NODE_W / 2 - 6, y: NODE_H / 2 + 13, "text-anchor": "end" }, `@${nodeHost(lab, nd.id) || nd.node.host_pin}`)
         : null,
-      s("title", {}, `${nd.id} (${nd.node.kind})${rt ? ` — ${rt.status}` : " — not deployed"}`));
+      s("title", {}, `${nd.id} (${nd.node.kind}) — ${nodeStateText(rt)}`));
     g.append(el);
   }
 
@@ -736,14 +753,14 @@ function renderNodeCard() {
   const rows = [
     ["Kind", node.kind + (node.type ? ` (${node.type})` : "")],
     ["Image", rt?.image || node.image],
-    ["State", rt ? rt.status : "not deployed"],
+    ["State", nodeStateText(rt)],
     ["Mgmt", rt?.ipv4],
     ["Container", rt?.container],
     S.state?.multi_host ? ["Host", rt?.host || placedHost(node.name) || (node.host_pin && `${node.host_pin} (pinned)`) || (node.host_tags && `tags: ${node.host_tags}`)] : null,
   ].filter((r) => r && r[1]);
   card.replaceChildren(
     h("h3", {},
-      h("span", { class: `dot ${running ? "running" : rt ? "partial" : ""}` }),
+      h("span", { class: `dot ${nodeState(rt)}` }),
       node.name,
       h("button", { class: "close", title: "Close", onclick: () => selectNode(null) }, "×")),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),

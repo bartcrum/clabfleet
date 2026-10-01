@@ -61,6 +61,25 @@ clabfleet --sudo save topologies/three_router_triangle.clab.yml
 clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 ```
 
+### Wait for nodes to boot
+
+containerlab returns once containers start, but network OSes take
+longer: cEOS needs about a minute, VM-based kinds several. With `--wait`,
+`deploy` waits until every node is ready, printing progress, for up to
+`--wait-timeout` seconds (default 900). It exits with code 1 if some
+nodes are still not ready, and lists them in the output's `readiness`.
+
+```bash
+clabfleet deploy topologies/spine_leaf.clab.yml --wait
+```
+
+A node is ready when its Docker health check reports healthy, which
+vrnetlab images have. Without a health check, a kind with a CLI through
+`docker exec` (cEOS, SR Linux, cRPD) must answer `show version`, and a
+kind reached over SSH, such as IOL, must answer on port 22 of its
+management address. Other kinds are ready once running. The GUI uses the
+same probes and shows nodes as **booting** in amber until they are ready.
+
 ### Run a command on every node
 
 ```bash
@@ -155,7 +174,7 @@ printed in the terminal). Stop it with Ctrl+C.
 
 - **Sidebar:** every `*.clab.yml` under the current directory (or each
   `--dir`), with live state, plus any other labs running on your hosts
-- **Diagram:** nodes coloured by state, interface names on links, the host
+- **Diagram:** nodes coloured by state (amber while booting), interface names on links, the host
   each node runs on (multi-host), and cross-host VXLAN links highlighted.
   Drag nodes to arrange them (positions are remembered per topology),
   scroll to zoom, double-click a node to open its terminal
@@ -411,6 +430,7 @@ clabfleet/
   nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
   validate.py      # Topology checks (clabfleet validate)
   linkcheck.py     # Ping and UDP checks between cluster hosts
+  readiness.py     # Is a node's CLI/SSH up yet (deploy --wait, GUI)
   cli.py           # CLI entrypoint
   gui/
     server.py      # aiohttp app: API, auth, terminal websockets

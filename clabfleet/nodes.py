@@ -20,6 +20,18 @@ INSPECT_ARGS = ["inspect", "--all", "--details", "--format", "json"]
 class InspectError(Exception):
     """`containerlab inspect` failed on a host."""
 
+
+DOCKER_DENIED = "permission denied while trying to connect to the docker"
+
+
+def run_docker(runner, argv: list[str], host_sudo: bool):
+    """Run a docker command without sudo, retrying with sudo if Docker refuses
+    and the host is configured to use sudo."""
+    res = runner.run(argv, check=False, sudo=False)
+    if res.exit_code != 0 and host_sudo and DOCKER_DENIED in (res.stderr + res.stdout).lower():
+        res = runner.run(argv, check=False, sudo=True)
+    return res
+
 # Command that gives a node's native CLI via `docker exec` (interactive)
 KIND_CLI = {
     "arista_ceos": ["Cli"],
@@ -105,6 +117,7 @@ def parse_inspect(data: dict, host_name: str) -> list[dict]:
             net = c.get("NetworkSettings") or {}
             names = c.get("Names") or [c.get("name", "")]
             containers.append({
+                "id": c.get("Id") or c.get("ID") or c.get("container_id", ""),
                 "lab": labels.get("containerlab", lab_name),
                 "node": labels.get("clab-node-name") or names[0],
                 "container": names[0],
