@@ -220,6 +220,24 @@ from it, set its `vtep_ip` to an address the other hosts can reach.
 
 ```bash
 clabfleet status --cluster topologies/cluster.yaml
+clabfleet status --cluster topologies/cluster.yaml --check-links
+```
+
+`--check-links` tests every pair of hosts in both directions. It pings
+the other host's VXLAN address, then runs a short UDP listener on the VXLAN
+port there and sends it tagged datagrams. The UDP test catches a firewall
+that drops VXLAN while ping still works. The probes use `ping` and
+`python3` on the hosts. A probe that cannot run is reported as not tested
+rather than failed.
+
+The same check runs automatically before deploying a lab with cross-host
+links, for the host pairs that share links, and stops the deploy before
+anything is created. Turn it off with `--skip-link-check`. On RHEL and
+other firewalld hosts, open the port to your other lab hosts:
+
+```bash
+sudo firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=192.168.1.0/24 port port=14789 protocol=udp accept'
+sudo firewall-cmd --reload
 ```
 
 ### 3. Deploy across the cluster
@@ -384,6 +402,7 @@ clabfleet/
   execute.py       # Run a command on lab nodes (clabfleet exec)
   nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
   validate.py      # Topology checks (clabfleet validate)
+  linkcheck.py     # Ping and UDP checks between cluster hosts
   cli.py           # CLI entrypoint
   gui/
     server.py      # aiohttp app: API, auth, terminal websockets

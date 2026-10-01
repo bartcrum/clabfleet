@@ -47,6 +47,7 @@ from .cluster import (
     create_runner,
     probe_host_resources,
 )
+from .linkcheck import check_links, describe, failures, vxlan_pairs
 from .nodes import inspect_all, running_usage
 from .placement import NodePlacement, PlacementError, PlacementPlan, compute_placement
 from .runner import CommandError, OutputCallback, Runner
@@ -112,6 +113,7 @@ class LabDeployer:
         output_dir: Optional[str | Path] = None,
         check_images: bool = True,
         pull_images: bool = False,
+        check_connectivity: bool = True,
     ) -> dict:
         """Deploy a topology.
 
@@ -124,6 +126,8 @@ class LabDeployer:
             check_images: Before deploying, fail if a node's image is missing
                 on the host it is placed on.
             pull_images: ``docker pull`` missing images before checking.
+            check_connectivity: Before deploying a lab with cross-host
+                links, check the hosts reach each other on the VXLAN port.
 
         Returns:
             Summary dict with placement, cross-host links and per-host results.
@@ -152,6 +156,9 @@ class LabDeployer:
             if dry_run:
                 summary["dry_run"] = True
                 return summary
+
+            if check_connectivity and cross_links:
+                summary["link_check"] = self._check_connectivity(cross_links)
 
             if check_images:
                 self._check_images(topo, host_topos, pull_images)
@@ -358,6 +365,26 @@ class LabDeployer:
             "vni_range": vni_range,
             "cross_host_links": cross_links,
         }
+
+    def _check_connectivity(self, cross_links: list[dict]) -> list[dict]:
+        """Raise DeploymentError if hosts sharing links cannot reach each other."""
+        pairs = vxlan_pairs(cross_links)
+        hosts = {h.name: h for h in self.cluster.hosts}
+        runners = {name: self._runner(hosts[name]) for pair in pairs for name in pair}
+        logger.info("Checking VXLAN connectivity between %s", ", ".join(sorted(runners)))
+        results = check_links(runners, self.cluster.hosts, pairs, self.cluster.dst_port)
+        bad = failures(results)
+        for r in results:
+            if r not in bad and r["note"]:
+                logger.warning("Link check: %s", describe(r))
+        if bad:
+            raise DeploymentError(
+                "Lab hosts cannot reach each other for VXLAN links:\n"
+                + "".join(f"  {describe(r)}\n" for r in bad)
+                + f"VXLAN needs UDP {self.cluster.dst_port} open between the hosts. "
+                "Fix the network or firewall, or skip this check with --skip-link-check."
+            )
+        return results
 
     def _check_images(self, topo: Topology, host_topos: dict[str, dict], pull: bool) -> None:
         """Raise DeploymentError listing every image missing on its target host."""

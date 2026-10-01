@@ -36,6 +36,7 @@ from .cluster import (
 )
 from .deployer import LabDeployer
 from .execute import LabExecutor
+from .linkcheck import all_pairs, check_links, describe, failures
 from .nodes import inspect_all, running_usage
 from .exporter import export_from_live_network
 from .topology import dump_yaml
@@ -86,6 +87,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="docker pull node images that are missing on their host")
     p_deploy.add_argument("--skip-image-check", action="store_true",
                           help="Deploy without first checking that node images exist")
+    p_deploy.add_argument("--skip-link-check", action="store_true",
+                          help="Deploy across hosts without first checking that they "
+                               "reach each other on the VXLAN port")
 
     # --- destroy ---
     p_destroy = sub.add_parser("destroy", aliases=["teardown"], help="Destroy a lab")
@@ -133,6 +137,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- status ---
     p_status = sub.add_parser("status", help="Show containerlab version and resources per host")
     add_cluster_arg(p_status)
+    p_status.add_argument("--check-links", action="store_true",
+                          help="Also check every pair of hosts reaches the other on the "
+                               "VXLAN port (ping and UDP)")
 
     # --- validate ---
     p_validate = sub.add_parser(
@@ -232,7 +239,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _gui(args, cluster)
 
     if cmd == "status":
-        return _status(cluster)
+        rc = _status(cluster)
+        if args.check_links:
+            rc = max(rc, _check_links(cluster))
+        return rc
 
     if cmd == "exec":
         return _exec(args, cluster)
@@ -247,6 +257,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             output_dir=args.output_dir,
             check_images=not args.skip_image_check,
             pull_images=args.pull,
+            check_connectivity=not args.skip_link_check,
         )
     elif cmd in ("destroy", "teardown"):
         summary = deployer.destroy(args.topology, cleanup=not args.keep_lab_dir)
@@ -333,6 +344,26 @@ def _validate(args: argparse.Namespace) -> int:
         if report.errors or (args.strict and report.warnings):
             failed += 1
     return 1 if failed else 0
+
+
+def _check_links(cluster: ClusterConfig) -> int:
+    if len(cluster.hosts) < 2:
+        print("Link check: only one host, nothing to check.")
+        return 0
+    runners = {h.name: create_runner(h) for h in cluster.hosts}
+    try:
+        results = check_links(runners, cluster.hosts, all_pairs(cluster.hosts),
+                              cluster.dst_port)
+    finally:
+        for runner in runners.values():
+            runner.close()
+    print(f"VXLAN connectivity (UDP {cluster.dst_port}):")
+    for r in results:
+        print(f"  {describe(r)}")
+    bad = failures(results)
+    if bad:
+        print(f"{len(bad)} of {len(results)} host pairs failed.")
+    return 1 if bad else 0
 
 
 def _status(cluster: ClusterConfig) -> int:
