@@ -1,0 +1,198 @@
+# Roadmap
+
+Candidate features for clabfleet, grouped by theme and ordered into phases.
+Each item names the gap in the current code that motivates it and the
+modules it would touch. Sizes are rough: **S** is an afternoon, **M** a
+few days, **L** a week or more.
+
+Nothing here is committed work. Phases are a suggested order: phase 1
+fixes real problems and adds the most-used commands, phase 2 deepens the
+cluster and GUI, phase 3 is the longer tail.
+
+## Phase 1 — foundations and daily use
+
+### 1.1 Per-lab VNI allocation (bug) — S
+
+`split_topology()` in `clabfleet/deployer.py` restarts VNI numbering at
+`cluster.vni_base` on every deploy. Two labs on the same cluster therefore
+get the same VNIs and the second deploy clashes with the first.
+
+- Allocate VNIs from a per-cluster registry stored next to the cluster
+  file (or under `~/.clabfleet/`), recording which lab holds which range.
+- Alternative with no state: derive a per-lab offset from a hash of the
+  lab name and check for overlap against running labs via `inspect`.
+- Release the range on `destroy`.
+
+### 1.2 Placement engine tests — S
+
+`clabfleet/placement.py` has no dedicated test module; only
+`tests/test_deployer.py` builds a `PlacementPlan` by hand. Add
+`tests/test_placement.py` covering pinning, tag affinity with and without
+a match, resource exhaustion errors, and the three strategies on a small
+topology with fake `HostInfo` objects.
+
+### 1.3 `clabfleet validate` — S
+
+`load_topology()` already checks names, groups, kinds and link endpoints.
+Expose it as a subcommand that never touches a host, and extend it to warn on:
+
+- referenced files that do not exist (today a warning in the log only)
+- kinds with no CLI/SSH access mode known to the GUI
+- `lab.host` labels naming hosts absent from the `--cluster` file
+- `lab.host-tags` that match no host
+
+Touches `clabfleet/cli.py`, `clabfleet/topology.py`.
+
+### 1.4 `clabfleet exec` — M
+
+There is no way to run a command on nodes. Add
+`clabfleet exec <topology> "<command>" [--nodes glob] [--mode cli|shell]`
+that fans out over `docker exec` on each node's host, reusing `KIND_CLI`
+from `clabfleet/gui/state.py` (move it to a shared module). Print per-node
+output with a host prefix in multi-host mode, and support `--json`.
+
+Touches `clabfleet/cli.py`, `clabfleet/deployer.py`, `clabfleet/runner.py`.
+
+### 1.5 Pre-flight image check — S
+
+Deploys fail late when an image is missing on a host. Before deploying,
+run `docker image inspect` for every image on its target host and report
+the gaps in one message. Add `--pull` to fetch them first.
+
+Touches `clabfleet/deployer.py` (new step before `_deploy_on_host`).
+
+### 1.6 Persist the placement plan — M
+
+Nothing records which host each node landed on; `destroy`, `save` and
+`inspect` probe every host for a lab directory instead. Write
+`<lab>.placement.json` next to the topology on deploy, with the host per
+node, the VNI range and the cluster file used. Read it on later commands
+and in the GUI so the diagram shows the real assignment rather than a
+recomputed one.
+
+Touches `clabfleet/deployer.py`, `clabfleet/gui/state.py`,
+`clabfleet/gui/static/app.js`.
+
+## Phase 2 — cluster robustness and GUI depth
+
+### 2.1 Account for labs already running — M
+
+Placement uses `nproc` and `MemAvailable`, so CPU reserved by labs already
+running is invisible. In `probe_host_resources()` (or a new step in
+`LabDeployer._plan`), sum the per-kind resource estimates of containers
+returned by `inspect --all` and reserve them before placing new nodes.
+
+### 2.2 Cross-host connectivity check — S
+
+`status` prints VTEP addresses but never tests them. Before a multi-host
+deploy, run a reachability probe between every pair of VTEPs (ICMP, and a
+UDP probe on `dst_port` where possible) and fail early with a clear
+message. Add `clabfleet status --check-links`.
+
+Touches `clabfleet/cluster.py`, `clabfleet/cli.py`.
+
+### 2.3 Rollback on partial failure — M
+
+If the second host fails mid-deploy, the first is left running with
+dangling VXLAN endpoints. Add `deploy --rollback` that destroys what
+already deployed when any host fails, and record partial state in the
+summary so the GUI can show it.
+
+### 2.4 Readiness wait — M
+
+containerlab returns when containers start, but IOL and cEOS need a
+minute to boot. Add a per-kind readiness probe (SSH port open, or the
+kind's CLI answering `show version`) and `deploy --wait [--timeout]`.
+Expose the state in the GUI as `booting` versus `ready`.
+
+Touches `clabfleet/deployer.py`, `clabfleet/gui/state.py`,
+`clabfleet/gui/static/app.js`.
+
+### 2.5 Link-aware spread strategy — S
+
+`_pick_host()` with `spread` ignores adjacency entirely. Apply the
+bin-pack locality score as a tiebreaker among the least-loaded hosts, so
+balanced placements still minimise cross-host links.
+
+### 2.6 YAML editing in the browser — M
+
+The YAML tab is read-only and node positions live only in browser local
+storage. Add an editor with save, validation feedback from 1.3, and write
+dragged positions back as `graph-posX` / `graph-posY` labels so layouts
+travel with the file.
+
+Touches `clabfleet/gui/server.py` (PUT endpoint), `clabfleet/gui/state.py`,
+`clabfleet/gui/static/`.
+
+### 2.7 Node logs tab — S
+
+`docker logs --follow` per node over the existing terminal websocket,
+useful for boot problems on VM-based kinds.
+
+### 2.8 Job history and parallel jobs — M
+
+`JobManager` allows one job at a time and forgets everything on restart.
+Keep a history file under the workspace, allow concurrent jobs on
+different labs, and show elapsed time per host in the Activity panel.
+
+## Phase 3 — longer tail
+
+### 3.1 Config snapshots and diffs — M
+
+`save` writes configs into the lab directory but nothing reads them back.
+Add `snapshot` (pull configs to a local dated folder) and `diff` against
+the previous snapshot or the committed `startup-config`.
+
+### 3.2 Lab templates — M
+
+`clabfleet new spine-leaf --spines 2 --leaves 4 --kind arista_ceos` that
+generates nodes, links and startup configs from a small template set.
+
+### 3.3 Live link and node state in the diagram — M
+
+Nodes are coloured by container state only. Poll `ip link` inside
+containers to show links down, and `docker stats` for CPU and memory per
+node.
+
+### 3.4 Packet capture from the diagram — L
+
+Click a link, pick a side, and stream `tcpdump` from the container's
+network namespace to a download or a live decode. Fits the terminal
+websocket plumbing in `clabfleet/gui/terminals.py`.
+
+### 3.5 Cluster view page — S
+
+A hosts page with per-host capacity bars, running labs, and which labs
+span hosts, built on `Workspace.host_status()`.
+
+### 3.6 Multi-user and remote access — L
+
+The GUI is single-token and localhost only. For a shared jump host: named
+users with per-user tokens, an audit log of terminal sessions and
+actions, and TLS.
+
+### 3.7 Live network import improvements
+
+The exporter in `clabfleet/exporter.py` produces a topology that usually
+needs hand edits before it deploys.
+
+- **Interface name mapping — M.** Per-kind rewrite tables (for example
+  `GigabitEthernet0/0/1` → `Ethernet0/1` for IOL) applied to both links
+  and the saved configs.
+- **Config sanitising — M.** `--sanitise` strips or replaces password
+  hashes, SNMP communities, AAA servers and management addresses.
+- **Image mapping — S.** Map platform and version to a real image via the
+  inventory file instead of emitting `REPLACE-ME/<kind>:latest`.
+- **Incremental re-sync — M.** Diff the new LLDP graph against the
+  existing topology and report added, removed and changed nodes and links
+  instead of overwriting.
+- **Neighbour-only devices — S.** Optionally add LLDP neighbours that are
+  not in the inventory as placeholder `linux` nodes.
+- **Other inventory sources — M.** Accept a NetBox/Nautobot query or an
+  Ansible inventory as the device list.
+
+## Not planned
+
+- Replacing containerlab's own VXLAN handling with a custom overlay.
+- A full topology designer (drag nodes and links from a palette); YAML
+  editing in 2.6 covers the need with far less code.
