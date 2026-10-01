@@ -1,0 +1,90 @@
+# Three-router triangle topology
+# 3x Cisco IOL routers in a full-mesh triangle with OSPF.
+#
+# Ethernet0/0 is the management interface (containerlab assigns its IP and
+# puts it in a management VRF), so data links start at Ethernet0/1.
+#
+# Deploy:
+#   clab-automator deploy topologies/three_router_triangle.clab.yml
+
+name: three-router-triangle
+
+topology:
+  kinds:
+    cisco_iol:
+      image: vrnetlab/cisco_iol:17.12.01
+
+  nodes:
+    R1:
+      kind: cisco_iol
+      startup-config: |
+        hostname R1
+        !
+        interface Loopback0
+         ip address 1.1.1.1 255.255.255.255
+        !
+        interface Ethernet0/1
+         description to-R2
+         ip address 10.0.12.1 255.255.255.0
+         no shutdown
+        !
+        interface Ethernet0/2
+         description to-R3
+         ip address 10.0.13.1 255.255.255.0
+         no shutdown
+        !
+        router ospf 1
+         network 0.0.0.0 255.255.255.255 area 0
+        !
+        end
+
+    R2:
+      kind: cisco_iol
+      startup-config: |
+        hostname R2
+        !
+        interface Loopback0
+         ip address 2.2.2.2 255.255.255.255
+        !
+        interface Ethernet0/1
+         description to-R1
+         ip address 10.0.12.2 255.255.255.0
+         no shutdown
+        !
+        interface Ethernet0/2
+         description to-R3
+         ip address 10.0.23.2 255.255.255.0
+         no shutdown
+        !
+        router ospf 1
+         network 0.0.0.0 255.255.255.255 area 0
+        !
+        end
+
+    R3:
+      kind: cisco_iol
+      startup-config: |
+        hostname R3
+        !
+        interface Loopback0
+         ip address 3.3.3.3 255.255.255.255
+        !
+        interface Ethernet0/1
+         description to-R1
+         ip address 10.0.13.3 255.255.255.0
+         no shutdown
+        !
+        interface Ethernet0/2
+         description to-R2
+         ip address 10.0.23.3 255.255.255.0
+         no shutdown
+        !
+        router ospf 1
+         network 0.0.0.0 255.255.255.255 area 0
+        !
+        end
+
+  links:
+    - endpoints: ["R1:Ethernet0/1", "R2:Ethernet0/1"]
+    - endpoints: ["R1:Ethernet0/2", "R3:Ethernet0/1"]
+    - endpoints: ["R2:Ethernet0/2", "R3:Ethernet0/2"]

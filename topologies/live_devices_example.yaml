@@ -1,39 +1,37 @@
 # Example device inventory for export-live command.
 # Lists production devices to connect to via NAPALM,
 # pull running configs and LLDP neighbours, and generate
-# an EVE-NG topology YAML that mirrors the live network.
+# a containerlab topology that mirrors the live network. Running configs
+# are written to configs/<node>.cfg next to the output file.
+#
+# kind/image/type are optional: kind defaults from the NAPALM platform
+# (ios → cisco_iol, eos → arista_ceos, junos → juniper_vjunosrouter, ...).
 #
 # Usage:
-#   eve-ng-automator export-live topologies/live_devices_example.yaml \
-#       -o topologies/imported_from_prod.yaml --lab-name "prod-mirror"
+#   clab-automator export-live topologies/live_devices_example.yaml \
+#       -o imported/prod_mirror.clab.yml --lab-name "prod-mirror"
 
 devices:
   - hostname: "core-rtr-01.example.com"
     platform: "ios"           # NAPALM driver
     username: "admin"
     password: "changeme"      # or use env vars / vault
-    template: "vios"          # EVE-NG template
-    image: "vios-adventerprisek9-m.vmdk.SPA-15.9.3M6"
-    ram: 512
-    cpu: 1
+    kind: "cisco_iol"         # containerlab kind
+    image: "vrnetlab/cisco_iol:17.12.01"
 
   - hostname: "core-rtr-02.example.com"
     platform: "ios"
     username: "admin"
     password: "changeme"
-    template: "vios"
-    image: "vios-adventerprisek9-m.vmdk.SPA-15.9.3M6"
-    ram: 512
-    cpu: 1
+    kind: "cisco_iol"
+    image: "vrnetlab/cisco_iol:17.12.01"
 
   - hostname: "dist-sw-01.example.com"
     platform: "eos"
     username: "admin"
     password: "changeme"
-    template: "veos"
-    image: "veos-4.28.0F"
-    ram: 4096
-    cpu: 2
+    kind: "arista_ceos"
+    image: "ceos:4.32.0F"
     optional_args:
       transport: "https"
 
@@ -41,10 +39,8 @@ devices:
     platform: "eos"
     username: "admin"
     password: "changeme"
-    template: "veos"
-    image: "veos-4.28.0F"
-    ram: 4096
-    cpu: 2
+    kind: "arista_ceos"
+    image: "ceos:4.32.0F"
     optional_args:
       transport: "https"
 
@@ -52,6 +48,5 @@ devices:
     platform: "panos"
     username: "admin"
     password: "changeme"
-    template: "paloalto"
-    ram: 4096
-    cpu: 2
+    kind: "paloalto_panos"
+    image: "vrnetlab/paloalto_pan:11.1.0"
