@@ -17,6 +17,7 @@ from typing import Optional
 
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer
+from ..nodes import access_modes, parse_inspect, terminal_command  # noqa: F401 (re-exported)
 from ..runner import Runner
 from ..topology import (
     LABEL_HOST,
@@ -34,61 +35,6 @@ MAX_SCAN_DEPTH = 5
 
 # ANSI escape sequences (colors, bold) in containerlab output
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-
-# Command that gives a node's native CLI via `docker exec`
-KIND_CLI = {
-    "arista_ceos": ["Cli"],
-    "ceos": ["Cli"],
-    "nokia_srlinux": ["sr_cli"],
-    "srl": ["sr_cli"],
-    "juniper_crpd": ["cli"],
-    "crpd": ["cli"],
-}
-# Kinds whose CLI is only reachable over SSH (VM-based / vrnetlab images)
-SSH_CLI_KINDS = {
-    "cisco_iol", "cisco_xrv9k", "cisco_csr1000v", "cisco_c8000v", "cisco_n9kv",
-    "cisco_ftdv", "juniper_vjunosrouter", "juniper_vjunosswitch",
-    "juniper_vjunosevolved", "juniper_vsrx", "nokia_sros", "vr-sros",
-    "fortinet_fortigate", "paloalto_panos",
-}
-# Kinds with no shell worth opening
-NO_SHELL_KINDS = {"bridge", "ovs-bridge", "host", "ext-container"}
-# Default SSH usernames containerlab sets up per kind
-KIND_SSH_USER = {"juniper_crpd": "root", "crpd": "root", "linux": "root"}
-
-SHELL_CMD = ["sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l"]
-
-
-def access_modes(kind: str) -> list[str]:
-    """Terminal modes offered for a node kind, best first."""
-    if kind in NO_SHELL_KINDS:
-        return []
-    if kind in KIND_CLI:
-        return ["cli", "shell", "ssh"]
-    if kind in SSH_CLI_KINDS:
-        return ["ssh", "shell"]
-    return ["shell", "ssh"]
-
-
-def terminal_command(mode: str, kind: str, container: str, ipv4: str) -> list[str]:
-    """argv to run (on the node's host) for a terminal mode."""
-    if mode == "cli":
-        if kind not in KIND_CLI:
-            raise ValueError(f"No CLI command known for kind '{kind}'")
-        return ["docker", "exec", "-it", container, *KIND_CLI[kind]]
-    if mode == "shell":
-        return ["docker", "exec", "-it", container, *SHELL_CMD]
-    if mode == "ssh":
-        if not ipv4:
-            raise ValueError("Node has no management IPv4 address")
-        user = KIND_SSH_USER.get(kind, "admin")
-        return [
-            "ssh", "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-            f"{user}@{ipv4}",
-        ]
-    raise ValueError(f"Unknown terminal mode '{mode}'")
-
 
 # ----------------------------------------------------------------------
 # Workspace topologies
@@ -172,29 +118,6 @@ def topology_view(topo: Topology) -> dict:
 # ----------------------------------------------------------------------
 # Running labs
 # ----------------------------------------------------------------------
-
-def parse_inspect(data: dict, host_name: str) -> list[dict]:
-    """Normalise `containerlab inspect --all --details --format json` output."""
-    containers = []
-    for lab_name, items in (data or {}).items():
-        for c in items or []:
-            labels = c.get("Labels") or {}
-            net = c.get("NetworkSettings") or {}
-            names = c.get("Names") or [c.get("name", "")]
-            containers.append({
-                "lab": labels.get("containerlab", lab_name),
-                "node": labels.get("clab-node-name") or names[0],
-                "container": names[0],
-                "kind": labels.get("clab-node-kind") or c.get("kind", ""),
-                "image": c.get("Image") or c.get("image", ""),
-                "state": c.get("State") or c.get("state", ""),
-                "status": c.get("Status") or c.get("status", ""),
-                "ipv4": net.get("IPv4addr") or "",
-                "topo_file": labels.get("clab-topo-file", ""),
-                "host": host_name,
-            })
-    return containers
-
 
 @dataclass
 class HostState:
