@@ -4,6 +4,7 @@ Everything here is synchronous; the web server calls it from worker threads.
 """
 
 import copy
+import json
 import logging
 import os
 import re
@@ -287,7 +288,7 @@ class Workspace:
 
 
 # ----------------------------------------------------------------------
-# Jobs (deploy / destroy / save), one at a time
+# Jobs (deploy / destroy / save): one per lab at a time, several labs at once
 # ----------------------------------------------------------------------
 
 @dataclass
@@ -295,7 +296,8 @@ class Job:
     id: str
     action: str
     topology: str
-    status: str = "running"  # running | ok | error
+    lab: str = ""
+    status: str = "running"  # running | ok | error | interrupted
     lines: list[str] = field(default_factory=list)
     started: float = field(default_factory=time.time)
     finished: Optional[float] = None
@@ -320,13 +322,82 @@ class Job:
             bad = [f"{h} ({r})" for h, r in result["rollback"].items() if r != "ok"]
             self.add(f"✗ rollback incomplete on {', '.join(bad)}. Destroy the lab to clean up.")
 
-    def view(self, offset: int = 0) -> dict:
+    def host_times(self) -> dict[str, float]:
+        """Seconds each host took, from the result (empty while running)."""
+        hosts = (self.result or {}).get("hosts", {})
+        return {h: r["seconds"] for h, r in hosts.items() if isinstance(r, dict) and "seconds" in r}
+
+    def summary(self) -> dict:
+        """The job without its output lines (for job lists)."""
         return {
-            "id": self.id, "action": self.action, "topology": self.topology,
+            "id": self.id, "action": self.action, "topology": self.topology, "lab": self.lab,
             "status": self.status, "started": self.started, "finished": self.finished,
-            "lines": self.lines[offset:], "offset": len(self.lines),
-            "result": self.result,
+            "options": self.options, "host_times": self.host_times(),
+            "line_count": len(self.lines),
         }
+
+    def view(self, offset: int = 0) -> dict:
+        return {**self.summary(), "lines": self.lines[offset:], "offset": len(self.lines),
+                "result": self.result}
+
+    def to_dict(self) -> dict:
+        return {**self.view(0), "lines": self.lines}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Job":
+        return cls(
+            id=str(data["id"]), action=data.get("action", ""), topology=data.get("topology", ""),
+            lab=data.get("lab", ""), status=data.get("status", "error"),
+            lines=list(data.get("lines") or []), started=data.get("started") or 0,
+            finished=data.get("finished"), result=data.get("result"),
+            options=data.get("options") or {},
+        )
+
+
+class JobHistory:
+    """Finished and running jobs as JSON files in ``<workspace>/.clabfleet/jobs``.
+
+    Keeps the newest ``keep`` jobs. Without a writable directory, history
+    simply is not kept.
+    """
+
+    def __init__(self, directory: Optional[Path], keep: int = 50):
+        self.directory = directory
+        self.keep = keep
+
+    def load(self) -> list[Job]:
+        if not self.directory or not self.directory.is_dir():
+            return []
+        jobs = []
+        for path in self.directory.glob("*.json"):
+            try:
+                job = Job.from_dict(json.loads(path.read_text()))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                logger.warning("Skipping unreadable job file %s: %s", path, exc)
+                continue
+            if job.status == "running":  # the GUI stopped while it ran
+                job.status = "interrupted"
+                job.add("✗ interrupted: the GUI stopped while this job was running")
+            jobs.append(job)
+        jobs.sort(key=lambda j: j.started)
+        return jobs[-self.keep:]
+
+    def save(self, job: Job) -> None:
+        if not self.directory:
+            return
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            tmp = self.directory / f".{job.id}.tmp"
+            tmp.write_text(json.dumps(job.to_dict()))
+            tmp.replace(self.directory / f"{job.id}.json")
+            self._prune()
+        except OSError as exc:
+            logger.warning("Could not save job history in %s: %s", self.directory, exc)
+
+    def _prune(self) -> None:
+        files = sorted(self.directory.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        for old in files[:-self.keep]:
+            old.unlink(missing_ok=True)
 
 
 class _JobLogHandler(logging.Handler):
@@ -345,27 +416,48 @@ class _JobLogHandler(logging.Handler):
 class JobManager:
     ACTIONS = {"deploy", "redeploy", "destroy", "save"}
     OPTIONS = {"rollback"}  # deploy/redeploy only
+    MAX_RUNNING = 4
 
-    def __init__(self, workspace: Workspace):
+    def __init__(self, workspace: Workspace, history: Optional[JobHistory] = None):
         self.workspace = workspace
-        self.jobs: dict[str, Job] = {}
+        if history is None:
+            root = workspace.roots[0] if workspace.roots else None
+            history = JobHistory(root / ".clabfleet" / "jobs" if root else None)
+        self.history = history
+        self.jobs: dict[str, Job] = {j.id: j for j in history.load()}
         self._lock = threading.Lock()
-        self.current: Optional[Job] = None
+
+    def running(self) -> list[Job]:
+        return [j for j in self.jobs.values() if j.status == "running"]
+
+    def recent(self, limit: int = 30) -> list[Job]:
+        """Newest first."""
+        return sorted(self.jobs.values(), key=lambda j: j.started, reverse=True)[:limit]
 
     def start(self, action: str, topo_id: str, options: Optional[dict] = None) -> Job:
         if action not in self.ACTIONS:
             raise ValueError(f"Unknown action '{action}'")
         options = {k: bool(v) for k, v in (options or {}).items() if k in self.OPTIONS}
         path = self.workspace.topology_path(topo_id)
+        try:
+            lab = load_topology(path).name
+        except Exception:  # invalid file: the job itself will report why
+            lab = topo_id
         with self._lock:
-            if self.current and self.current.status == "running":
+            running = self.running()
+            for other in running:
+                if other.topology == topo_id or other.lab == lab:
+                    raise RuntimeError(
+                        f"A job is already running for lab '{lab}' ({other.action})"
+                    )
+            if len(running) >= self.MAX_RUNNING:
                 raise RuntimeError(
-                    f"Another job is running ({self.current.action} {self.current.topology})"
+                    f"{len(running)} jobs are already running; wait for one to finish"
                 )
             job = Job(id=uuid.uuid4().hex[:12], action=action, topology=topo_id,
-                      options=options)
+                      lab=lab, options=options)
             self.jobs[job.id] = job
-            self.current = job
+        self.history.save(job)
         threading.Thread(target=self._run, args=(job, path), daemon=True).start()
         return job
 
@@ -403,4 +495,8 @@ class JobManager:
         finally:
             pkg_logger.removeHandler(handler)
             job.finished = time.time()
+            times = job.host_times()
+            if times:
+                job.add("» time per host: " + ", ".join(f"{h} {t:g}s" for h, t in times.items()))
             job.add("✓ done" if job.status == "ok" else "✗ failed")
+            self.history.save(job)

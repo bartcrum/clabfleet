@@ -179,7 +179,12 @@ printed in the terminal). Stop it with Ctrl+C.
   Drag nodes to arrange them (positions are remembered per topology),
   scroll to zoom, double-click a node to open its terminal
 - **Deploy / Redeploy / Save configs / Destroy** with containerlab's output
-  streamed into the Activity panel
+  streamed into the Activity panel. Different labs can run jobs at the
+  same time, up to four, with one job per lab. Pick any job, running or
+  past, from the Activity panel's list to see its output, how long it
+  took, and the time each host took. The last 50 jobs are kept in
+  `.clabfleet/jobs/` under the first workspace directory, so they survive
+  a restart of the GUI.
 - **Terminals** in tabs at the bottom:
   - **CLI**: the node's own CLI via `docker exec` (`Cli` on cEOS, `sr_cli`
     on SR Linux, `cli` on cRPD)

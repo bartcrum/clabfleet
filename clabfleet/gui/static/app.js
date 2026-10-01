@@ -120,8 +120,42 @@ function nodeStateText(rt) {
   return rt.status || rt.state;
 }
 
-function jobRunning() {
-  return S.state?.job?.status === "running";
+// The running job of a topology, if any (several labs can run jobs at once)
+function runningJob(topoId) {
+  return (S.state?.jobs || []).find((j) => j.status === "running" && j.topology === topoId);
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60), r = sec % 60;
+  return m < 60 ? `${m}m ${String(r).padStart(2, "0")}s` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+const JOB_ICON = { running: "⟳", ok: "✓", error: "✗", interrupted: "✗" };
+
+function jobLabel(j) {
+  const when = new Date(j.started * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `${JOB_ICON[j.status] || "•"} ${j.action} ${j.lab || j.topology} · ${when}`;
+}
+
+function renderJobPicker() {
+  const sel = $("#job-select");
+  const jobs = S.state?.jobs || [];
+  sel.hidden = !jobs.length;
+  sel.replaceChildren(...jobs.map((j) => h("option", { value: j.id }, jobLabel(j))));
+  if (S.viewJob) sel.value = S.viewJob;
+  renderJobMeta();
+}
+
+function renderJobMeta() {
+  const j = (S.state?.jobs || []).find((x) => x.id === S.viewJob);
+  const meta = $("#job-meta");
+  if (!j) { meta.textContent = ""; return; }
+  const end = j.finished || Date.now() / 1000;
+  const hosts = Object.entries(j.host_times || {}).map(([hst, t]) => `${hst} ${fmtDuration(t)}`).join(", ");
+  meta.textContent = `${j.status === "running" ? "running" : j.status} · ${fmtDuration(end - j.started)}` +
+    (hosts ? ` · ${hosts}` : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -129,11 +163,19 @@ function jobRunning() {
 // ---------------------------------------------------------------------------
 
 async function refreshState() {
+  const before = new Map((S.state?.jobs || []).map((j) => [j.id, j.status]));
   try {
     S.state = await api("/api/state");
   } catch (e) {
     toast(`Could not load state: ${e.message}`);
     return;
+  }
+  // Jobs that finished in the background (the viewed one reports itself)
+  for (const j of S.state.jobs) {
+    if (before.get(j.id) === "running" && j.status !== "running" && j.id !== S.viewJob) {
+      if (j.status !== "ok") toast(`${j.action} ${j.lab} failed — see Activity`);
+      if (S.selected?.type === "topo" && S.selected.id === j.topology) reloadDetail();
+    }
   }
   for (const r of S.state.runtime) {
     if (!r.ok && r.error) console.warn(`host ${r.host}: ${r.error}`);
@@ -141,7 +183,11 @@ async function refreshState() {
   renderSidebar();
   renderLabHead();
   renderRuntimeOverlays();
-  if (jobRunning() && !S.jobPolling) trackJob(S.state.job.id, false);
+  if (!S.viewJob && S.state.jobs.length) {
+    const running = S.state.jobs.find((j) => j.status === "running");
+    trackJob((running || S.state.jobs[0]).id, false);
+  }
+  renderJobPicker();
 }
 
 async function refreshHosts() {
@@ -178,7 +224,7 @@ function renderSidebar() {
   $("#topo-list").replaceChildren(...topos.map((t) => {
     const st = labStatus(t.name, t.nodes);
     const active = S.selected?.type === "topo" && S.selected.id === t.id;
-    const busy = jobRunning() && S.state.job.topology === t.id;
+    const busy = !!runningJob(t.id);
     return h("li", {},
       h("button", {
         class: `lab-item${active ? " active" : ""}`,
@@ -286,7 +332,7 @@ function renderLabHead() {
 
   const actions = $("#lab-actions");
   actions.hidden = !isTopo;
-  const busy = jobRunning();
+  const busy = isTopo && !!runningJob(S.selected.id);
   for (const btn of actions.querySelectorAll("button")) {
     const a = btn.dataset.action;
     const enabled = a === "deploy" ? st.deployed === 0 : st.deployed > 0;
@@ -784,7 +830,7 @@ async function runAction(action) {
   try {
     const options = action === "deploy" || action === "redeploy" ? { rollback: $("#opt-rollback").checked } : {};
     const job = await api("/api/jobs", { method: "POST", body: JSON.stringify({ action, topology: S.selected.id, options }) });
-    S.state.job = job;
+    S.state.jobs = [job, ...(S.state.jobs || [])];
     renderLabHead();
     renderSidebar();
     trackJob(job.id, true);
@@ -804,30 +850,41 @@ function appendActivity(lines) {
   if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
 
+// Show a job's output in the Activity pane, following it while it runs
 function trackJob(id, fromStart) {
   clearTimeout(S.jobPolling);
+  S.jobPolling = null;
+  S.viewJob = id;
   const pre = $("#activity");
   pre.dataset.fresh = "";
+  pre.textContent = "";
   let offset = 0;
+  let sawRunning = false;
   if (fromStart) activatePane("activity", true);
-  $("#activity-dot").className = "dot busy";
+  renderJobPicker();
 
   const poll = async () => {
     let job;
     try {
       job = await api(`/api/jobs/${id}?offset=${offset}`);
     } catch (e) {
-      S.jobPolling = setTimeout(poll, 2000);
+      if (S.viewJob === id) S.jobPolling = setTimeout(poll, 2000);
       return;
     }
+    if (S.viewJob !== id) return;  // switched to another job meanwhile
     if (job.lines.length) appendActivity(job.lines);
     offset = job.offset;
+    const known = (S.state?.jobs || []).find((j) => j.id === id);
+    if (known) Object.assign(known, { status: job.status, finished: job.finished, host_times: job.host_times });
+    renderJobMeta();
+    $("#activity-dot").className = `dot ${job.status === "running" ? "busy" : job.status === "ok" ? "running" : "error"}`;
     if (job.status === "running") {
+      sawRunning = true;
       S.jobPolling = setTimeout(poll, 700);
       return;
     }
     S.jobPolling = null;
-    $("#activity-dot").className = `dot ${job.status === "ok" ? "running" : "error"}`;
+    if (!sawRunning) return;  // a finished job opened from history
     if (job.status !== "ok") toast(`${job.action} failed — see Activity`);
     await refreshState();
     await reloadDetail();
@@ -982,7 +1039,9 @@ function setup() {
 
   refreshState();
   refreshHosts();
-  setInterval(() => { if (!document.hidden && !S.jobPolling) refreshState(); }, 5000);
+  $("#job-select").addEventListener("change", (e) => trackJob(e.target.value, false));
+  setInterval(() => { if (!document.hidden) refreshState(); }, 5000);
+  setInterval(() => { if (!document.hidden) renderJobMeta(); }, 1000);
   setInterval(() => { if (!document.hidden) refreshHosts(); }, 30000);
 }
 

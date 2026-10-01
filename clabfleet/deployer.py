@@ -36,6 +36,8 @@ import logging
 import posixpath
 import re
 import shlex
+import threading
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -70,6 +72,32 @@ PLACEMENT_RECORD_SUFFIX = ".placement.json"
 MAX_VNI = 2**24 - 1
 # A `vni: 1234` line in a per-host topology file written by clabfleet
 _VNI_LINE = re.compile(r"^(?P<path>.+?):\s*vni:\s*(?P<vni>\d+)\s*$")
+
+
+# Deploys running in one process (the GUI runs several jobs at once) plan
+# one at a time. A lab's VNIs and resources only become visible to other
+# deploys once its files and containers exist on the hosts, so until its
+# deploy finishes it is registered here and planning counts it in.
+_PLAN_LOCK = threading.RLock()
+_IN_FLIGHT: dict[str, dict] = {}  # lab → {"vnis": set, "hosts": {host: (cpu, ram)}}
+
+
+def _register_in_flight(lab: str, plan: PlacementPlan, vnis: range) -> None:
+    hosts: dict[str, tuple[float, int]] = {}
+    for p in plan.placements:
+        cpu, ram = hosts.get(p.host_name, (0, 0))
+        hosts[p.host_name] = (cpu + p.cpu, ram + p.ram)
+    with _PLAN_LOCK:
+        _IN_FLIGHT[lab] = {"vnis": set(vnis), "hosts": hosts}
+
+
+def _unregister_in_flight(lab: str) -> None:
+    with _PLAN_LOCK:
+        _IN_FLIGHT.pop(lab, None)
+
+
+def _since(started: float) -> float:
+    return round(time.monotonic() - started, 1)
 
 
 class DeploymentError(Exception):
@@ -151,13 +179,18 @@ class LabDeployer:
         topo = load_topology(topology_file)
         summary: dict = {"lab": topo.name, "hosts": {}}
 
+        registered = False
         try:
-            plan = self._plan(topo, strategy)
-            vni_base = self.cluster.vni_base
-            needed = count_cross_host_links(topo, plan)
-            if needed:
-                vni_base = self._allocate_vnis(topo, needed)
-                summary["vni_range"] = [vni_base, vni_base + needed - 1]
+            with _PLAN_LOCK:
+                plan = self._plan(topo, strategy)
+                vni_base = self.cluster.vni_base
+                needed = count_cross_host_links(topo, plan)
+                if needed:
+                    vni_base = self._allocate_vnis(topo, needed)
+                    summary["vni_range"] = [vni_base, vni_base + needed - 1]
+                if not dry_run:
+                    _register_in_flight(topo.name, plan, range(vni_base, vni_base + needed))
+                    registered = True
             host_topos, cross_links = split_topology(
                 topo, plan, self.cluster, vni_base=vni_base
             )
@@ -197,6 +230,7 @@ class LabDeployer:
                 if data is None:
                     continue
                 attempted.append(host)
+                started = time.monotonic()
                 try:
                     summary["hosts"][host.name] = self._deploy_on_host(
                         host, topo, data, reconfigure
@@ -204,8 +238,9 @@ class LabDeployer:
                 except Exception as exc:
                     logger.error("Deployment failed on %s: %s", host.name, exc)
                     summary["hosts"][host.name] = {"error": str(exc)}
-                    if rollback:
-                        break  # no point deploying the rest
+                summary["hosts"][host.name]["seconds"] = _since(started)
+                if rollback and "error" in summary["hosts"][host.name]:
+                    break  # no point deploying the rest
 
             failed = [h for h, r in summary["hosts"].items() if "error" in r]
             if failed and rollback:
@@ -231,6 +266,8 @@ class LabDeployer:
                 summary["readiness"] = self._wait_ready(topo, deployed_on, host_topos,
                                                         wait_timeout)
         finally:
+            if registered:
+                _unregister_in_flight(topo.name)
             self._close_runners()
 
         return summary
@@ -246,9 +283,11 @@ class LabDeployer:
         summary: dict = {"lab": topo.name, "hosts": {}}
         try:
             for host in hosts_for_lab(self.cluster, topo):
+                started = time.monotonic()
                 summary["hosts"][host.name] = self._on_host(
                     host, topo, "destroy", ["--cleanup"] if cleanup else []
                 )
+                summary["hosts"][host.name]["seconds"] = _since(started)
                 if cleanup and not self._in_place(host, topo):
                     result = summary["hosts"][host.name]
                     if result.get("status") == "ok":
@@ -265,7 +304,9 @@ class LabDeployer:
         summary: dict = {"lab": topo.name, "hosts": {}}
         try:
             for host in hosts_for_lab(self.cluster, topo):
+                started = time.monotonic()
                 summary["hosts"][host.name] = self._on_host(host, topo, "save", [])
+                summary["hosts"][host.name]["seconds"] = _since(started)
         finally:
             self._close_runners()
         return summary
@@ -392,21 +433,34 @@ class LabDeployer:
         return outcome
 
     def _reserve_running_labs(self, host: HostInfo, lab: str, reserve_ram: bool) -> None:
-        """Reserve the estimated CPU (and RAM) of other labs running on a host."""
+        """Reserve the estimated CPU (and RAM) of other labs on a host.
+
+        Covers labs running there and labs this process is deploying right
+        now (whose containers may not exist yet). Call with _PLAN_LOCK held.
+        """
+        in_flight = {name: e for name, e in _IN_FLIGHT.items() if name != lab}
         try:
             usage = running_usage(inspect_all(self._runner(host)), exclude_lab=lab)
         except Exception as exc:
             logger.warning("Could not list running labs on %s (%s); placement "
                            "ignores them", host.name, exc)
+            usage = {}
+        cpu = ram = 0
+        for name, u in usage.items():
+            if name not in in_flight:  # counted below instead
+                cpu, ram = cpu + u["cpu"], ram + u["ram"]
+        for e in in_flight.values():
+            c, r = e["hosts"].get(host.name, (0, 0))
+            cpu, ram = cpu + c, ram + r
+        labs = sorted(set(usage) | {n for n, e in in_flight.items() if host.name in e["hosts"]})
+        if not labs:
             return
-        if not usage:
-            return
-        cpu = sum(u["cpu"] for u in usage.values())
-        ram = sum(u["ram"] for u in usage.values()) if reserve_ram else 0
+        if not reserve_ram:
+            ram = 0
         host.reserve(cpu, ram)
         logger.info(
-            "Host %s: running labs %s reserve %.1f vCPU%s", host.name,
-            ", ".join(sorted(usage)), cpu, f" / {ram}MB" if reserve_ram else "",
+            "Host %s: labs %s reserve %.1f vCPU%s", host.name,
+            ", ".join(labs), cpu, f" / {ram}MB" if reserve_ram else "",
         )
 
     def _allocate_vnis(self, topo: Topology, count: int) -> int:
@@ -424,6 +478,9 @@ class LabDeployer:
             for lab, vnis in by_lab.items():
                 if lab != topo.name:  # a redeploy may reuse its own VNIs
                     used |= vnis
+        for lab, entry in _IN_FLIGHT.items():  # deploys not yet on the hosts
+            if lab != topo.name:
+                used |= entry["vnis"]
         base = allocate_vni_block(used, self.cluster.vni_base, count)
         logger.info("Using VNIs %d-%d for '%s'", base, base + count - 1, topo.name)
         return base

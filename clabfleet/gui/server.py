@@ -40,6 +40,7 @@ def create_app(workspace: Workspace, token: str) -> web.Application:
     app.router.add_get("/api/state", _state)
     app.router.add_get("/api/hosts", _hosts)
     app.router.add_get("/api/topologies/{id:.+}", _topology)
+    app.router.add_get("/api/jobs", _jobs)
     app.router.add_post("/api/jobs", _start_job)
     app.router.add_get("/api/jobs/{id}", _job)
     app.router.add_get("/ws/terminal", _terminal)
@@ -125,7 +126,7 @@ async def _state(request):
              "containers": [{**c, "modes": access_modes(c["kind"])} for c in s.containers]}
             for s in runtime
         ],
-        "job": jobs.current.view(len(jobs.current.lines)) if jobs.current else None,
+        "jobs": [j.summary() for j in jobs.recent()],
     })
 
 
@@ -155,6 +156,10 @@ async def _start_job(request):
     except RuntimeError as exc:
         raise web.HTTPConflict(text=str(exc))
     return web.json_response(job.view())
+
+
+async def _jobs(request):
+    return web.json_response([j.summary() for j in request.app[JOBS].recent()])
 
 
 async def _job(request):

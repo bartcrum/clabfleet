@@ -92,7 +92,13 @@
       <button id="dock-toggle" class="btn ghost small" title="Show/hide panel">▴</button>
     </div>
     <div id="dock-panes" class="dock-panes">
-      <div class="pane active" data-pane="activity"><pre id="activity" class="activity mono">No jobs yet.</pre></div>
+      <div class="pane active activity-pane" data-pane="activity">
+        <div class="activity-bar">
+          <select id="job-select" class="small" aria-label="Job"></select>
+          <span id="job-meta" class="muted small mono"></span>
+        </div>
+        <pre id="activity" class="activity mono">No jobs yet.</pre>
+      </div>
     </div>
   </section>
 

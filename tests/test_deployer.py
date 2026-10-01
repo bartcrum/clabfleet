@@ -250,3 +250,37 @@ def test_placement_reserves_other_labs(monkeypatch):
     assert plan.host_for_node("a") == "h2"  # only 1 vCPU left on h1
     assert hosts[0].used_cpu == 3 and hosts[0].used_ram == 3 * 2048  # explicit max_ram
     assert hosts[1].used_cpu == 2 and hosts[1].used_ram == 128  # just this lab's node
+
+
+def test_deploys_in_flight_count_for_other_labs(monkeypatch):
+    # Another lab is being deployed in this process: its VNIs and host
+    # resources must be avoided even though nothing exists on the hosts yet
+    cluster = ClusterConfig(hosts=[HostInfo("h1", "10.0.0.1", max_cpu=4, max_ram=8192),
+                                   HostInfo("h2", "10.0.0.2", max_cpu=4, max_ram=8192)])
+    monkeypatch.setattr(deployer, "create_runner", lambda host: FakeRunner(""))
+    monkeypatch.setattr(deployer, "probe_host_resources", lambda runner, host: {})
+    monkeypatch.setattr(deployer, "inspect_all", lambda runner: {})
+    other = PlacementPlan()
+    other.placements.append(NodePlacement("x", "h1", 3, 1024))
+    deployer._register_in_flight("other", other, range(1000, 1002))
+    try:
+        topo = topology_from_dict({"name": "t", "topology": {
+            "nodes": {"a": {"kind": "linux", "labels": {"lab.cpu": "2"}},
+                      "b": {"kind": "linux", "labels": {"lab.cpu": "2"}}},
+            "links": [{"endpoints": ["a:eth1", "b:eth1"]}]}})
+        monkeypatch.setattr(deployer, "load_topology", lambda path: topo)
+        summary = LabDeployer(cluster).deploy("t.clab.yml", dry_run=True)
+        assert summary["placement"] == {"h2": ["a", "b"]}  # h1 has 1 vCPU left
+        assert "vni_range" not in summary
+        spread = LabDeployer(ClusterConfig(hosts=[HostInfo("h1", "10.0.0.1"),
+                                                  HostInfo("h2", "10.0.0.2")])).deploy(
+            "t.clab.yml", dry_run=True, strategy="spread")
+        assert spread["vni_range"] == [1002, 1002]  # 1000-1001 are in flight
+    finally:
+        deployer._unregister_in_flight("other")
+
+    summary = LabDeployer(ClusterConfig(hosts=[HostInfo("h1", "10.0.0.1"),
+                                               HostInfo("h2", "10.0.0.2")])).deploy(
+        "t.clab.yml", dry_run=True, strategy="spread")
+    assert summary["vni_range"] == [1000, 1000]  # free again once "other" finished
+    assert deployer._IN_FLIGHT == {}
