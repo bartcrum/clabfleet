@@ -5,6 +5,8 @@
 #   docker import cEOS64-lab-4.35.6M.tar.xz ceos:4.35.6M
 #
 # Link endpoints use eth1, eth2, ... — EOS shows them as Ethernet1, Ethernet2.
+# Each config creates the admin/admin login, which a custom startup-config
+# would otherwise drop (needed for SSH).
 #
 # Deploy:
 #   clab-automator deploy topologies/spine_leaf.clab.yml
@@ -22,6 +24,8 @@ topology:
       kind: arista_ceos
       startup-config: |
         hostname Spine-1
+        !
+        username admin privilege 15 secret admin
         !
         ip routing
         !
@@ -62,6 +66,8 @@ topology:
       kind: arista_ceos
       startup-config: |
         hostname Spine-2
+        !
+        username admin privilege 15 secret admin
         !
         ip routing
         !
@@ -104,6 +110,8 @@ topology:
       startup-config: |
         hostname Leaf-1
         !
+        username admin privilege 15 secret admin
+        !
         ip routing
         !
         interface Loopback0
@@ -132,6 +140,8 @@ topology:
       kind: arista_ceos
       startup-config: |
         hostname Leaf-2
+        !
+        username admin privilege 15 secret admin
         !
         ip routing
         !
@@ -162,6 +172,8 @@ topology:
       startup-config: |
         hostname Leaf-3
         !
+        username admin privilege 15 secret admin
+        !
         ip routing
         !
         interface Loopback0
@@ -190,6 +202,8 @@ topology:
       kind: arista_ceos
       startup-config: |
         hostname Leaf-4
+        !
+        username admin privilege 15 secret admin
         !
         ip routing
         !
