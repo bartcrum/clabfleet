@@ -288,7 +288,7 @@ limits, then a per-kind estimate (e.g. cEOS 1 vCPU / 2 GB, IOL 0.5 / 512 MB).
 | Strategy | Behaviour |
 |----------|-----------|
 | `bin-pack` | Fill each host before moving to the next, keeping neighbours together. Fewest cross-host links. **(default)** |
-| `spread` | Distribute nodes evenly across hosts. |
+| `spread` | Distribute nodes evenly across hosts. When hosts are equally loaded, a node joins the host where most of its neighbours already are. |
 | `resource` | Always pick the host with the most free resources. |
 
 ### How cross-host links work

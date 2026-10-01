@@ -127,6 +127,16 @@ def test_spread_balances_node_counts():
     assert counts == {"h1": 2, "h2": 2}
 
 
+def test_spread_breaks_ties_by_neighbour_locality():
+    hosts = _hosts(("h1", 8, 8192), ("h2", 8, 8192))
+    names = ["a", "b", "c", "d"]
+    plan = compute_placement([_node(n) for n in names], _chain(*names), hosts, "spread")
+    # Balanced 2/2, but c joins its neighbour b instead of alternating hosts:
+    # 2 cross-host links (a-b, c-d) instead of 3
+    assert _where(plan) == {"a": "h1", "b": "h2", "c": "h2", "d": "h1"}
+    assert len(plan.cross_host_links) == 2
+
+
 def test_resource_picks_host_with_most_room():
     hosts = _hosts(("h1", 4, 4096), ("h2", 8, 8192))
     plan = compute_placement([_node("a")], [], hosts, "resource")
