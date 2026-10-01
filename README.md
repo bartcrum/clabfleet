@@ -143,7 +143,7 @@ several.
 # cluster.yaml
 cluster:
   link_type: "vxlan-stitch"   # vxlan-stitch | vxlan
-  vni_base: 1000              # each cross-host link gets the next VNI
+  vni_base: 1000              # lowest VNI; each cross-host link gets its own
   dst_port: 14789             # VXLAN UDP port — must be open between hosts
   mtu: 1450                   # leave room for the 50-byte VXLAN overhead
 
@@ -253,6 +253,13 @@ Host clab-1                              Host clab-2
 
 containerlab builds the VXLAN tunnels on deploy and removes them on destroy.
 The nodes see an ordinary point-to-point link.
+
+VNIs are unique across the cluster, so several labs can share it. Before
+deploying, clabfleet reads the VNIs that other labs use from their lab
+directories on each host (`~/clabfleet/<lab>/`), and gives this lab the
+first free block at or above `vni_base`. A lab destroyed with
+`--keep-lab-dir` keeps its VNIs reserved until its directory is removed.
+The chosen range is shown as `vni_range` in the deploy output.
 
 ## Import from live network
 

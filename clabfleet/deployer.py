@@ -19,13 +19,20 @@ Multiple hosts (cluster):
 
 containerlab creates and removes the VXLAN links itself, so ``destroy``
 only needs to run ``containerlab destroy`` on every host.
+
+VNIs are unique across the cluster: before splitting, every host's lab
+directories are scanned for VNIs that other labs already use, and this
+lab takes the first free block at or above ``vni_base``.
 """
 
 import copy
 import json
 import logging
+import posixpath
+import re
+import shlex
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from .cluster import (
@@ -39,6 +46,11 @@ from .runner import CommandError, OutputCallback, Runner
 from .topology import Topology, dump_yaml, load_topology, topology_from_dict
 
 logger = logging.getLogger(__name__)
+
+
+MAX_VNI = 2**24 - 1
+# A `vni: 1234` line in a per-host topology file written by clabfleet
+_VNI_LINE = re.compile(r"^(?P<path>.+?):\s*vni:\s*(?P<vni>\d+)\s*$")
 
 
 class DeploymentError(Exception):
@@ -100,7 +112,14 @@ class LabDeployer:
 
         try:
             plan = self._plan(topo, strategy)
-            host_topos, cross_links = split_topology(topo, plan, self.cluster)
+            vni_base = self.cluster.vni_base
+            needed = count_cross_host_links(topo, plan)
+            if needed:
+                vni_base = self._allocate_vnis(topo, needed)
+                summary["vni_range"] = [vni_base, vni_base + needed - 1]
+            host_topos, cross_links = split_topology(
+                topo, plan, self.cluster, vni_base=vni_base
+            )
             summary["placement"] = plan.summary()["placements"]
             summary["cross_host_links"] = cross_links
 
@@ -224,6 +243,25 @@ class LabDeployer:
         except PlacementError as exc:
             raise DeploymentError(f"Placement failed: {exc}") from exc
 
+    def _allocate_vnis(self, topo: Topology, count: int) -> int:
+        """First VNI of a free block of ``count`` VNIs for this lab."""
+        used: set[int] = set()
+        for host in self.cluster.hosts:
+            try:
+                by_lab = scan_used_vnis(self._runner(host), host)
+            except Exception as exc:
+                logger.warning(
+                    "Could not check VNIs in use on %s (%s); VXLAN links may "
+                    "clash with other labs", host.name, exc,
+                )
+                continue
+            for lab, vnis in by_lab.items():
+                if lab != topo.name:  # a redeploy may reuse its own VNIs
+                    used |= vnis
+        base = allocate_vni_block(used, self.cluster.vni_base, count)
+        logger.info("Using VNIs %d-%d for '%s'", base, base + count - 1, topo.name)
+        return base
+
     def _deploy_on_host(
         self, host: HostInfo, topo: Topology, data: dict, reconfigure: bool
     ) -> dict:
@@ -330,10 +368,61 @@ class LabDeployer:
         self._runners.clear()
 
 
+def count_cross_host_links(topo: Topology, plan: PlacementPlan) -> int:
+    """Number of links whose nodes the plan puts on different hosts."""
+    return sum(
+        1 for link in topo.links
+        if len({plan.host_for_node(n) for n in link.node_names}) > 1
+    )
+
+
+def scan_used_vnis(runner: Runner, host: HostInfo) -> dict[str, set[int]]:
+    """VNIs used by labs clabfleet has deployed on a host, per lab name.
+
+    Reads the ``vni:`` lines of the per-host topology files in the host's
+    lab directories (``<workdir>/<lab>/<lab>.clab.yml``). A lab directory
+    exists until the lab is destroyed with cleanup, so a destroyed lab kept
+    with ``--keep-lab-dir`` still holds its VNIs.
+    """
+    workdir = posixpath.dirname(host.lab_dir("_"))
+    script = (
+        "grep -H -E '^[[:space:]]*vni:[[:space:]]*[0-9]+[[:space:]]*$' "
+        f"{shlex.quote(workdir)}/*/*.clab.yml 2>/dev/null; true"
+    )
+    result = runner.run(["sh", "-c", script], check=False, sudo=False)
+    used: dict[str, set[int]] = defaultdict(set)
+    for line in result.stdout.splitlines():
+        m = _VNI_LINE.match(line)
+        if m:
+            used[PurePosixPath(m.group("path")).parent.name].add(int(m.group("vni")))
+    return dict(used)
+
+
+def allocate_vni_block(used: set[int], start: int, count: int) -> int:
+    """Lowest VNI >= start such that start..start+count-1 avoids ``used``."""
+    base = start
+    while True:
+        if base + count - 1 > MAX_VNI:
+            raise DeploymentError(
+                f"No free block of {count} VNIs at or above {start} "
+                f"({len(used)} VNIs are in use by other labs)"
+            )
+        clash = [v for v in used if base <= v < base + count]
+        if not clash:
+            return base
+        base = max(clash) + 1
+
+
 def split_topology(
-    topo: Topology, plan: PlacementPlan, cluster: ClusterConfig
+    topo: Topology,
+    plan: PlacementPlan,
+    cluster: ClusterConfig,
+    vni_base: Optional[int] = None,
 ) -> tuple[dict[str, dict], list[dict]]:
     """Split a topology into one containerlab topology per host.
+
+    Cross-host links get consecutive VNIs from ``vni_base`` (default: the
+    cluster's ``vni_base``).
 
     Returns (host name → topology dict, list of cross-host link descriptions).
     Hosts with no nodes are omitted.
@@ -341,7 +430,7 @@ def split_topology(
     hosts = {h.name: h for h in cluster.hosts}
     host_links: dict[str, list[dict]] = defaultdict(list)
     cross_links: list[dict] = []
-    vni = cluster.vni_base
+    vni = cluster.vni_base if vni_base is None else vni_base
 
     for link in topo.links:
         link_hosts = {plan.host_for_node(n) for n in link.node_names}

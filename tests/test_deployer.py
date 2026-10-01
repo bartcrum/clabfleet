@@ -5,7 +5,15 @@ import yaml
 
 from clabfleet import cli, deployer
 from clabfleet.cluster import ClusterConfig, HostInfo, load_cluster_config
-from clabfleet.deployer import DeploymentError, split_topology
+from clabfleet.deployer import (
+    DeploymentError,
+    LabDeployer,
+    allocate_vni_block,
+    count_cross_host_links,
+    scan_used_vnis,
+    split_topology,
+)
+from clabfleet.runner import CommandResult
 from clabfleet.placement import NodePlacement, PlacementPlan
 from clabfleet.topology import topology_from_dict
 
@@ -74,8 +82,10 @@ def test_cluster_example_loads():
 
 
 def test_cli_cluster_dry_run_writes_host_files(tmp_path, monkeypatch, capsys):
-    # No SSH in tests: use the inventory limits as-is
+    # No SSH in tests: use the inventory limits as-is, and another lab holds VNI 1000
     monkeypatch.setattr(deployer, "probe_host_resources", lambda runner, host: {})
+    monkeypatch.setattr(deployer, "scan_used_vnis",
+                        lambda runner, host: {"other": {1000}} if host.name == "clab-2" else {})
 
     rc = cli.main([
         "deploy", str(TOPOLOGIES / "large_campus.clab.yml"),
@@ -101,9 +111,89 @@ def test_cli_cluster_dry_run_writes_host_files(tmp_path, monkeypatch, capsys):
     assert sorted(all_nodes) == sorted(
         yaml.safe_load((TOPOLOGIES / "large_campus.clab.yml").read_text())["topology"]["nodes"]
     )
+    vnis = sorted(link["vni"] for f in files
+                  for link in yaml.safe_load((tmp_path / f).read_text())["topology"].get("links", [])
+                  if "vni" in link)
+    assert vnis and vnis[0] == 1001  # 1000 is taken by the other lab
 
 
 def test_cli_single_host_dry_run(capsys):
     rc = cli.main(["deploy", str(TOPOLOGIES / "three_router_triangle.clab.yml"), "--dry-run"])
     assert rc == 0
     assert '"localhost": [' in capsys.readouterr().out
+
+
+def test_split_uses_given_vni_base():
+    cluster = ClusterConfig(hosts=[HostInfo("h1", "10.0.0.1"), HostInfo("h2", "10.0.0.2")])
+    plan = _plan({"a": "h1", "b": "h2", "c": "h2"})
+    assert count_cross_host_links(_topo(), plan) == 2
+    host_topos, cross = split_topology(_topo(), plan, cluster, vni_base=5000)
+    assert [c["vni"] for c in cross] == [5000, 5001]
+    assert [link["vni"] for link in host_topos["h1"]["topology"]["links"]] == [5000, 5001]
+
+
+def test_allocate_vni_block_skips_used_ranges():
+    assert allocate_vni_block(set(), 1000, 3) == 1000
+    assert allocate_vni_block({1000, 1001}, 1000, 3) == 1002
+    assert allocate_vni_block({1001, 1005}, 1000, 3) == 1002
+    assert allocate_vni_block({1001, 1005}, 1000, 4) == 1006
+    assert allocate_vni_block({999, 1003}, 1000, 3) == 1000
+    with pytest.raises(DeploymentError, match="No free block"):
+        allocate_vni_block({2**24 - 2}, 2**24 - 3, 2)
+
+
+class FakeRunner:
+    def __init__(self, stdout="", exc=None):
+        self.stdout, self.exc, self.calls = stdout, exc, []
+
+    def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
+        self.calls.append(args)
+        if self.exc:
+            raise self.exc
+        return CommandResult(0, self.stdout, "")
+
+    def close(self):
+        pass
+
+
+def test_scan_used_vnis_groups_by_lab_dir():
+    runner = FakeRunner(
+        "clabfleet/campus/campus.clab.yml:    vni: 1000\n"
+        "clabfleet/campus/campus.clab.yml:    vni: 1001\n"
+        "clabfleet/dc/dc.clab.yml:  vni: 1002\n"
+        "garbage line\n"
+    )
+    used = scan_used_vnis(runner, HostInfo("h1", "10.0.0.1"))
+    assert used == {"campus": {1000, 1001}, "dc": {1002}}
+    script = runner.calls[0][2]
+    assert runner.calls[0][:2] == ["sh", "-c"]
+    assert "clabfleet/*/*.clab.yml" in script
+
+
+def test_deploy_dry_run_allocates_around_other_labs(monkeypatch):
+    cluster = ClusterConfig(hosts=[HostInfo("h1", "10.0.0.1"), HostInfo("h2", "10.0.0.2")])
+    runners = {
+        # this lab's own old VNIs are free to reuse; "dc" holds 1000-1001
+        "h1": FakeRunner("clabfleet/t/t.clab.yml: vni: 1002\nclabfleet/dc/dc.clab.yml: vni: 1000\n"),
+        "h2": FakeRunner("clabfleet/dc/dc.clab.yml: vni: 1001\n"),
+    }
+    monkeypatch.setattr(deployer, "create_runner", lambda host: runners[host.name])
+    monkeypatch.setattr(LabDeployer, "_plan",
+                        lambda self, topo, strategy: _plan({"a": "h1", "b": "h2", "c": "h2"}))
+    monkeypatch.setattr(deployer, "load_topology", lambda path: _topo())
+
+    summary = LabDeployer(cluster).deploy("t.clab.yml", dry_run=True)
+    assert summary["vni_range"] == [1002, 1003]
+    assert [c["vni"] for c in summary["cross_host_links"]] == [1002, 1003]
+
+
+def test_vni_scan_failure_is_not_fatal(monkeypatch, caplog):
+    cluster = ClusterConfig(hosts=[HostInfo("h1", "10.0.0.1"), HostInfo("h2", "10.0.0.2")])
+    runners = {"h1": FakeRunner(exc=OSError("ssh down")), "h2": FakeRunner("")}
+    monkeypatch.setattr(deployer, "create_runner", lambda host: runners[host.name])
+    monkeypatch.setattr(LabDeployer, "_plan",
+                        lambda self, topo, strategy: _plan({"a": "h1", "b": "h2", "c": "h1"}))
+    monkeypatch.setattr(deployer, "load_topology", lambda path: _topo())
+    summary = LabDeployer(cluster).deploy("t.clab.yml", dry_run=True)
+    assert summary["vni_range"] == [1000, 1000]
+    assert "Could not check VNIs in use on h1" in caplog.text
