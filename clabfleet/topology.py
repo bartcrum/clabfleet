@@ -119,6 +119,14 @@ class Link:
         return f"link{self.index}"
 
 
+@dataclass(frozen=True)
+class FileRef:
+    """A node property that points at a file next to the topology."""
+    node: str
+    prop: str             # startup-config | license | env-files | binds
+    path: PurePosixPath   # relative to the topology directory
+
+
 @dataclass
 class Topology:
     data: dict
@@ -198,29 +206,36 @@ class Topology:
             for ep in link.endpoints
         ]
 
-    def referenced_files(self) -> list[Path]:
-        """Relative file paths the topology needs next to it on the lab host.
+    def file_references(self) -> list["FileRef"]:
+        """Every relative file path the topology refers to, one entry per use.
 
         Covers startup-config, license, env-files and bind-mount sources.
         Inline configs, URLs, absolute paths and containerlab magic paths
         (``__clabDir__`` etc.) are skipped. Paths are relative to base_dir.
         """
-        found: set[PurePosixPath] = set()
+        refs = []
         for name in self.nodes:
             node = self.effective_node(name)
-            candidates = [node.get(p) for p in FILE_PROPERTIES]
+            candidates = [(p, node.get(p)) for p in FILE_PROPERTIES]
             for prop in LIST_FILE_PROPERTIES:
-                candidates.extend(node.get(prop) or [])
+                candidates.extend((prop, v) for v in node.get(prop) or [])
             for bind in node.get("binds") or []:
-                candidates.append(str(bind).split(":", 1)[0])
+                candidates.append(("binds", str(bind).split(":", 1)[0]))
 
-            for value in candidates:
+            for prop, value in candidates:
                 rel = _relative_file(value, name)
                 if rel is not None:
-                    found.add(rel)
+                    refs.append(FileRef(name, prop, rel))
+        return refs
 
+    def referenced_files(self) -> list[Path]:
+        """Relative file paths the topology needs next to it on the lab host.
+
+        Files outside the topology directory and files that do not exist
+        are left out (with a warning).
+        """
         result = []
-        for rel in sorted(found):
+        for rel in sorted({ref.path for ref in self.file_references()}):
             if ".." in rel.parts:
                 logger.warning(
                     "Skipping '%s': files outside the topology directory are "

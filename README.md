@@ -19,8 +19,14 @@ deploys with plain `containerlab deploy`.
 - **Host pinning & tag affinity** — via ordinary node `labels`
 - **Import from live network** — connects to real devices via NAPALM, pulls
   running configs and LLDP neighbours, writes a matching containerlab topology
+- **Image pre-flight** — fail before anything is created when a node's
+  image is missing on its host, or pull it with `--pull`
 - **Dry-run** — see the placement plan and the per-host topology files
   without deploying
+- **Exec** — run a command on all or some nodes of a lab at once, through
+  each kind's CLI, SSH or a shell
+- **Validate** — check topology files (and placement labels against a
+  cluster) without touching any host, e.g. in CI
 - **Web GUI** — browse topologies, see live node state on a diagram,
   deploy/destroy with live output, and open CLI/shell/SSH terminals to nodes
   in the browser
@@ -54,6 +60,69 @@ clabfleet --sudo save topologies/three_router_triangle.clab.yml
 # Tear it down (add --keep-lab-dir to keep saved configs)
 clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 ```
+
+### Run a command on every node
+
+```bash
+clabfleet exec topologies/spine_leaf.clab.yml "show ip bgp summary"
+clabfleet exec topologies/spine_leaf.clab.yml --nodes 'leaf*' "show version"
+clabfleet exec topologies/three_router_triangle.clab.yml "show ip ospf neighbor"
+clabfleet exec lab.clab.yml --mode shell -- ip -br addr
+```
+
+Nodes run in parallel and each node's output is printed under its name.
+The exit code is 1 if any node failed. Add `--json` for machine-readable
+output. Each node is reached the best way its kind allows (`--mode auto`):
+
+| Mode | Used for | How |
+|------|----------|-----|
+| `cli` | cEOS, SR Linux, cRPD | The node's CLI through `docker exec` |
+| `ssh` | VM-based kinds such as Cisco IOL | SSH to the management address, tunnelled through the host's SSH connection for remote hosts |
+| `shell` | Everything else | `sh -c` inside the container |
+
+SSH mode logs in with containerlab's default `admin`/`admin`, or `root`
+for cRPD. Use `--user` and `--password`, or set `CLAB_NODE_PASSWORD`, if
+your startup configs create other logins. Words after the topology are
+joined with spaces, as `ssh` does, so quote the command or put it after
+`--` when it has options of its own. Like the GUI terminals, the CLI and
+shell modes need Docker access on the host. If Docker refuses and the
+host uses `sudo`, clabfleet retries with `sudo`.
+
+### Check a topology before deploying
+
+```bash
+clabfleet validate topologies/*.clab.yml
+clabfleet validate topologies/large_campus.clab.yml --cluster topologies/cluster.yaml
+```
+
+`validate` never contacts a host. It reports:
+
+- **Errors** (exit code 1): files that do not load, links to unknown
+  nodes, an interface used by two links, a missing `startup-config`,
+  `license` or `env-files` file, and with `--cluster`, nodes pinned with
+  `lab.host` to a host the cluster does not have.
+- **Warnings**: a missing bind-mount source, files outside the topology
+  directory (not copied to remote hosts), kinds clabfleet has no placement
+  estimate or CLI access for, and with `--cluster`, `lab.host-tags` no host
+  matches and cluster hosts without a VXLAN address.
+
+Add `--strict` to fail on warnings as well.
+
+### Node images
+
+Before deploying, clabfleet checks that every node's image exists on the
+host the node is placed on, and stops with one message listing what is
+missing per host. Nothing is created until the check passes.
+
+- `--pull` runs `docker pull` for missing images first, then fails only
+  on the ones that could not be pulled. Public images such as `alpine`
+  need this, or a manual `docker pull`, because the check runs before
+  containerlab would pull them itself.
+- `--skip-image-check` turns the check off.
+- Nodes with `image-pull-policy: always` are not checked, since
+  containerlab pulls those on every deploy.
+- If Docker cannot be reached on a host, even with `sudo` when the host
+  uses it, the check is skipped there with a warning.
 
 ### Single remote host
 
@@ -121,7 +190,7 @@ several.
 # cluster.yaml
 cluster:
   link_type: "vxlan-stitch"   # vxlan-stitch | vxlan
-  vni_base: 1000              # each cross-host link gets the next VNI
+  vni_base: 1000              # lowest VNI; each cross-host link gets its own
   dst_port: 14789             # VXLAN UDP port — must be open between hosts
   mtu: 1450                   # leave room for the 50-byte VXLAN overhead
 
@@ -168,6 +237,15 @@ clabfleet -v deploy topologies/large_campus.clab.yml \
 clabfleet destroy topologies/large_campus.clab.yml \
     --cluster topologies/cluster.yaml
 ```
+
+Each deploy writes `<lab>.placement.json` next to the topology file. It
+records the host of every node, the VNI range, the cross-host links and
+the cluster file used. `destroy`, `save`, `inspect` and `exec` then only
+contact the hosts listed there, so an unrelated host being down does not
+get in the way. A clean `destroy` removes the file. Without it, those
+commands try every host in the cluster, as before. The web GUI uses the
+record to show each node's host and the VNI of each cross-host link even
+when it cannot reach a host.
 
 ### 4. Control node placement
 
@@ -232,6 +310,13 @@ Host clab-1                              Host clab-2
 containerlab builds the VXLAN tunnels on deploy and removes them on destroy.
 The nodes see an ordinary point-to-point link.
 
+VNIs are unique across the cluster, so several labs can share it. Before
+deploying, clabfleet reads the VNIs that other labs use from their lab
+directories on each host (`~/clabfleet/<lab>/`), and gives this lab the
+first free block at or above `vni_base`. A lab destroyed with
+`--keep-lab-dir` keeps its VNIs reserved until its directory is removed.
+The chosen range is shown as `vni_range` in the deploy output.
+
 ## Import from live network
 
 ```bash
@@ -289,6 +374,9 @@ clabfleet/
   deployer.py      # Deploy/destroy/save/inspect; split topology per host
   runner.py        # Run commands locally or over SSH
   exporter.py      # Build a topology from live devices (NAPALM)
+  execute.py       # Run a command on lab nodes (clabfleet exec)
+  nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
+  validate.py      # Topology checks (clabfleet validate)
   cli.py           # CLI entrypoint
   gui/
     server.py      # aiohttp app: API, auth, terminal websockets

@@ -19,13 +19,26 @@ Multiple hosts (cluster):
 
 containerlab creates and removes the VXLAN links itself, so ``destroy``
 only needs to run ``containerlab destroy`` on every host.
+
+Each deploy writes ``<lab>.placement.json`` next to the topology file: the
+host of every node, the VNI range and the cross-host links. ``destroy``,
+``save``, ``inspect`` and ``exec`` then only contact the hosts listed
+there, and the GUI uses it to show where nodes run.
+
+VNIs are unique across the cluster: before splitting, every host's lab
+directories are scanned for VNIs that other labs already use, and this
+lab takes the first free block at or above ``vni_base``.
 """
 
 import copy
 import json
 import logging
+import posixpath
+import re
+import shlex
 from collections import defaultdict
-from pathlib import Path
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from .cluster import (
@@ -39,6 +52,20 @@ from .runner import CommandError, OutputCallback, Runner
 from .topology import Topology, dump_yaml, load_topology, topology_from_dict
 
 logger = logging.getLogger(__name__)
+
+
+# Prints NODOCKER if Docker is unreachable, else MISSING <image> per absent image
+_IMAGE_CHECK_SCRIPT = (
+    "docker version --format '{{.Server.Version}}' >/dev/null 2>&1 "
+    "|| { echo NODOCKER; exit 0; }\n"
+    'for i in "$@"; do docker image inspect "$i" >/dev/null 2>&1 || echo "MISSING $i"; done'
+)
+
+PLACEMENT_RECORD_SUFFIX = ".placement.json"
+
+MAX_VNI = 2**24 - 1
+# A `vni: 1234` line in a per-host topology file written by clabfleet
+_VNI_LINE = re.compile(r"^(?P<path>.+?):\s*vni:\s*(?P<vni>\d+)\s*$")
 
 
 class DeploymentError(Exception):
@@ -82,6 +109,8 @@ class LabDeployer:
         reconfigure: bool = False,
         dry_run: bool = False,
         output_dir: Optional[str | Path] = None,
+        check_images: bool = True,
+        pull_images: bool = False,
     ) -> dict:
         """Deploy a topology.
 
@@ -91,6 +120,9 @@ class LabDeployer:
             reconfigure: Pass ``--reconfigure`` to containerlab (redeploy from scratch).
             dry_run: Compute placement and per-host topologies without deploying.
             output_dir: Also write the per-host topology files here.
+            check_images: Before deploying, fail if a node's image is missing
+                on the host it is placed on.
+            pull_images: ``docker pull`` missing images before checking.
 
         Returns:
             Summary dict with placement, cross-host links and per-host results.
@@ -100,7 +132,14 @@ class LabDeployer:
 
         try:
             plan = self._plan(topo, strategy)
-            host_topos, cross_links = split_topology(topo, plan, self.cluster)
+            vni_base = self.cluster.vni_base
+            needed = count_cross_host_links(topo, plan)
+            if needed:
+                vni_base = self._allocate_vnis(topo, needed)
+                summary["vni_range"] = [vni_base, vni_base + needed - 1]
+            host_topos, cross_links = split_topology(
+                topo, plan, self.cluster, vni_base=vni_base
+            )
             summary["placement"] = plan.summary()["placements"]
             summary["cross_host_links"] = cross_links
 
@@ -112,6 +151,21 @@ class LabDeployer:
             if dry_run:
                 summary["dry_run"] = True
                 return summary
+
+            if check_images:
+                self._check_images(topo, host_topos, pull_images)
+
+            record = self._placement_record(topo, plan, host_topos, cross_links,
+                                            strategy, summary.get("vni_range"))
+            # Redeploying over a running lab can move nodes off a host; keep
+            # such hosts listed so destroy still cleans up what is left there
+            previous = read_placement_record(topo) or {}
+            for name, entry in (previous.get("hosts") or {}).items():
+                if name not in record["hosts"] and isinstance(entry, dict):
+                    record["hosts"][name] = {**entry, "nodes": [], "stale": True}
+            path = write_placement_record(topo, record)
+            if path:
+                summary["placement_record"] = str(path)
 
             for host in self.cluster.hosts:
                 data = host_topos.get(host.name)
@@ -139,7 +193,7 @@ class LabDeployer:
         topo = load_topology(topology_file)
         summary: dict = {"lab": topo.name, "hosts": {}}
         try:
-            for host in self.cluster.hosts:
+            for host in hosts_for_lab(self.cluster, topo):
                 summary["hosts"][host.name] = self._on_host(
                     host, topo, "destroy", ["--cleanup"] if cleanup else []
                 )
@@ -149,6 +203,8 @@ class LabDeployer:
                         self._runner(host).remove_tree(host.lab_dir(topo.name))
         finally:
             self._close_runners()
+        if all(r.get("status") in ("ok", "not-deployed") for r in summary["hosts"].values()):
+            remove_placement_record(topo)
         return summary
 
     def save(self, topology_file: str | Path) -> dict:
@@ -156,7 +212,7 @@ class LabDeployer:
         topo = load_topology(topology_file)
         summary: dict = {"lab": topo.name, "hosts": {}}
         try:
-            for host in self.cluster.hosts:
+            for host in hosts_for_lab(self.cluster, topo):
                 summary["hosts"][host.name] = self._on_host(host, topo, "save", [])
         finally:
             self._close_runners()
@@ -166,8 +222,9 @@ class LabDeployer:
         """Show running containers for a lab (or all labs) on every host."""
         topo = load_topology(topology_file) if topology_file else None
         summary: dict = {"hosts": {}}
+        hosts = hosts_for_lab(self.cluster, topo) if topo else self.cluster.hosts
         try:
-            for host in self.cluster.hosts:
+            for host in hosts:
                 if topo:
                     result = self._on_host(
                         host, topo, "inspect", ["--format", "json"], parse_json=True
@@ -223,6 +280,110 @@ class LabDeployer:
             )
         except PlacementError as exc:
             raise DeploymentError(f"Placement failed: {exc}") from exc
+
+    def _allocate_vnis(self, topo: Topology, count: int) -> int:
+        """First VNI of a free block of ``count`` VNIs for this lab."""
+        used: set[int] = set()
+        for host in self.cluster.hosts:
+            try:
+                by_lab = scan_used_vnis(self._runner(host), host)
+            except Exception as exc:
+                logger.warning(
+                    "Could not check VNIs in use on %s (%s); VXLAN links may "
+                    "clash with other labs", host.name, exc,
+                )
+                continue
+            for lab, vnis in by_lab.items():
+                if lab != topo.name:  # a redeploy may reuse its own VNIs
+                    used |= vnis
+        base = allocate_vni_block(used, self.cluster.vni_base, count)
+        logger.info("Using VNIs %d-%d for '%s'", base, base + count - 1, topo.name)
+        return base
+
+    def _placement_record(
+        self,
+        topo: Topology,
+        plan: PlacementPlan,
+        host_topos: dict[str, dict],
+        cross_links: list[dict],
+        strategy: str,
+        vni_range: Optional[list[int]],
+    ) -> dict:
+        hosts = {}
+        for host in self.cluster.hosts:
+            data = host_topos.get(host.name)
+            if data is None:
+                continue
+            if self._in_place(host, topo):
+                lab_dir = str(topo.base_dir.resolve() / f"clab-{topo.name}")
+            else:
+                lab_dir = host.lab_dir(topo.name)
+            hosts[host.name] = {
+                "address": host.host,
+                "lab_dir": lab_dir,
+                "nodes": list(data["topology"]["nodes"]),
+            }
+        return {
+            "version": 1,
+            "lab": topo.name,
+            "topology": topo.path.name if topo.path else None,
+            "cluster": self.cluster.source,
+            "strategy": strategy if self._multi_host else None,
+            "deployed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "hosts": hosts,
+            "nodes": {p.node_name: p.host_name for p in plan.placements},
+            "vni_range": vni_range,
+            "cross_host_links": cross_links,
+        }
+
+    def _check_images(self, topo: Topology, host_topos: dict[str, dict], pull: bool) -> None:
+        """Raise DeploymentError listing every image missing on its target host."""
+        problems: dict[str, dict[str, list[str]]] = {}
+        for host in self.cluster.hosts:
+            data = host_topos.get(host.name)
+            if data is None:
+                continue
+            images = node_images(topo, data["topology"]["nodes"])
+            if not images:
+                continue
+            runner = self._runner(host)
+            sudo = False
+            missing = missing_images(runner, list(images), sudo=False)
+            if missing is None and host.sudo:
+                sudo = True
+                missing = missing_images(runner, list(images), sudo=True)
+            if missing is None:
+                logger.warning(
+                    "Cannot reach Docker on %s to check images; skipping the check there",
+                    host.name,
+                )
+                continue
+            if missing and pull:
+                for image in missing:
+                    logger.info("Pulling %s on %s", image, host.name)
+                    runner.run(["docker", "pull", image], check=False, sudo=sudo,
+                               on_output=self._output_for(host))
+                missing = missing_images(runner, missing, sudo=sudo) or []
+            if missing:
+                problems[host.name] = {image: images[image] for image in missing}
+
+        if problems:
+            lines = ["Images missing on lab hosts:"]
+            for host_name, images in problems.items():
+                for image, nodes in images.items():
+                    lines.append(f"  {host_name}: {image} ({', '.join(nodes)})")
+            lines.append(
+                "Build or import them on those hosts"
+                + ("" if pull else ", re-run with --pull to pull them from their registry")
+                + ", or skip this check with --skip-image-check."
+            )
+            raise DeploymentError("\n".join(lines))
+
+    def _output_for(self, host: HostInfo) -> Optional[OutputCallback]:
+        if not self.on_output:
+            return None
+        prefix = f"[{host.name}] " if self._multi_host else ""
+        return lambda line: self.on_output(prefix + line)
 
     def _deploy_on_host(
         self, host: HostInfo, topo: Topology, data: dict, reconfigure: bool
@@ -292,10 +453,7 @@ class LabDeployer:
         parse_json: bool = False,
         stream: bool = False,
     ) -> dict:
-        on_output = None
-        if stream and self.on_output:
-            prefix = f"[{host.name}] " if self._multi_host else ""
-            on_output = lambda line: self.on_output(prefix + line)  # noqa: E731
+        on_output = self._output_for(host) if stream else None
         try:
             result = self._runner(host).containerlab(
                 args, cwd=cwd, check=check, on_output=on_output
@@ -330,10 +488,155 @@ class LabDeployer:
         self._runners.clear()
 
 
+def placement_record_path(topo: Topology) -> Optional[Path]:
+    """Where the placement record of a topology lives (next to its file)."""
+    if topo.path is None:
+        return None
+    return topo.path.parent / f"{topo.name}{PLACEMENT_RECORD_SUFFIX}"
+
+
+def read_placement_record(topo: Topology) -> Optional[dict]:
+    path = placement_record_path(topo)
+    if path is None or not path.exists():
+        return None
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        logger.warning("Ignoring unreadable placement record %s: %s", path, exc)
+        return None
+    if not isinstance(record, dict) or record.get("lab") != topo.name:
+        logger.warning("Ignoring placement record %s: it is not for lab '%s'", path, topo.name)
+        return None
+    return record
+
+
+def write_placement_record(topo: Topology, record: dict) -> Optional[Path]:
+    path = placement_record_path(topo)
+    if path is None:
+        return None
+    try:
+        path.write_text(json.dumps(record, indent=2) + "\n")
+    except OSError as exc:
+        logger.warning("Could not write placement record %s: %s", path, exc)
+        return None
+    return path
+
+
+def remove_placement_record(topo: Topology) -> None:
+    path = placement_record_path(topo)
+    if path is not None and path.exists():
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning("Could not remove placement record %s: %s", path, exc)
+
+
+def hosts_for_lab(cluster: ClusterConfig, topo: Topology) -> list[HostInfo]:
+    """Cluster hosts a deployed lab lives on, from its placement record.
+
+    Without a usable record, every host in the cluster.
+    """
+    record = read_placement_record(topo)
+    if not record or not isinstance(record.get("hosts"), dict):
+        return list(cluster.hosts)
+    names = set(record["hosts"])
+    hosts = [h for h in cluster.hosts if h.name in names]
+    unknown = names - {h.name for h in hosts}
+    if unknown:
+        logger.warning(
+            "Lab '%s' was deployed on host(s) %s, which are not in the current "
+            "cluster", topo.name, ", ".join(sorted(unknown)),
+        )
+    if not hosts:
+        return list(cluster.hosts)
+    logger.info("Lab '%s' is on %s (from its placement record)",
+                topo.name, ", ".join(h.name for h in hosts))
+    return hosts
+
+
+def node_images(topo: Topology, node_names) -> dict[str, list[str]]:
+    """image → nodes using it, for nodes whose image containerlab won't pull itself.
+
+    Nodes without an image (bridges, kinds with a built-in default) and
+    nodes with ``image-pull-policy: always`` are left out.
+    """
+    images: dict[str, list[str]] = {}
+    for name in node_names:
+        node = topo.effective_node(name)
+        image = node.get("image")
+        if not image:
+            continue
+        if str(node.get("image-pull-policy", "")).lower() == "always":
+            continue
+        images.setdefault(str(image), []).append(name)
+    return images
+
+
+def missing_images(runner: Runner, images: list[str], sudo: bool) -> Optional[list[str]]:
+    """Images not present on a host, or None when Docker cannot be reached."""
+    result = runner.run(["sh", "-c", _IMAGE_CHECK_SCRIPT, "sh", *images],
+                        check=False, sudo=sudo)
+    lines = result.stdout.splitlines()
+    if "NODOCKER" in lines or result.exit_code != 0:
+        return None
+    return [line[len("MISSING "):] for line in lines if line.startswith("MISSING ")]
+
+
+def count_cross_host_links(topo: Topology, plan: PlacementPlan) -> int:
+    """Number of links whose nodes the plan puts on different hosts."""
+    return sum(
+        1 for link in topo.links
+        if len({plan.host_for_node(n) for n in link.node_names}) > 1
+    )
+
+
+def scan_used_vnis(runner: Runner, host: HostInfo) -> dict[str, set[int]]:
+    """VNIs used by labs clabfleet has deployed on a host, per lab name.
+
+    Reads the ``vni:`` lines of the per-host topology files in the host's
+    lab directories (``<workdir>/<lab>/<lab>.clab.yml``). A lab directory
+    exists until the lab is destroyed with cleanup, so a destroyed lab kept
+    with ``--keep-lab-dir`` still holds its VNIs.
+    """
+    workdir = posixpath.dirname(host.lab_dir("_"))
+    script = (
+        "grep -H -E '^[[:space:]]*vni:[[:space:]]*[0-9]+[[:space:]]*$' "
+        f"{shlex.quote(workdir)}/*/*.clab.yml 2>/dev/null; true"
+    )
+    result = runner.run(["sh", "-c", script], check=False, sudo=False)
+    used: dict[str, set[int]] = defaultdict(set)
+    for line in result.stdout.splitlines():
+        m = _VNI_LINE.match(line)
+        if m:
+            used[PurePosixPath(m.group("path")).parent.name].add(int(m.group("vni")))
+    return dict(used)
+
+
+def allocate_vni_block(used: set[int], start: int, count: int) -> int:
+    """Lowest VNI >= start such that start..start+count-1 avoids ``used``."""
+    base = start
+    while True:
+        if base + count - 1 > MAX_VNI:
+            raise DeploymentError(
+                f"No free block of {count} VNIs at or above {start} "
+                f"({len(used)} VNIs are in use by other labs)"
+            )
+        clash = [v for v in used if base <= v < base + count]
+        if not clash:
+            return base
+        base = max(clash) + 1
+
+
 def split_topology(
-    topo: Topology, plan: PlacementPlan, cluster: ClusterConfig
+    topo: Topology,
+    plan: PlacementPlan,
+    cluster: ClusterConfig,
+    vni_base: Optional[int] = None,
 ) -> tuple[dict[str, dict], list[dict]]:
     """Split a topology into one containerlab topology per host.
+
+    Cross-host links get consecutive VNIs from ``vni_base`` (default: the
+    cluster's ``vni_base``).
 
     Returns (host name → topology dict, list of cross-host link descriptions).
     Hosts with no nodes are omitted.
@@ -341,7 +644,7 @@ def split_topology(
     hosts = {h.name: h for h in cluster.hosts}
     host_links: dict[str, list[dict]] = defaultdict(list)
     cross_links: list[dict] = []
-    vni = cluster.vni_base
+    vni = cluster.vni_base if vni_base is None else vni_base
 
     for link in topo.links:
         link_hosts = {plan.host_for_node(n) for n in link.node_names}

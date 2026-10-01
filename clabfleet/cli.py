@@ -2,11 +2,14 @@
 
 Usage:
     clabfleet deploy <topology.clab.yml> [--reconfigure] [--dry-run] [--output-dir DIR]
+                     [--pull] [--skip-image-check]
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
     clabfleet inspect [<topology.clab.yml>] [--cluster <cluster.yaml>]
+    clabfleet exec <topology.clab.yml> <command> [--nodes GLOB] [--mode auto|cli|shell|ssh] [--json]
     clabfleet status [--cluster <cluster.yaml>]
+    clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
     clabfleet export-live <devices.yaml> [-o output.clab.yml]
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
 
@@ -32,8 +35,10 @@ from .cluster import (
     probe_host_resources,
 )
 from .deployer import LabDeployer
+from .execute import LabExecutor
 from .exporter import export_from_live_network
 from .topology import dump_yaml
+from .validate import validate_topology
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -76,6 +81,10 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="Show placement and per-host topologies without deploying")
     p_deploy.add_argument("--output-dir", metavar="DIR",
                           help="Write the per-host topology files to DIR")
+    p_deploy.add_argument("--pull", action="store_true",
+                          help="docker pull node images that are missing on their host")
+    p_deploy.add_argument("--skip-image-check", action="store_true",
+                          help="Deploy without first checking that node images exist")
 
     # --- destroy ---
     p_destroy = sub.add_parser("destroy", aliases=["teardown"], help="Destroy a lab")
@@ -95,9 +104,43 @@ def _build_parser() -> argparse.ArgumentParser:
                            help="Topology file (default: all labs on the host(s))")
     add_cluster_arg(p_inspect)
 
+    # --- exec ---
+    p_exec = sub.add_parser(
+        "exec", help="Run a command on the nodes of a deployed lab",
+        description="Run a command on lab nodes in parallel. Quote the command, "
+                    "or put it after '--' if it has options: "
+                    "clabfleet exec lab.clab.yml -- ip -br addr")
+    p_exec.add_argument("topology", help="Topology file the lab was deployed from")
+    p_exec.add_argument("cmd", nargs="+", metavar="command", help="Command to run")
+    add_cluster_arg(p_exec)
+    p_exec.add_argument("--nodes", action="append", metavar="GLOB",
+                        help="Only nodes matching this glob (repeatable or "
+                             "comma-separated, e.g. 'leaf*,spine1')")
+    p_exec.add_argument("--mode", default="auto", choices=["auto", "cli", "shell", "ssh"],
+                        help="auto (default): the node's CLI if it has one via docker "
+                             "exec, SSH for VM-based kinds such as IOL, else a shell")
+    p_exec.add_argument("--user", dest="node_user",
+                        help="SSH username on the nodes (default: per kind, usually admin)")
+    p_exec.add_argument("--password", dest="node_password",
+                        help="SSH password on the nodes (default: CLAB_NODE_PASSWORD or admin)")
+    p_exec.add_argument("--parallel", type=int, default=8,
+                        help="Nodes to run on at once (default: 8)")
+    p_exec.add_argument("--timeout", type=float, default=60,
+                        help="SSH connect/command timeout in seconds (default: 60)")
+    p_exec.add_argument("--json", action="store_true", help="Print results as JSON")
+
     # --- status ---
     p_status = sub.add_parser("status", help="Show containerlab version and resources per host")
     add_cluster_arg(p_status)
+
+    # --- validate ---
+    p_validate = sub.add_parser(
+        "validate", help="Check topology files without touching any host")
+    p_validate.add_argument("topologies", nargs="+", metavar="topology",
+                            help="Topology file(s) to check")
+    add_cluster_arg(p_validate)
+    p_validate.add_argument("--strict", action="store_true",
+                            help="Fail on warnings as well as errors")
 
     # --- export-live ---
     p_live = sub.add_parser("export-live",
@@ -179,6 +222,9 @@ def _dispatch(args: argparse.Namespace) -> int:
             print(dump_yaml(topo))
         return 0
 
+    if cmd == "validate":
+        return _validate(args)
+
     cluster = _cluster_from_args(args)
 
     if cmd == "gui":
@@ -186,6 +232,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "status":
         return _status(cluster)
+
+    if cmd == "exec":
+        return _exec(args, cluster)
 
     deployer = LabDeployer(cluster)
     if cmd == "deploy":
@@ -195,6 +244,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             reconfigure=args.reconfigure,
             dry_run=args.dry_run,
             output_dir=args.output_dir,
+            check_images=not args.skip_image_check,
+            pull_images=args.pull,
         )
     elif cmd in ("destroy", "teardown"):
         summary = deployer.destroy(args.topology, cleanup=not args.keep_lab_dir)
@@ -229,6 +280,58 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
     run(Workspace(cluster, roots), host=args.bind, port=args.port,
         open_browser=not args.no_browser)
     return 0
+
+
+def _exec(args: argparse.Namespace, cluster: ClusterConfig) -> int:
+    patterns = [p.strip() for arg in args.nodes or [] for p in arg.split(",") if p.strip()]
+    executor = LabExecutor(cluster, ssh_user=args.node_user, ssh_password=args.node_password,
+                           parallel=args.parallel, timeout=args.timeout)
+    out = executor.run(args.topology, " ".join(args.cmd), nodes=patterns or None,
+                       mode=args.mode)
+    results = out["results"]
+    failed = [r for r in results if r["error"] or r["exit_code"] != 0]
+
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 1 if failed or not results else 0
+
+    for host, err in out["host_errors"].items():
+        print(f"warning: {host}: {err}", file=sys.stderr)
+    multi = len(cluster.hosts) > 1
+    for r in results:
+        where = ", ".join(p for p in (r["kind"], r["mode"], r["host"] if multi else "") if p)
+        print(f"=== {r['node']} ({where}) ===")
+        if r["error"]:
+            print(f"error: {r['error']}")
+        else:
+            text = r["output"].rstrip("\n")
+            if text:
+                print(text)
+            if r["exit_code"] != 0:
+                print(f"[exit {r['exit_code']}]")
+        print()
+    if not results:
+        print("No nodes to run on.", file=sys.stderr)
+    elif failed:
+        print(f"{len(failed)} of {len(results)} nodes failed: "
+              f"{', '.join(r['node'] for r in failed)}", file=sys.stderr)
+    return 1 if failed or not results else 0
+
+
+def _validate(args: argparse.Namespace) -> int:
+    # Only an explicit --cluster is checked: never probe or contact hosts here
+    cluster = load_cluster_config(args.cluster) if args.cluster else None
+    failed = 0
+    for path in args.topologies:
+        report = validate_topology(path, cluster)
+        print(f"{path}: {report.summary()}")
+        for msg in report.errors:
+            print(f"  error: {msg}")
+        for msg in report.warnings:
+            print(f"  warning: {msg}")
+        if report.errors or (args.strict and report.warnings):
+            failed += 1
+    return 1 if failed else 0
 
 
 def _status(cluster: ClusterConfig) -> int:
