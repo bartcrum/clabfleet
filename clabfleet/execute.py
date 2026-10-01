@@ -12,7 +12,6 @@ Each node is reached the best way its kind allows:
 """
 
 import fnmatch
-import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -28,7 +27,10 @@ from .nodes import (
     KIND_SSH_USER,
     NO_SHELL_KINDS,
     SSH_CLI_KINDS,
+    InspectError,
+    inspect_all,
     parse_inspect,
+    run_docker,
 )
 from .runner import Runner, SSHRunner
 from .topology import Topology, load_topology
@@ -36,7 +38,6 @@ from .topology import Topology, load_topology
 logger = logging.getLogger(__name__)
 
 MODES = ("auto", "cli", "shell", "ssh")
-DOCKER_DENIED = "permission denied while trying to connect to the docker"
 
 
 @dataclass
@@ -169,19 +170,13 @@ class LabExecutor:
         errors: dict[str, str] = {}
         for host in hosts_for_lab(self.cluster, topo):
             try:
-                result = self._runner(host).containerlab(
-                    ["inspect", "--all", "--details", "--format", "json"], check=False
-                )
+                data = inspect_all(self._runner(host))
+            except InspectError as exc:
+                errors[host.name] = str(exc)
+                continue
             except Exception as exc:
                 errors[host.name] = f"unreachable: {exc}"
                 continue
-            if result.exit_code != 0:
-                errors[host.name] = (result.stderr or result.stdout).strip()[-500:]
-                continue
-            try:
-                data = json.loads(result.stdout) if result.stdout.strip() else {}
-            except json.JSONDecodeError:
-                data = {}  # e.g. "no containers found"
             for c in parse_inspect(data, host.name):
                 if c["lab"] == topo.name:
                     found[c["node"]] = c
@@ -195,9 +190,7 @@ class LabExecutor:
                 code, output = self._ssh_exec(runner, result.kind, container["ipv4"], command)
             else:
                 argv = docker_exec_argv(result.mode, result.kind, container["container"], command)
-                res = runner.run(argv, check=False, sudo=False)
-                if res.exit_code != 0 and host.sudo and DOCKER_DENIED in res.stderr.lower():
-                    res = runner.run(argv, check=False, sudo=True)
+                res = run_docker(runner, argv, host.sudo)
                 code, output = res.exit_code, res.stdout + res.stderr
         except Exception as exc:  # noqa: BLE001 - one node failing must not stop the rest
             result.error = str(exc) or type(exc).__name__

@@ -18,7 +18,8 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from ..nodes import access_modes, terminal_command
-from .state import JobManager, Workspace
+from .editing import EditConflict
+from .state import JobManager, UnloadableTopology, Workspace
 from .terminals import LocalTerminal, SSHTerminal
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,8 @@ TOKEN = web.AppKey("token", str)
 
 
 def create_app(workspace: Workspace, token: str) -> web.Application:
-    app = web.Application(middlewares=[_auth_middleware])
+    # Topologies with inline startup configs can be large
+    app = web.Application(middlewares=[_auth_middleware], client_max_size=16 * 1024 * 1024)
     app[WORKSPACE] = workspace
     app[JOBS] = JobManager(workspace)
     app[TOKEN] = token
@@ -40,6 +42,10 @@ def create_app(workspace: Workspace, token: str) -> web.Application:
     app.router.add_get("/api/state", _state)
     app.router.add_get("/api/hosts", _hosts)
     app.router.add_get("/api/topologies/{id:.+}", _topology)
+    app.router.add_put("/api/topologies/{id:.+}", _save_topology)
+    app.router.add_post("/api/validate/{id:.+}", _validate)
+    app.router.add_put("/api/positions/{id:.+}", _save_positions)
+    app.router.add_get("/api/jobs", _jobs)
     app.router.add_post("/api/jobs", _start_job)
     app.router.add_get("/api/jobs/{id}", _job)
     app.router.add_get("/ws/terminal", _terminal)
@@ -125,7 +131,7 @@ async def _state(request):
              "containers": [{**c, "modes": access_modes(c["kind"])} for c in s.containers]}
             for s in runtime
         ],
-        "job": jobs.current.view(len(jobs.current.lines)) if jobs.current else None,
+        "jobs": [j.summary() for j in jobs.recent()],
     })
 
 
@@ -143,10 +149,65 @@ async def _topology(request):
     return web.json_response(detail)
 
 
+def _refuse_while_busy(request, topo_id: str) -> None:
+    for job in request.app[JOBS].running():
+        if job.topology == topo_id:
+            raise web.HTTPConflict(
+                text=f"A {job.action} job is running for this lab; save when it finishes")
+
+
+async def _validate(request):
+    body = await request.json()
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        report = await asyncio.to_thread(ws.validate_yaml, request.match_info["id"],
+                                         str(body.get("yaml", "")))
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc))
+    return web.json_response(report)
+
+
+async def _save_topology(request):
+    topo_id = request.match_info["id"]
+    body = await request.json()
+    _refuse_while_busy(request, topo_id)
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        result = await asyncio.to_thread(ws.save_yaml, topo_id, str(body.get("yaml", "")),
+                                         str(body.get("base_hash", "")))
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc))
+    except UnloadableTopology as exc:
+        return web.json_response({"error": str(exc), "validation": exc.report}, status=400)
+    except EditConflict as exc:
+        raise web.HTTPConflict(text=str(exc))
+    return web.json_response(result)
+
+
+async def _save_positions(request):
+    topo_id = request.match_info["id"]
+    body = await request.json()
+    _refuse_while_busy(request, topo_id)
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        detail = await asyncio.to_thread(ws.save_positions, topo_id, body.get("positions"),
+                                         str(body.get("base_hash", "")))
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc))
+    except EditConflict as exc:
+        raise web.HTTPConflict(text=str(exc))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+    except RuntimeError as exc:  # ruamel.yaml missing
+        raise web.HTTPNotImplemented(text=str(exc))
+    return web.json_response(detail)
+
+
 async def _start_job(request):
     body = await request.json()
     try:
-        job = request.app[JOBS].start(body.get("action", ""), body.get("topology", ""))
+        options = body.get("options") if isinstance(body.get("options"), dict) else None
+        job = request.app[JOBS].start(body.get("action", ""), body.get("topology", ""), options)
     except KeyError as exc:
         raise web.HTTPNotFound(text=str(exc))
     except ValueError as exc:
@@ -154,6 +215,10 @@ async def _start_job(request):
     except RuntimeError as exc:
         raise web.HTTPConflict(text=str(exc))
     return web.json_response(job.view())
+
+
+async def _jobs(request):
+    return web.json_response([j.summary() for j in request.app[JOBS].recent()])
 
 
 async def _job(request):

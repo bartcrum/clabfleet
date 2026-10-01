@@ -25,8 +25,13 @@ TOPO = {
 
 
 class QuietRunner:
+    removed = []
+
     def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
         return CommandResult(0, "", "")
+
+    def remove_tree(self, path):
+        QuietRunner.removed.append(path)
 
     def close(self):
         pass
@@ -158,3 +163,67 @@ def test_redeploy_keeps_hosts_the_lab_moved_off(topo_file, monkeypatch):
     assert set(record["hosts"]) == {"h1", "h2", "h3"}
     assert "stale" not in record["hosts"]["h1"]
     assert record["nodes"] == {"a": "h1", "b": "h1", "c": "h2"}
+
+
+def _failing_deploy(monkeypatch, mapping, fail_on, deployed, destroyed, destroy_error=None):
+    _stub_deploy(monkeypatch, mapping, deployed)
+    inner = LabDeployer._deploy_on_host
+
+    def deploy_on_host(self, host, topo, data, reconfigure):
+        if host.name in fail_on:
+            deployed.append(host.name)
+            raise RuntimeError("containerlab failed")
+        return inner(self, host, topo, data, reconfigure)
+
+    def on_host(self, host, topo, command, extra, parse_json=False):
+        destroyed.append((host.name, command, tuple(extra)))
+        if host.name == destroy_error:
+            return {"status": "error", "error": "stuck"}
+        return {"status": "ok"}
+
+    monkeypatch.setattr(LabDeployer, "_deploy_on_host", deploy_on_host)
+    monkeypatch.setattr(LabDeployer, "_on_host", on_host)
+
+
+MAPPING = {"a": "h1", "b": "h2", "c": "h3"}
+
+
+def test_partial_deploy_without_rollback_keeps_going(topo_file, monkeypatch):
+    deployed, destroyed = [], []
+    _failing_deploy(monkeypatch, MAPPING, {"h2"}, deployed, destroyed)
+    summary = LabDeployer(_cluster("h1", "h2", "h3")).deploy(
+        topo_file, check_images=False, check_connectivity=False)
+    assert deployed == ["h1", "h2", "h3"]
+    assert summary["status"] == "partial"
+    assert destroyed == []
+    assert (topo_file.parent / "t.placement.json").exists()
+
+
+def test_rollback_stops_and_destroys_every_attempted_host(topo_file, monkeypatch):
+    deployed, destroyed = [], []
+    _failing_deploy(monkeypatch, MAPPING, {"h2"}, deployed, destroyed)
+    summary = LabDeployer(_cluster("h1", "h2", "h3")).deploy(
+        topo_file, check_images=False, check_connectivity=False, rollback=True)
+    assert deployed == ["h1", "h2"]  # h3 never started
+    assert destroyed == [("h1", "destroy", ("--cleanup",)), ("h2", "destroy", ("--cleanup",))]
+    assert summary["status"] == "rolled-back"
+    assert summary["rollback"] == {"h1": "ok", "h2": "ok"}
+    assert not (topo_file.parent / "t.placement.json").exists()
+
+
+def test_failed_rollback_keeps_record(topo_file, monkeypatch):
+    deployed, destroyed = [], []
+    _failing_deploy(monkeypatch, MAPPING, {"h3"}, deployed, destroyed, destroy_error="h1")
+    summary = LabDeployer(_cluster("h1", "h2", "h3")).deploy(
+        topo_file, check_images=False, check_connectivity=False, rollback=True)
+    assert summary["status"] == "rollback-failed"
+    assert summary["rollback"]["h1"] == "error: stuck"
+    assert (topo_file.parent / "t.placement.json").exists()
+
+
+def test_all_hosts_failing_is_failed(topo_file, monkeypatch):
+    deployed, destroyed = [], []
+    _failing_deploy(monkeypatch, MAPPING, {"h1", "h2", "h3"}, deployed, destroyed)
+    summary = LabDeployer(_cluster("h1", "h2", "h3")).deploy(
+        topo_file, check_images=False, check_connectivity=False)
+    assert summary["status"] == "failed"

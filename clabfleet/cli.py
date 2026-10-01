@@ -2,7 +2,8 @@
 
 Usage:
     clabfleet deploy <topology.clab.yml> [--reconfigure] [--dry-run] [--output-dir DIR]
-                     [--pull] [--skip-image-check]
+                     [--pull] [--skip-image-check] [--skip-link-check] [--rollback]
+                     [--wait [--wait-timeout SECONDS]]
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
@@ -36,6 +37,8 @@ from .cluster import (
 )
 from .deployer import LabDeployer
 from .execute import LabExecutor
+from .linkcheck import all_pairs, check_links, describe, failures
+from .nodes import inspect_all, running_usage
 from .exporter import export_from_live_network
 from .topology import dump_yaml
 from .validate import validate_topology
@@ -85,6 +88,16 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="docker pull node images that are missing on their host")
     p_deploy.add_argument("--skip-image-check", action="store_true",
                           help="Deploy without first checking that node images exist")
+    p_deploy.add_argument("--wait", action="store_true",
+                          help="Wait until every node's CLI or SSH answers")
+    p_deploy.add_argument("--wait-timeout", type=float, default=900, metavar="SECONDS",
+                          help="How long --wait waits (default: 900)")
+    p_deploy.add_argument("--rollback", action="store_true",
+                          help="If any host fails, destroy the lab everywhere it was "
+                               "deployed instead of leaving it partly running")
+    p_deploy.add_argument("--skip-link-check", action="store_true",
+                          help="Deploy across hosts without first checking that they "
+                               "reach each other on the VXLAN port")
 
     # --- destroy ---
     p_destroy = sub.add_parser("destroy", aliases=["teardown"], help="Destroy a lab")
@@ -132,6 +145,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- status ---
     p_status = sub.add_parser("status", help="Show containerlab version and resources per host")
     add_cluster_arg(p_status)
+    p_status.add_argument("--check-links", action="store_true",
+                          help="Also check every pair of hosts reaches the other on the "
+                               "VXLAN port (ping and UDP)")
 
     # --- validate ---
     p_validate = sub.add_parser(
@@ -231,7 +247,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _gui(args, cluster)
 
     if cmd == "status":
-        return _status(cluster)
+        rc = _status(cluster)
+        if args.check_links:
+            rc = max(rc, _check_links(cluster))
+        return rc
 
     if cmd == "exec":
         return _exec(args, cluster)
@@ -246,6 +265,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             output_dir=args.output_dir,
             check_images=not args.skip_image_check,
             pull_images=args.pull,
+            check_connectivity=not args.skip_link_check,
+            rollback=args.rollback,
+            wait=args.wait,
+            wait_timeout=args.wait_timeout,
         )
     elif cmd in ("destroy", "teardown"):
         summary = deployer.destroy(args.topology, cleanup=not args.keep_lab_dir)
@@ -261,7 +284,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         name for name, result in summary.get("hosts", {}).items()
         if "error" in result
     ]
-    return 1 if failed else 0
+    not_ready = summary.get("readiness", {}).get("ready") is False
+    return 1 if failed or not_ready else 0
 
 
 def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
@@ -334,6 +358,26 @@ def _validate(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _check_links(cluster: ClusterConfig) -> int:
+    if len(cluster.hosts) < 2:
+        print("Link check: only one host, nothing to check.")
+        return 0
+    runners = {h.name: create_runner(h) for h in cluster.hosts}
+    try:
+        results = check_links(runners, cluster.hosts, all_pairs(cluster.hosts),
+                              cluster.dst_port)
+    finally:
+        for runner in runners.values():
+            runner.close()
+    print(f"VXLAN connectivity (UDP {cluster.dst_port}):")
+    for r in results:
+        print(f"  {describe(r)}")
+    bad = failures(results)
+    if bad:
+        print(f"{len(bad)} of {len(results)} host pairs failed.")
+    return 1 if bad else 0
+
+
 def _status(cluster: ClusterConfig) -> int:
     unreachable = 0
     for host in cluster.hosts:
@@ -354,6 +398,15 @@ def _status(cluster: ClusterConfig) -> int:
         print(f"  RAM:  {facts.get('MemAvailable_mb', '?')}MB available"
               f" / {facts.get('MemTotal_mb', '?')}MB total"
               f" (placement limit {host.max_ram or 'unlimited'}MB)")
+        try:
+            with create_runner(host) as runner:
+                usage = running_usage(inspect_all(runner))
+        except Exception as exc:
+            print(f"  Labs: could not list ({exc})")
+        else:
+            for lab, u in sorted(usage.items()):
+                print(f"  Lab {lab}: {u['nodes']} running nodes, about "
+                      f"{u['cpu']:g} vCPU / {u['ram']}MB")
         if len(cluster.hosts) > 1:
             print(f"  VTEP: {host.vtep or 'NOT SET — set vtep_ip for cross-host links'}")
             print(f"  Tags: {', '.join(host.tags) or '(none)'}")

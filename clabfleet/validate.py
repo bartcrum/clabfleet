@@ -4,9 +4,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from .cluster import ClusterConfig
 from .nodes import known_kinds
-from .topology import LABEL_HOST, Topology, load_topology
+from .topology import LABEL_HOST, Topology, load_topology, topology_from_dict
 
 # Properties containerlab reads at deploy time; a missing file fails the deploy.
 # A missing bind source is only a warning: some setups create it first.
@@ -50,11 +52,38 @@ def validate_topology(
     try:
         topo = load_topology(path)
     except Exception as exc:  # noqa: BLE001 - report any load failure as invalid
-        msg = str(exc) if not isinstance(exc, KeyError) else f"missing key {exc}"
-        report.errors.append(msg)
+        report.errors.append(_load_error(exc))
         return report
-    report.topology = topo
+    return _check(topo, cluster, report)
 
+
+def validate_text(
+    text: str, base_dir: str | Path, cluster: Optional[ClusterConfig] = None,
+    name: str = "<editor>",
+) -> ValidationReport:
+    """Same checks for unsaved YAML (e.g. the GUI editor); files resolve from base_dir."""
+    report = ValidationReport(name)
+    try:
+        data = yaml.safe_load(text)
+        topo = topology_from_dict(data, base_dir=base_dir)
+    except Exception as exc:  # noqa: BLE001 - report any load failure as invalid
+        report.errors.append(_load_error(exc))
+        return report
+    return _check(topo, cluster, report)
+
+
+def _load_error(exc: Exception) -> str:
+    if isinstance(exc, yaml.MarkedYAMLError) and exc.problem_mark is not None:
+        mark = exc.problem_mark
+        return f"YAML syntax error at line {mark.line + 1}, column {mark.column + 1}: {exc.problem}"
+    if isinstance(exc, KeyError):
+        return f"missing key {exc}"
+    return str(exc)
+
+
+def _check(topo: Topology, cluster: Optional[ClusterConfig],
+           report: ValidationReport) -> ValidationReport:
+    report.topology = topo
     _check_files(topo, report)
     _check_kinds(topo, report)
     _check_interfaces(topo, report)

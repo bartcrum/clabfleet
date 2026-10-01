@@ -1,4 +1,7 @@
 import asyncio
+import json
+import os
+import threading
 import time
 from pathlib import Path
 
@@ -82,7 +85,7 @@ def test_parse_inspect_details():
         "NetworkSettings": {"IPv4addr": "172.20.20.2"},
     }]}
     assert parse_inspect(data, "h1") == [{
-        "lab": "lab1", "node": "r1", "container": "clab-lab1-r1", "kind": "arista_ceos",
+        "id": "", "lab": "lab1", "node": "r1", "container": "clab-lab1-r1", "kind": "arista_ceos",
         "image": "ceos:4.35.6M", "state": "running", "status": "Up 5 minutes",
         "ipv4": "172.20.20.2", "topo_file": "/x/lab1.clab.yml", "host": "h1",
     }]
@@ -108,51 +111,93 @@ def _workspace(tmp_path):
     return Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
 
 
-def test_job_manager_streams_output_and_blocks_concurrent_jobs(tmp_path, monkeypatch):
+def _wait(job):
+    for _ in range(100):
+        if job.status != "running":
+            return
+        time.sleep(0.02)
+
+
+def test_job_manager_runs_labs_in_parallel_and_keeps_history(tmp_path, monkeypatch):
     calls = []
+    release = threading.Event()
 
     class FakeDeployer:
         def __init__(self, cluster, on_output=None, interactive_sudo=True):
             assert interactive_sudo is False
             self.on_output = on_output
 
-        def deploy(self, path, reconfigure=False):
-            calls.append(("deploy", Path(path).name, reconfigure))
+        def deploy(self, path, reconfigure=False, rollback=False):
+            calls.append(("deploy", Path(path).name, reconfigure, rollback))
             self.on_output("\x1b[1mINFO\x1b[0m Creating container")
-            time.sleep(0.2)
-            return {"hosts": {"localhost": {"status": "deployed"}}}
+            release.wait(5)
+            return {"hosts": {"localhost": {"status": "deployed", "seconds": 1.5}}}
 
         def destroy(self, path):
             return {"hosts": {"localhost": {"error": "boom"}}}
 
     monkeypatch.setattr(state, "LabDeployer", FakeDeployer)
     ws = _workspace(tmp_path)
+    (tmp_path / "u.clab.yml").write_text(TOPO.replace("name: t", "name: u"))
+    (tmp_path / "t-copy.clab.yml").write_text(TOPO)  # same lab name "t"
     ws.topologies()
     jobs = JobManager(ws)
 
-    job = jobs.start("redeploy", "t.clab.yml")
-    with pytest.raises(RuntimeError, match="Another job"):
+    job = jobs.start("redeploy", "t.clab.yml", {"rollback": 1, "format": True})
+    assert job.options == {"rollback": True}  # unknown options dropped
+    assert job.lab == "t"
+    with pytest.raises(RuntimeError, match="already running for lab 't'"):
         jobs.start("destroy", "t.clab.yml")
-    for _ in range(50):
-        if job.status != "running":
-            break
-        time.sleep(0.05)
-    assert job.status == "ok"
-    assert calls == [("deploy", "t.clab.yml", True)]
+    with pytest.raises(RuntimeError, match="already running for lab 't'"):
+        jobs.start("deploy", "t-copy.clab.yml")
+    other = jobs.start("deploy", "u.clab.yml")  # a different lab runs alongside
+    assert {j.id for j in jobs.running()} == {job.id, other.id}
+
+    release.set()
+    _wait(job)
+    _wait(other)
+    assert job.status == other.status == "ok"
+    assert sorted(calls) == [("deploy", "t.clab.yml", True, True),
+                             ("deploy", "u.clab.yml", False, False)]
     assert "INFO Creating container" in job.lines  # ANSI codes stripped
+    assert "» time per host: localhost 1.5s" in job.lines
+    assert job.summary()["host_times"] == {"localhost": 1.5}
 
     job2 = jobs.start("destroy", "t.clab.yml")
-    for _ in range(50):
-        if job2.status != "running":
-            break
-        time.sleep(0.05)
+    _wait(job2)
     assert job2.status == "error"
     assert "✗ localhost: boom" in job2.lines
 
+    monkeypatch.setattr(JobManager, "MAX_RUNNING", 0)
+    with pytest.raises(RuntimeError, match="wait for one to finish"):
+        jobs.start("deploy", "u.clab.yml")
+    monkeypatch.setattr(JobManager, "MAX_RUNNING", 4)
     with pytest.raises(ValueError):
         jobs.start("format-disk", "t.clab.yml")
     with pytest.raises(KeyError):
         jobs.start("deploy", "../../etc/passwd")
+
+    # History survives a restart; a job that was running is marked interrupted
+    history_dir = tmp_path / ".clabfleet" / "jobs"
+    stuck = state.Job("stuck", "deploy", "u.clab.yml", lab="u", started=1.0)
+    (history_dir / "stuck.json").write_text(json.dumps(stuck.to_dict()))
+    (history_dir / "junk.json").write_text("{not json")
+    reloaded = JobManager(ws)
+    ids = [j.id for j in reloaded.recent()]
+    assert set(ids) == {job.id, other.id, job2.id, "stuck"}
+    assert ids[0] == job2.id and ids[-1] == "stuck"  # newest first
+    assert reloaded.jobs[job.id].lines == job.lines
+    assert reloaded.jobs["stuck"].status == "interrupted"
+
+
+def test_job_history_keeps_newest(tmp_path):
+    history = state.JobHistory(tmp_path / "jobs", keep=3)
+    for i in range(5):
+        job = state.Job(f"j{i}", "save", "t", started=float(i), status="ok")
+        history.save(job)
+        os.utime(tmp_path / "jobs" / f"j{i}.json", (i, i))
+    assert [j.id for j in history.load()] == ["j2", "j3", "j4"]
+    assert state.JobHistory(None).load() == []
 
 
 def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
@@ -174,6 +219,8 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
             assert resp.status == 200
             body = await resp.json()
             assert [t["id"] for t in body["topologies"]] == ["t.clab.yml"]
+            assert body["jobs"] == []
+            assert await (await client.get("/api/jobs")).json() == []
 
             assert (await client.get("/static/app.js")).status == 200
             resp = await client.post("/api/jobs", json={"action": "save", "topology": "t.clab.yml"},
@@ -192,3 +239,52 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
             assert (await client.get("/api/topologies/missing.clab.yml")).status == 404
 
     asyncio.run(scenario())
+
+
+def test_job_outcome_lines():
+    job = state.Job("j", "deploy", "t")
+    job.add_outcome({"status": "partial", "hosts": {"h1": {"status": "deployed"}, "h2": {"error": "x"}}})
+    job.add_outcome({"status": "rolled-back", "hosts": {}, "rollback": {"h1": "ok", "h2": "ok"}})
+    job.add_outcome({"status": "rollback-failed", "hosts": {}, "rollback": {"h1": "ok", "h2": "error: y"}})
+    job.add_outcome({"status": "deployed", "hosts": {"h1": {}}})
+    assert job.lines == [
+        "✗ partly deployed: running on h1, failed on h2. Destroy the lab to clean up.",
+        "↺ rolled back: removed from h1, h2",
+        "✗ rollback incomplete on h2 (error: y). Destroy the lab to clean up.",
+    ]
+
+
+def test_logs_mode_command():
+    assert terminal_command("logs", "cisco_iol", "clab-l-r1", "") == [
+        "docker", "logs", "--follow", "--tail", "2000", "clab-l-r1"]
+
+
+def test_logs_terminal_over_websocket(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    docker = bindir / "docker"
+    docker.write_text('#!/bin/sh\necho "args: $*"\necho "booting line 1"\n')
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+    ws = _workspace(tmp_path)
+    monkeypatch.setattr(Workspace, "find_node", lambda self, lab, node: {
+        "kind": "cisco_iol", "container": "clab-l-r1", "ipv4": "", "host": "localhost"})
+
+    async def scenario():
+        app = server.create_app(ws, "tok")
+        async with TestClient(TestServer(app)) as client:
+            await client.get("/?token=tok", allow_redirects=False)
+            sock = await client.ws_connect("/ws/terminal?lab=l&node=r1&mode=logs&cols=80&rows=24")
+            output, exit_msg = b"", None
+            async for msg in sock:
+                if msg.type.name == "BINARY":
+                    output += msg.data
+                elif msg.type.name == "TEXT":
+                    exit_msg = json.loads(msg.data)
+            return output.decode(), exit_msg
+
+    output, exit_msg = asyncio.run(scenario())
+    assert "args: logs --follow --tail 2000 clab-l-r1" in output
+    assert "booting line 1" in output
+    assert exit_msg == {"t": "exit", "code": 0}

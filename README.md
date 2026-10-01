@@ -61,6 +61,25 @@ clabfleet --sudo save topologies/three_router_triangle.clab.yml
 clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 ```
 
+### Wait for nodes to boot
+
+containerlab returns once containers start, but network OSes take
+longer: cEOS needs about a minute, VM-based kinds several. With `--wait`,
+`deploy` waits until every node is ready, printing progress, for up to
+`--wait-timeout` seconds (default 900). It exits with code 1 if some
+nodes are still not ready, and lists them in the output's `readiness`.
+
+```bash
+clabfleet deploy topologies/spine_leaf.clab.yml --wait
+```
+
+A node is ready when its Docker health check reports healthy, which
+vrnetlab images have. Without a health check, a kind with a CLI through
+`docker exec` (cEOS, SR Linux, cRPD) must answer `show version`, and a
+kind reached over SSH, such as IOL, must answer on port 22 of its
+management address. Other kinds are ready once running. The GUI uses the
+same probes and shows nodes as **booting** in amber until they are ready.
+
 ### Run a command on every node
 
 ```bash
@@ -143,7 +162,7 @@ host, and containerlab runs there. `destroy` removes that directory.
 ## Web GUI
 
 ```bash
-pip install -e ".[gui]"
+pip install -e ".[gui]"     # aiohttp, plus ruamel.yaml for saving edits
 
 cd ~/Work/clabfleet
 clabfleet --sudo gui                     # this machine
@@ -155,16 +174,33 @@ printed in the terminal). Stop it with Ctrl+C.
 
 - **Sidebar:** every `*.clab.yml` under the current directory (or each
   `--dir`), with live state, plus any other labs running on your hosts
-- **Diagram:** nodes coloured by state, interface names on links, the host
+- **Diagram:** nodes coloured by state (amber while booting), interface names on links, the host
   each node runs on (multi-host), and cross-host VXLAN links highlighted.
-  Drag nodes to arrange them (positions are remembered per topology),
-  scroll to zoom, double-click a node to open its terminal
+  Drag nodes to arrange them, scroll to zoom, double-click a node to open
+  its terminal. Positions are remembered in the browser. **Save layout**
+  writes them into the topology file as `graph-posX`/`graph-posY` node
+  labels, so the layout travels with the file. Only those labels change:
+  comments, ordering, quoting and indentation are kept.
+- **YAML editor:** edit the topology file in the YAML tab. Problems are
+  listed as you type, using the same checks as `clabfleet validate`.
+  Save with the button or Ctrl+S. Text that is not a loadable topology
+  cannot be saved, but other errors, such as a startup config file that
+  does not exist yet, do not block saving. Saving is refused while a job
+  runs for the lab, or if the file changed on disk since you opened it.
 - **Deploy / Redeploy / Save configs / Destroy** with containerlab's output
-  streamed into the Activity panel
+  streamed into the Activity panel. Different labs can run jobs at the
+  same time, up to four, with one job per lab. Pick any job, running or
+  past, from the Activity panel's list to see its output, how long it
+  took, and the time each host took. The last 50 jobs are kept in
+  `.clabfleet/jobs/` under the first workspace directory, so they survive
+  a restart of the GUI.
 - **Terminals** in tabs at the bottom:
   - **CLI**: the node's own CLI via `docker exec` (`Cli` on cEOS, `sr_cli`
     on SR Linux, `cli` on cRPD)
   - **Shell**: a shell inside the container
+  - **Logs**: follows the container's log (`docker logs --follow`, last
+    2000 lines). It also works for a container that has stopped, which
+    helps when a VM-based node fails to boot
   - **SSH**: `ssh` to the node's management IP. This is the CLI for VM-based
     kinds such as Cisco IOL. It needs a login on the node: containerlab's
     default configs create `admin`/`admin`, but your own `startup-config`
@@ -220,6 +256,24 @@ from it, set its `vtep_ip` to an address the other hosts can reach.
 
 ```bash
 clabfleet status --cluster topologies/cluster.yaml
+clabfleet status --cluster topologies/cluster.yaml --check-links
+```
+
+`--check-links` tests every pair of hosts in both directions. It pings
+the other host's VXLAN address, then runs a short UDP listener on the VXLAN
+port there and sends it tagged datagrams. The UDP test catches a firewall
+that drops VXLAN while ping still works. The probes use `ping` and
+`python3` on the hosts. A probe that cannot run is reported as not tested
+rather than failed.
+
+The same check runs automatically before deploying a lab with cross-host
+links, for the host pairs that share links, and stops the deploy before
+anything is created. Turn it off with `--skip-link-check`. On RHEL and
+other firewalld hosts, open the port to your other lab hosts:
+
+```bash
+sudo firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=192.168.1.0/24 port port=14789 protocol=udp accept'
+sudo firewall-cmd --reload
 ```
 
 ### 3. Deploy across the cluster
@@ -237,6 +291,14 @@ clabfleet -v deploy topologies/large_campus.clab.yml \
 clabfleet destroy topologies/large_campus.clab.yml \
     --cluster topologies/cluster.yaml
 ```
+
+If a host fails during deploy, the others are left running so you can
+look at what went wrong, and the output's `status` is `partial`. With
+`--rollback`, clabfleet stops at the first failing host and destroys the
+lab on every host it reached, including the failed one, which may hold
+partly created nodes. The status is then `rolled-back`, or
+`rollback-failed` if a host could not be cleaned up. The GUI has the same
+option as a "Roll back on failure" checkbox next to Deploy.
 
 Each deploy writes `<lab>.placement.json` next to the topology file. It
 records the host of every node, the VNI range, the cross-host links and
@@ -283,12 +345,19 @@ topology:
 Without `lab.cpu`/`lab.ram`, placement uses the node's `cpu`/`memory`
 limits, then a per-kind estimate (e.g. cEOS 1 vCPU / 2 GB, IOL 0.5 / 512 MB).
 
+Labs already running on a host count against it. Their nodes are
+estimated the same way, from their `lab.cpu`/`lab.ram` labels or per-kind
+estimates, and that CPU is reserved before placing the new lab. Their RAM
+is reserved only when the inventory sets `max_ram`: a probed host's
+`MemAvailable` already reflects what running labs use. `clabfleet status`
+lists the running labs on each host with these estimates.
+
 ### Placement strategies
 
 | Strategy | Behaviour |
 |----------|-----------|
 | `bin-pack` | Fill each host before moving to the next, keeping neighbours together. Fewest cross-host links. **(default)** |
-| `spread` | Distribute nodes evenly across hosts. |
+| `spread` | Distribute nodes evenly across hosts. When hosts are equally loaded, a node joins the host where most of its neighbours already are. |
 | `resource` | Always pick the host with the most free resources. |
 
 ### How cross-host links work
@@ -377,11 +446,14 @@ clabfleet/
   execute.py       # Run a command on lab nodes (clabfleet exec)
   nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
   validate.py      # Topology checks (clabfleet validate)
+  linkcheck.py     # Ping and UDP checks between cluster hosts
+  readiness.py     # Is a node's CLI/SSH up yet (deploy --wait, GUI)
   cli.py           # CLI entrypoint
   gui/
     server.py      # aiohttp app: API, auth, terminal websockets
     state.py       # Topology discovery, running labs, deploy/destroy jobs
     terminals.py   # Local pty and SSH-channel terminal sessions
+    editing.py     # Format-preserving saves of topology files
     static/        # Web UI (vanilla JS; xterm.js bundled in vendor/)
 topologies/        # Example topologies and cluster inventory
 tests/             # pytest suite

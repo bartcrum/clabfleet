@@ -9,14 +9,14 @@ Decides which containerlab host each node should run on, based on:
 
 Strategies:
   - "bin-pack":   fill each host before moving to the next (fewer VXLAN links)
-  - "spread":     distribute nodes evenly across hosts (balanced load)
+  - "spread":     distribute nodes evenly across hosts (balanced load),
+                  keeping neighbours together when hosts are equally loaded
   - "resource":   always pick the host with the most available resources
 """
 
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .cluster import HostInfo
 
@@ -166,12 +166,19 @@ def _pick_host(
 ) -> HostInfo:
     """Pick the best host for a node from the viable candidates."""
 
+    neighbors = adjacency.get(node_name, set())
+
+    def colocated(h: HostInfo) -> int:
+        """Neighbours of this node already placed on host h."""
+        return sum(1 for n in neighbors if plan.host_for_node(n) == h.name)
+
     if strategy == "spread":
-        # Pick host with fewest placed nodes
+        # Pick the host with fewest placed nodes; among equally loaded hosts,
+        # the one with most neighbours (fewer cross-host links)
         counts = defaultdict(int)
         for p in plan.placements:
             counts[p.host_name] += 1
-        return min(viable, key=lambda h: counts.get(h.name, 0))
+        return min(viable, key=lambda h: (counts.get(h.name, 0), -colocated(h)))
 
     elif strategy == "resource":
         # Pick host with most available resources
@@ -181,15 +188,9 @@ def _pick_host(
         # Prefer the host where the most neighbours already live
         # (reduces cross-host links), breaking ties by fewest available
         # resources (pack tightly).
-        neighbors = adjacency.get(node_name, set())
         if neighbors:
-            def locality_score(h: HostInfo) -> tuple:
-                colocated = sum(
-                    1 for n in neighbors if plan.host_for_node(n) == h.name
-                )
-                # Higher colocated = better; lower available = pack tighter
-                return (-colocated, h.available_cpu + h.available_ram)
-            return min(viable, key=locality_score)
+            # Higher colocated = better; lower available = pack tighter
+            return min(viable, key=lambda h: (-colocated(h), h.available_cpu + h.available_ram))
         else:
             # No neighbours yet — pack into the host with least remaining
             return min(viable, key=lambda h: (h.available_cpu + h.available_ram))

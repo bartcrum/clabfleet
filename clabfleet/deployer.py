@@ -36,7 +36,10 @@ import logging
 import posixpath
 import re
 import shlex
+import threading
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
@@ -47,7 +50,10 @@ from .cluster import (
     create_runner,
     probe_host_resources,
 )
+from .linkcheck import check_links, describe, failures, vxlan_pairs
+from .nodes import NO_SHELL_KINDS, inspect_all, parse_inspect, running_usage
 from .placement import NodePlacement, PlacementError, PlacementPlan, compute_placement
+from .readiness import check_ready, wait_until_ready
 from .runner import CommandError, OutputCallback, Runner
 from .topology import Topology, dump_yaml, load_topology, topology_from_dict
 
@@ -66,6 +72,32 @@ PLACEMENT_RECORD_SUFFIX = ".placement.json"
 MAX_VNI = 2**24 - 1
 # A `vni: 1234` line in a per-host topology file written by clabfleet
 _VNI_LINE = re.compile(r"^(?P<path>.+?):\s*vni:\s*(?P<vni>\d+)\s*$")
+
+
+# Deploys running in one process (the GUI runs several jobs at once) plan
+# one at a time. A lab's VNIs and resources only become visible to other
+# deploys once its files and containers exist on the hosts, so until its
+# deploy finishes it is registered here and planning counts it in.
+_PLAN_LOCK = threading.RLock()
+_IN_FLIGHT: dict[str, dict] = {}  # lab → {"vnis": set, "hosts": {host: (cpu, ram)}}
+
+
+def _register_in_flight(lab: str, plan: PlacementPlan, vnis: range) -> None:
+    hosts: dict[str, tuple[float, int]] = {}
+    for p in plan.placements:
+        cpu, ram = hosts.get(p.host_name, (0, 0))
+        hosts[p.host_name] = (cpu + p.cpu, ram + p.ram)
+    with _PLAN_LOCK:
+        _IN_FLIGHT[lab] = {"vnis": set(vnis), "hosts": hosts}
+
+
+def _unregister_in_flight(lab: str) -> None:
+    with _PLAN_LOCK:
+        _IN_FLIGHT.pop(lab, None)
+
+
+def _since(started: float) -> float:
+    return round(time.monotonic() - started, 1)
 
 
 class DeploymentError(Exception):
@@ -111,6 +143,10 @@ class LabDeployer:
         output_dir: Optional[str | Path] = None,
         check_images: bool = True,
         pull_images: bool = False,
+        check_connectivity: bool = True,
+        rollback: bool = False,
+        wait: bool = False,
+        wait_timeout: float = 900,
     ) -> dict:
         """Deploy a topology.
 
@@ -123,6 +159,19 @@ class LabDeployer:
             check_images: Before deploying, fail if a node's image is missing
                 on the host it is placed on.
             pull_images: ``docker pull`` missing images before checking.
+            check_connectivity: Before deploying a lab with cross-host
+                links, check the hosts reach each other on the VXLAN port.
+            rollback: If any host fails, destroy the lab on every host it was
+                deployed to (including the failed one, which may hold
+                partly created nodes) instead of leaving it partly running.
+
+            wait: After deploying, wait until every node is ready (its CLI or
+                SSH answers, see clabfleet.readiness), up to ``wait_timeout``
+                seconds. The result is in the summary's ``readiness``.
+
+        The summary's ``status`` is ``deployed``, ``partial`` (some hosts
+        failed), ``failed`` (all failed), ``rolled-back`` or
+        ``rollback-failed``.
 
         Returns:
             Summary dict with placement, cross-host links and per-host results.
@@ -130,13 +179,18 @@ class LabDeployer:
         topo = load_topology(topology_file)
         summary: dict = {"lab": topo.name, "hosts": {}}
 
+        registered = False
         try:
-            plan = self._plan(topo, strategy)
-            vni_base = self.cluster.vni_base
-            needed = count_cross_host_links(topo, plan)
-            if needed:
-                vni_base = self._allocate_vnis(topo, needed)
-                summary["vni_range"] = [vni_base, vni_base + needed - 1]
+            with _PLAN_LOCK:
+                plan = self._plan(topo, strategy)
+                vni_base = self.cluster.vni_base
+                needed = count_cross_host_links(topo, plan)
+                if needed:
+                    vni_base = self._allocate_vnis(topo, needed)
+                    summary["vni_range"] = [vni_base, vni_base + needed - 1]
+                if not dry_run:
+                    _register_in_flight(topo.name, plan, range(vni_base, vni_base + needed))
+                    registered = True
             host_topos, cross_links = split_topology(
                 topo, plan, self.cluster, vni_base=vni_base
             )
@@ -151,6 +205,9 @@ class LabDeployer:
             if dry_run:
                 summary["dry_run"] = True
                 return summary
+
+            if check_connectivity and cross_links:
+                summary["link_check"] = self._check_connectivity(cross_links)
 
             if check_images:
                 self._check_images(topo, host_topos, pull_images)
@@ -167,10 +224,13 @@ class LabDeployer:
             if path:
                 summary["placement_record"] = str(path)
 
+            attempted: list[HostInfo] = []
             for host in self.cluster.hosts:
                 data = host_topos.get(host.name)
                 if data is None:
                     continue
+                attempted.append(host)
+                started = time.monotonic()
                 try:
                     summary["hosts"][host.name] = self._deploy_on_host(
                         host, topo, data, reconfigure
@@ -178,7 +238,36 @@ class LabDeployer:
                 except Exception as exc:
                     logger.error("Deployment failed on %s: %s", host.name, exc)
                     summary["hosts"][host.name] = {"error": str(exc)}
+                summary["hosts"][host.name]["seconds"] = _since(started)
+                if rollback and "error" in summary["hosts"][host.name]:
+                    break  # no point deploying the rest
+
+            failed = [h for h, r in summary["hosts"].items() if "error" in r]
+            if failed and rollback:
+                summary["rollback"] = self._rollback(topo, attempted)
+                ok = all(r == "ok" for r in summary["rollback"].values())
+                summary["status"] = "rolled-back" if ok else "rollback-failed"
+            elif not failed:
+                summary["status"] = "deployed"
+            elif len(failed) < len(summary["hosts"]):
+                summary["status"] = "partial"
+                logger.warning(
+                    "'%s' is only partly deployed: running on %s, failed on %s. "
+                    "Destroy it to clean up, or deploy with --rollback next time.",
+                    topo.name,
+                    ", ".join(h for h in summary["hosts"] if h not in failed),
+                    ", ".join(failed),
+                )
+            else:
+                summary["status"] = "failed"
+
+            if wait and summary["status"] in ("deployed", "partial"):
+                deployed_on = [h for h in attempted if "error" not in summary["hosts"][h.name]]
+                summary["readiness"] = self._wait_ready(topo, deployed_on, host_topos,
+                                                        wait_timeout)
         finally:
+            if registered:
+                _unregister_in_flight(topo.name)
             self._close_runners()
 
         return summary
@@ -194,9 +283,11 @@ class LabDeployer:
         summary: dict = {"lab": topo.name, "hosts": {}}
         try:
             for host in hosts_for_lab(self.cluster, topo):
+                started = time.monotonic()
                 summary["hosts"][host.name] = self._on_host(
                     host, topo, "destroy", ["--cleanup"] if cleanup else []
                 )
+                summary["hosts"][host.name]["seconds"] = _since(started)
                 if cleanup and not self._in_place(host, topo):
                     result = summary["hosts"][host.name]
                     if result.get("status") == "ok":
@@ -213,7 +304,9 @@ class LabDeployer:
         summary: dict = {"lab": topo.name, "hosts": {}}
         try:
             for host in hosts_for_lab(self.cluster, topo):
+                started = time.monotonic()
                 summary["hosts"][host.name] = self._on_host(host, topo, "save", [])
+                summary["hosts"][host.name]["seconds"] = _since(started)
         finally:
             self._close_runners()
         return summary
@@ -263,12 +356,16 @@ class LabDeployer:
 
         logger.info("Probing %d cluster hosts", len(self.cluster.hosts))
         for host in self.cluster.hosts:
+            # A RAM budget from the inventory is for labs in total; a probed
+            # one (MemAvailable) already excludes what running labs use
+            explicit_ram = host.max_ram > 0
             try:
                 probe_host_resources(self._runner(host), host)
             except Exception as exc:
                 raise DeploymentError(
                     f"Host {host.name} ({host.host}) unreachable: {exc}"
                 ) from exc
+            self._reserve_running_labs(host, topo.name, reserve_ram=explicit_ram)
 
         logger.info("Computing placement with strategy '%s'", strategy)
         try:
@@ -280,6 +377,91 @@ class LabDeployer:
             )
         except PlacementError as exc:
             raise DeploymentError(f"Placement failed: {exc}") from exc
+
+    def _wait_ready(
+        self, topo: Topology, hosts: list[HostInfo], host_topos: dict[str, dict],
+        timeout: float,
+    ) -> dict:
+        """Wait until the lab's nodes on ``hosts`` are ready (see readiness)."""
+        expected = [
+            n for h in hosts for n in host_topos[h.name]["topology"]["nodes"]
+            if topo.effective_node(n)["kind"] not in NO_SHELL_KINDS
+        ]
+        logger.info("Waiting up to %ds for %d nodes to be ready", timeout, len(expected))
+
+        def poll(pending: list[str]) -> dict[str, tuple[bool, str]]:
+            found: dict[str, tuple[HostInfo, dict]] = {}
+            for host in hosts:
+                try:
+                    data = inspect_all(self._runner(host))
+                except Exception as exc:
+                    logger.warning("Could not inspect %s: %s", host.name, exc)
+                    continue
+                for c in parse_inspect(data, host.name):
+                    if c["lab"] == topo.name and c["node"] in pending:
+                        found[c["node"]] = (host, c)
+            if not found:
+                return {}
+            with ThreadPoolExecutor(max_workers=min(16, len(found))) as pool:
+                checks = pool.map(
+                    lambda item: check_ready(self._runner(item[0]), item[1], item[0].sudo),
+                    found.values(),
+                )
+                return dict(zip(found, checks))
+
+        return wait_until_ready(poll, expected, timeout)
+
+    def _rollback(self, topo: Topology, hosts: list[HostInfo]) -> dict[str, str]:
+        """Destroy the lab on hosts after a failed deploy. Returns host → outcome."""
+        logger.warning("Rolling back '%s' on %s", topo.name, ", ".join(h.name for h in hosts))
+        outcome: dict[str, str] = {}
+        for host in hosts:
+            try:
+                result = self._on_host(host, topo, "destroy", ["--cleanup"])
+                if result.get("status") == "ok" and not self._in_place(host, topo):
+                    self._runner(host).remove_tree(host.lab_dir(topo.name))
+            except Exception as exc:  # noqa: BLE001 - keep rolling back the others
+                result = {"status": "error", "error": str(exc)}
+            status = result.get("status")
+            if status in ("ok", "not-deployed"):
+                outcome[host.name] = "ok"
+            else:
+                outcome[host.name] = f"error: {result.get('error', status)}"
+                logger.error("Rollback failed on %s: %s", host.name, outcome[host.name])
+        if all(v == "ok" for v in outcome.values()):
+            remove_placement_record(topo)
+        return outcome
+
+    def _reserve_running_labs(self, host: HostInfo, lab: str, reserve_ram: bool) -> None:
+        """Reserve the estimated CPU (and RAM) of other labs on a host.
+
+        Covers labs running there and labs this process is deploying right
+        now (whose containers may not exist yet). Call with _PLAN_LOCK held.
+        """
+        in_flight = {name: e for name, e in _IN_FLIGHT.items() if name != lab}
+        try:
+            usage = running_usage(inspect_all(self._runner(host)), exclude_lab=lab)
+        except Exception as exc:
+            logger.warning("Could not list running labs on %s (%s); placement "
+                           "ignores them", host.name, exc)
+            usage = {}
+        cpu = ram = 0
+        for name, u in usage.items():
+            if name not in in_flight:  # counted below instead
+                cpu, ram = cpu + u["cpu"], ram + u["ram"]
+        for e in in_flight.values():
+            c, r = e["hosts"].get(host.name, (0, 0))
+            cpu, ram = cpu + c, ram + r
+        labs = sorted(set(usage) | {n for n, e in in_flight.items() if host.name in e["hosts"]})
+        if not labs:
+            return
+        if not reserve_ram:
+            ram = 0
+        host.reserve(cpu, ram)
+        logger.info(
+            "Host %s: labs %s reserve %.1f vCPU%s", host.name,
+            ", ".join(labs), cpu, f" / {ram}MB" if reserve_ram else "",
+        )
 
     def _allocate_vnis(self, topo: Topology, count: int) -> int:
         """First VNI of a free block of ``count`` VNIs for this lab."""
@@ -296,6 +478,9 @@ class LabDeployer:
             for lab, vnis in by_lab.items():
                 if lab != topo.name:  # a redeploy may reuse its own VNIs
                     used |= vnis
+        for lab, entry in _IN_FLIGHT.items():  # deploys not yet on the hosts
+            if lab != topo.name:
+                used |= entry["vnis"]
         base = allocate_vni_block(used, self.cluster.vni_base, count)
         logger.info("Using VNIs %d-%d for '%s'", base, base + count - 1, topo.name)
         return base
@@ -335,6 +520,26 @@ class LabDeployer:
             "vni_range": vni_range,
             "cross_host_links": cross_links,
         }
+
+    def _check_connectivity(self, cross_links: list[dict]) -> list[dict]:
+        """Raise DeploymentError if hosts sharing links cannot reach each other."""
+        pairs = vxlan_pairs(cross_links)
+        hosts = {h.name: h for h in self.cluster.hosts}
+        runners = {name: self._runner(hosts[name]) for pair in pairs for name in pair}
+        logger.info("Checking VXLAN connectivity between %s", ", ".join(sorted(runners)))
+        results = check_links(runners, self.cluster.hosts, pairs, self.cluster.dst_port)
+        bad = failures(results)
+        for r in results:
+            if r not in bad and r["note"]:
+                logger.warning("Link check: %s", describe(r))
+        if bad:
+            raise DeploymentError(
+                "Lab hosts cannot reach each other for VXLAN links:\n"
+                + "".join(f"  {describe(r)}\n" for r in bad)
+                + f"VXLAN needs UDP {self.cluster.dst_port} open between the hosts. "
+                "Fix the network or firewall, or skip this check with --skip-link-check."
+            )
+        return results
 
     def _check_images(self, topo: Topology, host_topos: dict[str, dict], pull: bool) -> None:
         """Raise DeploymentError listing every image missing on its target host."""

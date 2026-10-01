@@ -60,7 +60,7 @@ function toast(msg) {
   toastTimer = setTimeout(() => (el.hidden = true), 6000);
 }
 
-const MODE_LABEL = { cli: "CLI", shell: "Shell", ssh: "SSH" };
+const MODE_LABEL = { cli: "CLI", shell: "Shell", ssh: "SSH", logs: "Logs" };
 
 // ---------------------------------------------------------------------------
 // Runtime helpers
@@ -99,14 +99,63 @@ function crossLinkVnis() {
 function labStatus(lab, total) {
   const cs = labContainers(lab);
   const running = cs.filter((c) => c.state === "running").length;
+  const booting = cs.filter((c) => c.state === "running" && c.ready === false).length;
   let state = "stopped";
-  if (cs.length && running === (total ?? cs.length) && running === cs.length) state = "running";
+  if (cs.length && running === (total ?? cs.length) && running === cs.length) state = booting ? "booting" : "running";
   else if (cs.length) state = "partial";
-  return { running, total: total ?? cs.length, state, deployed: cs.length };
+  return { running, booting, ready: running - booting, total: total ?? cs.length, state, deployed: cs.length };
 }
 
-function jobRunning() {
-  return S.state?.job?.status === "running";
+// Node state for dots and labels: running (ready), booting (container up,
+// CLI/SSH not yet), partial (container not running), or "" (not deployed)
+function nodeState(rt) {
+  if (!rt) return "";
+  if (rt.state !== "running") return "partial";
+  return rt.ready === false ? "booting" : "running";
+}
+
+function nodeStateText(rt) {
+  if (!rt) return "not deployed";
+  if (rt.state === "running" && rt.ready === false) return `booting · ${rt.ready_detail || ""}`;
+  return rt.status || rt.state;
+}
+
+// The running job of a topology, if any (several labs can run jobs at once)
+function runningJob(topoId) {
+  return (S.state?.jobs || []).find((j) => j.status === "running" && j.topology === topoId);
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60), r = sec % 60;
+  return m < 60 ? `${m}m ${String(r).padStart(2, "0")}s` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+const JOB_ICON = { running: "⟳", ok: "✓", error: "✗", interrupted: "✗" };
+
+function jobLabel(j) {
+  const when = new Date(j.started * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `${JOB_ICON[j.status] || "•"} ${j.action} ${j.lab || j.topology} · ${when}`;
+}
+
+function renderJobPicker() {
+  const sel = $("#job-select");
+  const jobs = S.state?.jobs || [];
+  sel.hidden = !jobs.length;
+  sel.replaceChildren(...jobs.map((j) => h("option", { value: j.id }, jobLabel(j))));
+  if (S.viewJob) sel.value = S.viewJob;
+  renderJobMeta();
+}
+
+function renderJobMeta() {
+  const j = (S.state?.jobs || []).find((x) => x.id === S.viewJob);
+  const meta = $("#job-meta");
+  if (!j) { meta.textContent = ""; return; }
+  const end = j.finished || Date.now() / 1000;
+  const hosts = Object.entries(j.host_times || {}).map(([hst, t]) => `${hst} ${fmtDuration(t)}`).join(", ");
+  meta.textContent = `${j.status === "running" ? "running" : j.status} · ${fmtDuration(end - j.started)}` +
+    (hosts ? ` · ${hosts}` : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -114,11 +163,19 @@ function jobRunning() {
 // ---------------------------------------------------------------------------
 
 async function refreshState() {
+  const before = new Map((S.state?.jobs || []).map((j) => [j.id, j.status]));
   try {
     S.state = await api("/api/state");
   } catch (e) {
     toast(`Could not load state: ${e.message}`);
     return;
+  }
+  // Jobs that finished in the background (the viewed one reports itself)
+  for (const j of S.state.jobs) {
+    if (before.get(j.id) === "running" && j.status !== "running" && j.id !== S.viewJob) {
+      if (j.status !== "ok") toast(`${j.action} ${j.lab} failed — see Activity`);
+      if (S.selected?.type === "topo" && S.selected.id === j.topology) reloadDetail();
+    }
   }
   for (const r of S.state.runtime) {
     if (!r.ok && r.error) console.warn(`host ${r.host}: ${r.error}`);
@@ -126,7 +183,11 @@ async function refreshState() {
   renderSidebar();
   renderLabHead();
   renderRuntimeOverlays();
-  if (jobRunning() && !S.jobPolling) trackJob(S.state.job.id, false);
+  if (!S.viewJob && S.state.jobs.length) {
+    const running = S.state.jobs.find((j) => j.status === "running");
+    trackJob((running || S.state.jobs[0]).id, false);
+  }
+  renderJobPicker();
 }
 
 async function refreshHosts() {
@@ -163,7 +224,7 @@ function renderSidebar() {
   $("#topo-list").replaceChildren(...topos.map((t) => {
     const st = labStatus(t.name, t.nodes);
     const active = S.selected?.type === "topo" && S.selected.id === t.id;
-    const busy = jobRunning() && S.state.job.topology === t.id;
+    const busy = !!runningJob(t.id);
     return h("li", {},
       h("button", {
         class: `lab-item${active ? " active" : ""}`,
@@ -197,7 +258,149 @@ function renderSidebar() {
 // Lab selection & header
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// YAML editor
+// ---------------------------------------------------------------------------
+
+function topoPath(id) {
+  return encodeURIComponent(id).replace(/%2F/g, "/");
+}
+
+function yamlDirty() {
+  return S.selected?.type === "topo" && !!S.detail && $("#yaml").value !== S.detail.yaml;
+}
+
+// Ask before throwing away unsaved editor changes
+function confirmDiscard() {
+  return !yamlDirty() || confirm(`Discard your unsaved changes to ${S.selected.id}?`);
+}
+
+function loadEditor() {
+  $("#yaml").value = S.detail?.yaml || "";
+  S.validation = null;
+  renderEditorState();
+}
+
+function renderEditorState() {
+  const dirty = yamlDirty();
+  const busy = S.selected?.type === "topo" && !!runningJob(S.selected.id);
+  const v = S.validation;
+  const unloadable = dirty && v && !v.loadable;
+  $("#yaml-save").disabled = !dirty || busy || unloadable || S.saving;
+  $("#yaml-revert").disabled = !dirty || S.saving;
+  const status = $("#yaml-status");
+  let text = dirty ? "Unsaved changes" : "Saved";
+  if (busy && dirty) text += " · a job is running for this lab, save when it finishes";
+  if (v && dirty) text += v.errors.length ? ` · ${v.errors.length} error${v.errors.length > 1 ? "s" : ""}`
+    : v.warnings.length ? ` · ${v.warnings.length} warning${v.warnings.length > 1 ? "s" : ""}` : " · valid";
+  if (unloadable) text += " · fix it before saving";
+  status.textContent = text;
+  status.className = `muted small${unloadable ? " bad" : dirty ? " dirty" : ""}`;
+  const list = $("#yaml-problems");
+  const items = v && dirty ? [
+    ...v.errors.map((e) => h("li", { class: "err" }, e)),
+    ...v.warnings.map((w) => h("li", { class: "warn" }, w)),
+  ] : [];
+  list.replaceChildren(...items);
+  list.hidden = !items.length;
+}
+
+function scheduleValidation() {
+  clearTimeout(S.validateTimer);
+  renderEditorState();
+  if (!yamlDirty()) return;
+  const id = S.selected.id, text = $("#yaml").value;
+  S.validateTimer = setTimeout(async () => {
+    try {
+      const report = await api(`/api/validate/${topoPath(id)}`, { method: "POST", body: JSON.stringify({ yaml: text }) });
+      if (S.selected?.id === id && $("#yaml").value === text) {
+        S.validation = report;
+        renderEditorState();
+      }
+    } catch (e) { /* the next keystroke tries again */ }
+  }, 600);
+}
+
+async function saveYaml() {
+  if (!yamlDirty() || S.saving) return;
+  const id = S.selected.id, text = $("#yaml").value;
+  S.saving = true;
+  renderEditorState();
+  try {
+    const res = await fetch(`/api/topologies/${topoPath(id)}`, {
+      method: "PUT", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ yaml: text, base_hash: S.detail.hash }),
+    });
+    if (res.status === 400) {
+      S.validation = (await res.json()).validation;
+      toast("Not saved: the YAML is not a valid topology");
+    } else if (!res.ok) {
+      toast(`Not saved: ${await res.text()}`);
+    } else {
+      const { detail, validation } = await res.json();
+      if (S.selected?.id === id) {
+        S.detail = detail;
+        S.validation = validation;
+        renderDiagram(false);
+        renderNodesTable();
+        renderNodeCard();
+        renderLabHead();
+        toast(validation.errors.length ? `Saved with ${validation.errors.length} error(s)` : "Saved");
+      }
+      refreshState();
+    }
+  } catch (e) {
+    toast(`Not saved: ${e.message}`);
+  } finally {
+    S.saving = false;
+    renderEditorState();
+  }
+}
+
+async function saveLayout() {
+  if (S.selected?.type !== "topo" || !S.detail) return;
+  if (yamlDirty()) { toast("Save or revert your YAML changes first"); return; }
+  const positions = {};
+  for (const n of S.detail.nodes) if (S.positions[n.name]) positions[n.name] = S.positions[n.name];
+  try {
+    const detail = await api(`/api/positions/${topoPath(S.selected.id)}`, {
+      method: "PUT", body: JSON.stringify({ positions, base_hash: S.detail.hash }),
+    });
+    S.detail = detail;
+    loadEditor();
+    toast("Layout saved to the topology file");
+  } catch (e) {
+    toast(`Layout not saved: ${e.message}`);
+  }
+}
+
+function setupEditor() {
+  const ta = $("#yaml");
+  ta.addEventListener("input", scheduleValidation);
+  ta.addEventListener("keydown", (ev) => {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") {
+      ev.preventDefault();
+      saveYaml();
+    } else if (ev.key === "Tab" && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+      ev.preventDefault();  // YAML has no tabs: indent with spaces
+      document.execCommand("insertText", false, "  ") || ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end");
+      scheduleValidation();
+    }
+  });
+  $("#yaml-save").addEventListener("click", saveYaml);
+  $("#yaml-revert").addEventListener("click", async () => {
+    await reloadDetail(true);
+  });
+  $("#save-layout").addEventListener("click", saveLayout);
+  window.addEventListener("beforeunload", (ev) => {
+    if (yamlDirty()) { ev.preventDefault(); ev.returnValue = ""; }
+  });
+}
+
 async function selectTopology(id) {
+  if (S.selected?.type === "topo" && S.selected.id === id) { reloadDetail(); return; }
+  if (!confirmDiscard()) return;
   S.selected = { type: "topo", id };
   S.selectedNode = null;
   try {
@@ -209,7 +412,7 @@ async function selectTopology(id) {
   S.positions = loadPositions(id);
   $("#empty").hidden = true;
   $("#lab").hidden = false;
-  $("#yaml").textContent = S.detail.yaml;
+  loadEditor();
   setTabsAvailable(["diagram", "nodes", "yaml"]);
   renderSidebar();
   renderLabHead();
@@ -218,10 +421,12 @@ async function selectTopology(id) {
   renderNodeCard();
 }
 
-// Re-fetch the selected topology (e.g. after a job changed its placement record)
-async function reloadDetail() {
+// Re-fetch the selected topology (e.g. after a job changed its placement
+// record). Unsaved editor text is kept unless ``discardEdits``.
+async function reloadDetail(discardEdits) {
   if (S.selected?.type !== "topo") return;
   const id = S.selected.id;
+  const keepEdits = !discardEdits && yamlDirty() ? $("#yaml").value : null;
   let detail;
   try {
     detail = await api(`/api/topologies/${encodeURIComponent(id).replace(/%2F/g, "/")}`);
@@ -230,12 +435,15 @@ async function reloadDetail() {
   }
   if (S.selected?.type !== "topo" || S.selected.id !== id) return;
   S.detail = detail;
+  if (keepEdits === null) loadEditor();
+  else { $("#yaml").value = keepEdits; renderEditorState(); }
   renderDiagram(false);
   renderNodesTable();
   renderNodeCard();
 }
 
 function selectOtherLab(lab) {
+  if (!confirmDiscard()) return;
   S.selected = { type: "lab", lab };
   S.detail = null;
   S.selectedNode = null;
@@ -262,14 +470,17 @@ function renderLabHead() {
   $("#lab-name").textContent = lab || "";
   const badge = $("#lab-state");
   badge.className = `badge ${st.state}`;
-  badge.textContent = st.state === "stopped" ? "not deployed" : `${st.state} · ${st.running}/${st.total}`;
+  badge.textContent = st.state === "stopped" ? "not deployed"
+    : st.state === "booting" ? `booting · ${st.ready}/${st.total} ready`
+    : `${st.state} · ${st.running}/${st.total}`;
 
   const topoFile = labContainers(lab)[0]?.topo_file;
   $("#lab-path").textContent = isTopo ? S.detail?.path || "" : topoFile ? `deployed from ${topoFile}` : "";
 
   const actions = $("#lab-actions");
   actions.hidden = !isTopo;
-  const busy = jobRunning();
+  const busy = isTopo && !!runningJob(S.selected.id);
+  if (isTopo) renderEditorState();
   for (const btn of actions.querySelectorAll("button")) {
     const a = btn.dataset.action;
     const enabled = a === "deploy" ? st.deployed === 0 : st.deployed > 0;
@@ -304,14 +515,24 @@ function renderRuntimeOverlays() {
 // Nodes table
 // ---------------------------------------------------------------------------
 
-function openButtons(lab, node, modes, running) {
-  return h("span", { class: "open" }, (modes || []).map((m) =>
+// Terminal buttons for a node; Logs also works for a stopped container
+function openButtons(lab, node, modes, running, exists) {
+  const buttons = (modes || []).map((m) =>
     h("button", {
       class: "btn small",
       disabled: !running,
       title: running ? `Open ${MODE_LABEL[m]} on ${node}` : "Node is not running",
       onclick: () => openTerminal(lab, node, m),
-    }, MODE_LABEL[m])));
+    }, MODE_LABEL[m]));
+  if (modes?.length) {
+    buttons.push(h("button", {
+      class: "btn small ghost",
+      disabled: !exists,
+      title: exists ? `Follow the container log of ${node}` : "Node is not deployed",
+      onclick: () => openTerminal(lab, node, "logs"),
+    }, MODE_LABEL.logs));
+  }
+  return h("span", { class: "open" }, buttons);
 }
 
 function renderNodesTable() {
@@ -333,10 +554,10 @@ function renderNodesTable() {
       h("td", { class: "mono small" }, n.kind + (n.type ? ` (${n.type})` : "")),
       h("td", { class: "img" }, n.rt?.image || n.image || ""),
       multi ? h("td", { class: "mono small" }, n.rt?.host || placedHost(n.name) || (n.host_pin ? `${n.host_pin} (pinned)` : "")) : null,
-      h("td", {}, h("span", { class: `dot ${running ? "running" : n.rt ? "partial" : ""}` }), " ",
-        n.rt ? n.rt.status || n.rt.state : "not deployed"),
+      h("td", { title: n.rt?.ready_detail || "" }, h("span", { class: `dot ${nodeState(n.rt)}` }), " ",
+        nodeStateText(n.rt)),
       h("td", { class: "mono small" }, n.rt?.ipv4 || ""),
-      h("td", {}, openButtons(lab, n.name, n.modes, running)));
+      h("td", {}, openButtons(lab, n.name, n.modes, running, !!n.rt)));
   }));
 }
 
@@ -606,7 +827,7 @@ function renderDiagram(fit) {
       continue;
     }
     const rt = nodeRuntime(lab, nd.id);
-    const stClass = rt ? (rt.state === "running" ? "running" : "other") : "";
+    const stClass = { running: "running", booting: "booting", partial: "other" }[nodeState(rt)] || "";
     const el = s("g", {
       class: `node${S.selectedNode === nd.id ? " selected" : ""}`,
       transform: `translate(${x},${y})`, "data-id": nd.id,
@@ -618,7 +839,7 @@ function renderDiagram(fit) {
       multi && (nodeHost(lab, nd.id) || nd.node.host_pin)
         ? s("text", { class: "hostbadge", x: NODE_W / 2 - 6, y: NODE_H / 2 + 13, "text-anchor": "end" }, `@${nodeHost(lab, nd.id) || nd.node.host_pin}`)
         : null,
-      s("title", {}, `${nd.id} (${nd.node.kind})${rt ? ` — ${rt.status}` : " — not deployed"}`));
+      s("title", {}, `${nd.id} (${nd.node.kind}) — ${nodeStateText(rt)}`));
     g.append(el);
   }
 
@@ -736,18 +957,18 @@ function renderNodeCard() {
   const rows = [
     ["Kind", node.kind + (node.type ? ` (${node.type})` : "")],
     ["Image", rt?.image || node.image],
-    ["State", rt ? rt.status : "not deployed"],
+    ["State", nodeStateText(rt)],
     ["Mgmt", rt?.ipv4],
     ["Container", rt?.container],
     S.state?.multi_host ? ["Host", rt?.host || placedHost(node.name) || (node.host_pin && `${node.host_pin} (pinned)`) || (node.host_tags && `tags: ${node.host_tags}`)] : null,
   ].filter((r) => r && r[1]);
   card.replaceChildren(
     h("h3", {},
-      h("span", { class: `dot ${running ? "running" : rt ? "partial" : ""}` }),
+      h("span", { class: `dot ${nodeState(rt)}` }),
       node.name,
       h("button", { class: "close", title: "Close", onclick: () => selectNode(null) }, "×")),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
-    openButtons(lab, node.name, node.modes, running));
+    openButtons(lab, node.name, node.modes, running, !!rt));
   card.hidden = false;
 }
 
@@ -765,8 +986,9 @@ async function runAction(action) {
   const lab = S.detail.name;
   if (CONFIRM[action] && !confirm(CONFIRM[action](lab))) return;
   try {
-    const job = await api("/api/jobs", { method: "POST", body: JSON.stringify({ action, topology: S.selected.id }) });
-    S.state.job = job;
+    const options = action === "deploy" || action === "redeploy" ? { rollback: $("#opt-rollback").checked } : {};
+    const job = await api("/api/jobs", { method: "POST", body: JSON.stringify({ action, topology: S.selected.id, options }) });
+    S.state.jobs = [job, ...(S.state.jobs || [])];
     renderLabHead();
     renderSidebar();
     trackJob(job.id, true);
@@ -780,36 +1002,47 @@ function appendActivity(lines) {
   if (pre.dataset.fresh !== "1") { pre.textContent = ""; pre.dataset.fresh = "1"; }
   const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
   for (const line of lines) {
-    const cls = /^✗|ERRO|Error/.test(line) ? "err" : /^✓/.test(line) ? "ok" : /^(»|\$)/.test(line) ? "info" : null;
+    const cls = /^✗|ERRO|Error/.test(line) ? "err" : /^[✓↺]/.test(line) ? "ok" : /^(»|\$)/.test(line) ? "info" : null;
     pre.append(cls ? h("span", { class: cls }, line + "\n") : line + "\n");
   }
   if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
 
+// Show a job's output in the Activity pane, following it while it runs
 function trackJob(id, fromStart) {
   clearTimeout(S.jobPolling);
+  S.jobPolling = null;
+  S.viewJob = id;
   const pre = $("#activity");
   pre.dataset.fresh = "";
+  pre.textContent = "";
   let offset = 0;
+  let sawRunning = false;
   if (fromStart) activatePane("activity", true);
-  $("#activity-dot").className = "dot busy";
+  renderJobPicker();
 
   const poll = async () => {
     let job;
     try {
       job = await api(`/api/jobs/${id}?offset=${offset}`);
     } catch (e) {
-      S.jobPolling = setTimeout(poll, 2000);
+      if (S.viewJob === id) S.jobPolling = setTimeout(poll, 2000);
       return;
     }
+    if (S.viewJob !== id) return;  // switched to another job meanwhile
     if (job.lines.length) appendActivity(job.lines);
     offset = job.offset;
+    const known = (S.state?.jobs || []).find((j) => j.id === id);
+    if (known) Object.assign(known, { status: job.status, finished: job.finished, host_times: job.host_times });
+    renderJobMeta();
+    $("#activity-dot").className = `dot ${job.status === "running" ? "busy" : job.status === "ok" ? "running" : "error"}`;
     if (job.status === "running") {
+      sawRunning = true;
       S.jobPolling = setTimeout(poll, 700);
       return;
     }
     S.jobPolling = null;
-    $("#activity-dot").className = `dot ${job.status === "ok" ? "running" : "error"}`;
+    if (!sawRunning) return;  // a finished job opened from history
     if (job.status !== "ok") toast(`${job.action} failed — see Activity`);
     await refreshState();
     await reloadDetail();
@@ -852,15 +1085,17 @@ function openTerminal(lab, node, mode) {
     h("span", { class: "dot busy" }),
     `${node} · ${MODE_LABEL[mode]}`,
     h("span", {
-      class: "x", role: "button", title: "Close terminal",
+      class: "x", role: "button", title: mode === "logs" ? "Close log" : "Close terminal",
       onclick: (ev) => { ev.stopPropagation(); closeTerminal(id); },
     }, "×"));
   $("#dock-tabs").append(tab);
 
+  const logs = mode === "logs";
   const term = new Terminal({
     fontFamily: cssVar("--mono") || "monospace",
     fontSize: 13,
-    cursorBlink: true,
+    cursorBlink: !logs,
+    disableStdin: logs,
     scrollback: 5000,
     theme: { background: cssVar("--term-bg") || "#0b0d10" },
   });
@@ -953,13 +1188,21 @@ function setup() {
     btn.addEventListener("click", () => runAction(btn.dataset.action));
   }
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
+  const rollback = $("#opt-rollback");
+  try { rollback.checked = localStorage.getItem("clab-rollback") === "1"; } catch { /* private mode */ }
+  rollback.addEventListener("change", () => {
+    try { localStorage.setItem("clab-rollback", rollback.checked ? "1" : "0"); } catch { /* private mode */ }
+  });
   setupDiagramInteraction();
+  setupEditor();
   setupDock();
   window.addEventListener("resize", () => renderDiagram(false));
 
   refreshState();
   refreshHosts();
-  setInterval(() => { if (!document.hidden && !S.jobPolling) refreshState(); }, 5000);
+  $("#job-select").addEventListener("change", (e) => trackJob(e.target.value, false));
+  setInterval(() => { if (!document.hidden) refreshState(); }, 5000);
+  setInterval(() => { if (!document.hidden) renderJobMeta(); }, 1000);
   setInterval(() => { if (!document.hidden) refreshHosts(); }, 30000);
 }
 

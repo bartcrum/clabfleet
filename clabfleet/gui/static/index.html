@@ -43,6 +43,9 @@
             <div id="lab-path" class="muted mono small"></div>
           </div>
           <div id="lab-actions" class="actions">
+            <label class="opt" title="If a host fails during Deploy or Redeploy, destroy the lab on every host instead of leaving it partly running">
+              <input type="checkbox" id="opt-rollback"> Roll back on failure
+            </label>
             <button class="btn primary" data-action="deploy">Deploy</button>
             <button class="btn" data-action="redeploy" title="Destroy and recreate all nodes (discards node state)">Redeploy</button>
             <button class="btn" data-action="save" title="Save running configs into the lab directory">Save configs</button>
@@ -60,6 +63,7 @@
           <section id="view-diagram" class="view">
             <svg id="diagram" class="diagram" aria-label="Topology diagram"></svg>
             <div class="diagram-tools">
+              <button id="save-layout" class="btn ghost small" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
               <button id="relayout" class="btn ghost small" title="Discard manual positions">Auto layout</button>
               <button id="fit" class="btn ghost small">Fit</button>
             </div>
@@ -72,8 +76,15 @@
               <tbody id="node-rows"></tbody>
             </table>
           </section>
-          <section id="view-yaml" class="view" hidden>
-            <pre id="yaml" class="yaml mono"></pre>
+          <section id="view-yaml" class="view yaml-view" hidden>
+            <div class="editor-bar">
+              <button id="yaml-save" class="btn small primary" disabled title="Save (Ctrl+S)">Save</button>
+              <button id="yaml-revert" class="btn small" disabled title="Discard changes and reload the file">Revert</button>
+              <span id="yaml-status" class="muted small"></span>
+            </div>
+            <textarea id="yaml" class="yaml mono" spellcheck="false" autocomplete="off"
+                      autocapitalize="off" aria-label="Topology YAML"></textarea>
+            <ul id="yaml-problems" class="problems" hidden></ul>
           </section>
         </div>
       </div>
@@ -89,7 +100,13 @@
       <button id="dock-toggle" class="btn ghost small" title="Show/hide panel">▴</button>
     </div>
     <div id="dock-panes" class="dock-panes">
-      <div class="pane active" data-pane="activity"><pre id="activity" class="activity mono">No jobs yet.</pre></div>
+      <div class="pane active activity-pane" data-pane="activity">
+        <div class="activity-bar">
+          <select id="job-select" class="small" aria-label="Job"></select>
+          <span id="job-meta" class="muted small mono"></span>
+        </div>
+        <pre id="activity" class="activity mono">No jobs yet.</pre>
+      </div>
     </div>
   </section>
 

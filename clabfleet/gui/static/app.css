@@ -117,6 +117,7 @@ button { font: inherit; color: inherit; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; display: inline-block; }
 .dot.running { background: var(--accent); }
 .dot.partial, .dot.busy { background: var(--warn); }
+.dot.booting { background: var(--warn); animation: pulse 1.6s infinite; }
 .dot.error { background: var(--danger); }
 .dot.busy { animation: pulse 1s infinite; }
 @keyframes pulse { 50% { opacity: .3; } }
@@ -139,7 +140,9 @@ button { font: inherit; color: inherit; }
 }
 .badge.running { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
 .badge.partial { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
-.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.badge.booting { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.actions .opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); cursor: pointer; }
 
 .tabs { display: flex; gap: 2px; padding: 0 18px; border-bottom: 1px solid var(--line); }
 .tab {
@@ -165,6 +168,7 @@ button { font: inherit; color: inherit; }
 .diagram .node .status { fill: var(--line); }
 .diagram .node .status.running { fill: var(--accent); }
 .diagram .node .status.other { fill: var(--warn); }
+.diagram .node .status.booting { fill: var(--warn); animation: pulse 1.6s infinite; }
 .diagram .node .hostbadge { font-size: 9.5px; fill: var(--blue); font-family: var(--mono); }
 .diagram .pseudo rect { fill: var(--bg); stroke: var(--node-line); stroke-dasharray: 3 3; }
 .diagram .pseudo .name { font-size: 11px; font-weight: 400; fill: var(--muted); }
@@ -199,7 +203,17 @@ table.nodes td { padding: 8px 18px; border-bottom: 1px solid var(--line); white-
 table.nodes td.img { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 table.nodes td .open { display: flex; gap: 6px; }
 
-.yaml { margin: 0; padding: 16px 18px; font-size: 12.5px; white-space: pre; tab-size: 2; }
+.view.yaml-view:not([hidden]) { display: flex; flex-direction: column; overflow: hidden; }
+.editor-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line); flex: none; }
+#yaml-status.dirty { color: var(--warn); }
+#yaml-status.bad { color: var(--danger); }
+.yaml {
+  flex: 1; min-height: 0; margin: 0; padding: 14px 18px; font-size: 12.5px; white-space: pre; tab-size: 2;
+  border: 0; outline: none; resize: none; background: var(--bg); color: var(--text); overflow: auto;
+}
+.problems { flex: none; max-height: 30%; overflow: auto; margin: 0; padding: 8px 14px 10px 32px; border-top: 1px solid var(--line); font-size: 12px; }
+.problems .err { color: var(--danger); }
+.problems .warn { color: var(--warn); }
 
 /* ---------- dock ---------- */
 .dock {
@@ -225,7 +239,11 @@ table.nodes td .open { display: flex; gap: 6px; }
 .pane.active { display: block; }
 .pane.term { background: var(--term-bg); padding: 6px 0 0 8px; }
 .pane.term .xterm { height: 100%; }
-.activity { margin: 0; height: 100%; overflow: auto; padding: 10px 14px; font-size: 12.5px; white-space: pre-wrap; }
+.pane.activity-pane.active { display: flex; flex-direction: column; }
+.activity-bar { display: flex; align-items: center; gap: 10px; padding: 6px 14px; border-bottom: 1px solid var(--line); flex: none; min-width: 0; }
+.activity-bar select { max-width: 60%; min-width: 0; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 12px; }
+.activity-bar #job-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity { margin: 0; flex: 1; min-height: 0; overflow: auto; padding: 10px 14px; font-size: 12.5px; white-space: pre-wrap; }
 .activity .err { color: var(--danger); }
 .activity .ok { color: var(--accent); }
 .activity .info { color: var(--blue); }
