@@ -258,7 +258,149 @@ function renderSidebar() {
 // Lab selection & header
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// YAML editor
+// ---------------------------------------------------------------------------
+
+function topoPath(id) {
+  return encodeURIComponent(id).replace(/%2F/g, "/");
+}
+
+function yamlDirty() {
+  return S.selected?.type === "topo" && !!S.detail && $("#yaml").value !== S.detail.yaml;
+}
+
+// Ask before throwing away unsaved editor changes
+function confirmDiscard() {
+  return !yamlDirty() || confirm(`Discard your unsaved changes to ${S.selected.id}?`);
+}
+
+function loadEditor() {
+  $("#yaml").value = S.detail?.yaml || "";
+  S.validation = null;
+  renderEditorState();
+}
+
+function renderEditorState() {
+  const dirty = yamlDirty();
+  const busy = S.selected?.type === "topo" && !!runningJob(S.selected.id);
+  const v = S.validation;
+  const unloadable = dirty && v && !v.loadable;
+  $("#yaml-save").disabled = !dirty || busy || unloadable || S.saving;
+  $("#yaml-revert").disabled = !dirty || S.saving;
+  const status = $("#yaml-status");
+  let text = dirty ? "Unsaved changes" : "Saved";
+  if (busy && dirty) text += " · a job is running for this lab, save when it finishes";
+  if (v && dirty) text += v.errors.length ? ` · ${v.errors.length} error${v.errors.length > 1 ? "s" : ""}`
+    : v.warnings.length ? ` · ${v.warnings.length} warning${v.warnings.length > 1 ? "s" : ""}` : " · valid";
+  if (unloadable) text += " · fix it before saving";
+  status.textContent = text;
+  status.className = `muted small${unloadable ? " bad" : dirty ? " dirty" : ""}`;
+  const list = $("#yaml-problems");
+  const items = v && dirty ? [
+    ...v.errors.map((e) => h("li", { class: "err" }, e)),
+    ...v.warnings.map((w) => h("li", { class: "warn" }, w)),
+  ] : [];
+  list.replaceChildren(...items);
+  list.hidden = !items.length;
+}
+
+function scheduleValidation() {
+  clearTimeout(S.validateTimer);
+  renderEditorState();
+  if (!yamlDirty()) return;
+  const id = S.selected.id, text = $("#yaml").value;
+  S.validateTimer = setTimeout(async () => {
+    try {
+      const report = await api(`/api/validate/${topoPath(id)}`, { method: "POST", body: JSON.stringify({ yaml: text }) });
+      if (S.selected?.id === id && $("#yaml").value === text) {
+        S.validation = report;
+        renderEditorState();
+      }
+    } catch (e) { /* the next keystroke tries again */ }
+  }, 600);
+}
+
+async function saveYaml() {
+  if (!yamlDirty() || S.saving) return;
+  const id = S.selected.id, text = $("#yaml").value;
+  S.saving = true;
+  renderEditorState();
+  try {
+    const res = await fetch(`/api/topologies/${topoPath(id)}`, {
+      method: "PUT", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ yaml: text, base_hash: S.detail.hash }),
+    });
+    if (res.status === 400) {
+      S.validation = (await res.json()).validation;
+      toast("Not saved: the YAML is not a valid topology");
+    } else if (!res.ok) {
+      toast(`Not saved: ${await res.text()}`);
+    } else {
+      const { detail, validation } = await res.json();
+      if (S.selected?.id === id) {
+        S.detail = detail;
+        S.validation = validation;
+        renderDiagram(false);
+        renderNodesTable();
+        renderNodeCard();
+        renderLabHead();
+        toast(validation.errors.length ? `Saved with ${validation.errors.length} error(s)` : "Saved");
+      }
+      refreshState();
+    }
+  } catch (e) {
+    toast(`Not saved: ${e.message}`);
+  } finally {
+    S.saving = false;
+    renderEditorState();
+  }
+}
+
+async function saveLayout() {
+  if (S.selected?.type !== "topo" || !S.detail) return;
+  if (yamlDirty()) { toast("Save or revert your YAML changes first"); return; }
+  const positions = {};
+  for (const n of S.detail.nodes) if (S.positions[n.name]) positions[n.name] = S.positions[n.name];
+  try {
+    const detail = await api(`/api/positions/${topoPath(S.selected.id)}`, {
+      method: "PUT", body: JSON.stringify({ positions, base_hash: S.detail.hash }),
+    });
+    S.detail = detail;
+    loadEditor();
+    toast("Layout saved to the topology file");
+  } catch (e) {
+    toast(`Layout not saved: ${e.message}`);
+  }
+}
+
+function setupEditor() {
+  const ta = $("#yaml");
+  ta.addEventListener("input", scheduleValidation);
+  ta.addEventListener("keydown", (ev) => {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") {
+      ev.preventDefault();
+      saveYaml();
+    } else if (ev.key === "Tab" && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+      ev.preventDefault();  // YAML has no tabs: indent with spaces
+      document.execCommand("insertText", false, "  ") || ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end");
+      scheduleValidation();
+    }
+  });
+  $("#yaml-save").addEventListener("click", saveYaml);
+  $("#yaml-revert").addEventListener("click", async () => {
+    await reloadDetail(true);
+  });
+  $("#save-layout").addEventListener("click", saveLayout);
+  window.addEventListener("beforeunload", (ev) => {
+    if (yamlDirty()) { ev.preventDefault(); ev.returnValue = ""; }
+  });
+}
+
 async function selectTopology(id) {
+  if (S.selected?.type === "topo" && S.selected.id === id) { reloadDetail(); return; }
+  if (!confirmDiscard()) return;
   S.selected = { type: "topo", id };
   S.selectedNode = null;
   try {
@@ -270,7 +412,7 @@ async function selectTopology(id) {
   S.positions = loadPositions(id);
   $("#empty").hidden = true;
   $("#lab").hidden = false;
-  $("#yaml").textContent = S.detail.yaml;
+  loadEditor();
   setTabsAvailable(["diagram", "nodes", "yaml"]);
   renderSidebar();
   renderLabHead();
@@ -279,10 +421,12 @@ async function selectTopology(id) {
   renderNodeCard();
 }
 
-// Re-fetch the selected topology (e.g. after a job changed its placement record)
-async function reloadDetail() {
+// Re-fetch the selected topology (e.g. after a job changed its placement
+// record). Unsaved editor text is kept unless ``discardEdits``.
+async function reloadDetail(discardEdits) {
   if (S.selected?.type !== "topo") return;
   const id = S.selected.id;
+  const keepEdits = !discardEdits && yamlDirty() ? $("#yaml").value : null;
   let detail;
   try {
     detail = await api(`/api/topologies/${encodeURIComponent(id).replace(/%2F/g, "/")}`);
@@ -291,12 +435,15 @@ async function reloadDetail() {
   }
   if (S.selected?.type !== "topo" || S.selected.id !== id) return;
   S.detail = detail;
+  if (keepEdits === null) loadEditor();
+  else { $("#yaml").value = keepEdits; renderEditorState(); }
   renderDiagram(false);
   renderNodesTable();
   renderNodeCard();
 }
 
 function selectOtherLab(lab) {
+  if (!confirmDiscard()) return;
   S.selected = { type: "lab", lab };
   S.detail = null;
   S.selectedNode = null;
@@ -333,6 +480,7 @@ function renderLabHead() {
   const actions = $("#lab-actions");
   actions.hidden = !isTopo;
   const busy = isTopo && !!runningJob(S.selected.id);
+  if (isTopo) renderEditorState();
   for (const btn of actions.querySelectorAll("button")) {
     const a = btn.dataset.action;
     const enabled = a === "deploy" ? st.deployed === 0 : st.deployed > 0;
@@ -1046,6 +1194,7 @@ function setup() {
     try { localStorage.setItem("clab-rollback", rollback.checked ? "1" : "0"); } catch { /* private mode */ }
   });
   setupDiagramInteraction();
+  setupEditor();
   setupDock();
   window.addEventListener("resize", () => renderDiagram(false));
 

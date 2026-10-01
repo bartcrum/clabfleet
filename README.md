@@ -162,7 +162,7 @@ host, and containerlab runs there. `destroy` removes that directory.
 ## Web GUI
 
 ```bash
-pip install -e ".[gui]"
+pip install -e ".[gui]"     # aiohttp, plus ruamel.yaml for saving edits
 
 cd ~/Work/clabfleet
 clabfleet --sudo gui                     # this machine
@@ -176,8 +176,17 @@ printed in the terminal). Stop it with Ctrl+C.
   `--dir`), with live state, plus any other labs running on your hosts
 - **Diagram:** nodes coloured by state (amber while booting), interface names on links, the host
   each node runs on (multi-host), and cross-host VXLAN links highlighted.
-  Drag nodes to arrange them (positions are remembered per topology),
-  scroll to zoom, double-click a node to open its terminal
+  Drag nodes to arrange them, scroll to zoom, double-click a node to open
+  its terminal. Positions are remembered in the browser. **Save layout**
+  writes them into the topology file as `graph-posX`/`graph-posY` node
+  labels, so the layout travels with the file. Only those labels change:
+  comments, ordering, quoting and indentation are kept.
+- **YAML editor:** edit the topology file in the YAML tab. Problems are
+  listed as you type, using the same checks as `clabfleet validate`.
+  Save with the button or Ctrl+S. Text that is not a loadable topology
+  cannot be saved, but other errors, such as a startup config file that
+  does not exist yet, do not block saving. Saving is refused while a job
+  runs for the lab, or if the file changed on disk since you opened it.
 - **Deploy / Redeploy / Save configs / Destroy** with containerlab's output
   streamed into the Activity panel. Different labs can run jobs at the
   same time, up to four, with one job per lab. Pick any job, running or
@@ -444,6 +453,7 @@ clabfleet/
     server.py      # aiohttp app: API, auth, terminal websockets
     state.py       # Topology discovery, running labs, deploy/destroy jobs
     terminals.py   # Local pty and SSH-channel terminal sessions
+    editing.py     # Format-preserving saves of topology files
     static/        # Web UI (vanilla JS; xterm.js bundled in vendor/)
 topologies/        # Example topologies and cluster inventory
 tests/             # pytest suite

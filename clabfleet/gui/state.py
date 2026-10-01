@@ -6,6 +6,7 @@ Everything here is synchronous; the web server calls it from worker threads.
 import copy
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -20,6 +21,8 @@ from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runn
 from ..deployer import LabDeployer, read_placement_record
 from ..nodes import InspectError, access_modes, inspect_all, parse_inspect
 from ..readiness import ReadinessCache, check_ready
+from ..validate import validate_text
+from .editing import EditConflict, set_positions, text_hash, write_if_unchanged
 from ..runner import Runner
 from ..topology import (
     LABEL_HOST,
@@ -122,6 +125,14 @@ def topology_view(topo: Topology) -> dict:
 # Running labs
 # ----------------------------------------------------------------------
 
+class UnloadableTopology(ValueError):
+    """Editor text that is not a loadable topology; carries the validation report."""
+
+    def __init__(self, report: dict):
+        super().__init__("; ".join(report["errors"]) or "not a valid topology")
+        self.report = report
+
+
 @dataclass
 class HostState:
     name: str
@@ -197,7 +208,8 @@ class Workspace:
 
     def topology_detail(self, topo_id: str) -> dict:
         path = self.topology_path(topo_id)
-        detail = {"id": topo_id, "path": str(path), "yaml": path.read_text()}
+        text = path.read_text()
+        detail = {"id": topo_id, "path": str(path), "yaml": text, "hash": text_hash(text)}
         try:
             topo = load_topology(path)
             detail.update(topology_view(topo))
@@ -206,6 +218,46 @@ class Workspace:
         except Exception as exc:
             detail["error"] = str(exc)
         return detail
+
+    # --- editing ---
+
+    def validate_yaml(self, topo_id: str, text: str) -> dict:
+        """Check unsaved YAML for a topology (relative files resolve next to it)."""
+        path = self.topology_path(topo_id)
+        # Placement labels only mean something with several hosts
+        report = validate_text(text, path.parent, self.cluster if self.multi_host else None,
+                               name=topo_id)
+        return {"ok": report.ok, "loadable": report.topology is not None,
+                "errors": report.errors, "warnings": report.warnings,
+                "summary": report.summary()}
+
+    def save_yaml(self, topo_id: str, text: str, base_hash: str) -> dict:
+        """Save editor text. Refuses text that is not a loadable topology
+        (ValueError with the report) or a file changed since ``base_hash``."""
+        path = self.topology_path(topo_id)
+        report = self.validate_yaml(topo_id, text)
+        if not report["loadable"]:
+            raise UnloadableTopology(report)
+        write_if_unchanged(path, text, base_hash)
+        return {"detail": self.topology_detail(topo_id), "validation": report}
+
+    def save_positions(self, topo_id: str, positions: dict, base_hash: str) -> dict:
+        """Write node positions into the file as graph-posX/graph-posY labels."""
+        path = self.topology_path(topo_id)
+        clean: dict[str, tuple[float, float]] = {}
+        for name, xy in (positions or {}).items():
+            try:
+                x, y = (float(v) for v in xy)
+            except (TypeError, ValueError):
+                raise ValueError(f"Bad position for node '{name}'") from None
+            if not (math.isfinite(x) and math.isfinite(y)):
+                raise ValueError(f"Bad position for node '{name}'")
+            clean[str(name)] = (x, y)
+        text = path.read_text()
+        if base_hash and text_hash(text) != base_hash:
+            raise EditConflict(f"{path.name} changed on disk; reload it before saving the layout")
+        write_if_unchanged(path, set_positions(text, clean), text_hash(text))
+        return self.topology_detail(topo_id)
 
     # --- runtime ---
 

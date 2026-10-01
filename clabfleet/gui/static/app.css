@@ -203,7 +203,17 @@ table.nodes td { padding: 8px 18px; border-bottom: 1px solid var(--line); white-
 table.nodes td.img { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 table.nodes td .open { display: flex; gap: 6px; }
 
-.yaml { margin: 0; padding: 16px 18px; font-size: 12.5px; white-space: pre; tab-size: 2; }
+.view.yaml-view:not([hidden]) { display: flex; flex-direction: column; overflow: hidden; }
+.editor-bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line); flex: none; }
+#yaml-status.dirty { color: var(--warn); }
+#yaml-status.bad { color: var(--danger); }
+.yaml {
+  flex: 1; min-height: 0; margin: 0; padding: 14px 18px; font-size: 12.5px; white-space: pre; tab-size: 2;
+  border: 0; outline: none; resize: none; background: var(--bg); color: var(--text); overflow: auto;
+}
+.problems { flex: none; max-height: 30%; overflow: auto; margin: 0; padding: 8px 14px 10px 32px; border-top: 1px solid var(--line); font-size: 12px; }
+.problems .err { color: var(--danger); }
+.problems .warn { color: var(--warn); }
 
 /* ---------- dock ---------- */
 .dock {
