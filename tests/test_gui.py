@@ -252,3 +252,39 @@ def test_job_outcome_lines():
         "↺ rolled back: removed from h1, h2",
         "✗ rollback incomplete on h2 (error: y). Destroy the lab to clean up.",
     ]
+
+
+def test_logs_mode_command():
+    assert terminal_command("logs", "cisco_iol", "clab-l-r1", "") == [
+        "docker", "logs", "--follow", "--tail", "2000", "clab-l-r1"]
+
+
+def test_logs_terminal_over_websocket(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    docker = bindir / "docker"
+    docker.write_text('#!/bin/sh\necho "args: $*"\necho "booting line 1"\n')
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+    ws = _workspace(tmp_path)
+    monkeypatch.setattr(Workspace, "find_node", lambda self, lab, node: {
+        "kind": "cisco_iol", "container": "clab-l-r1", "ipv4": "", "host": "localhost"})
+
+    async def scenario():
+        app = server.create_app(ws, "tok")
+        async with TestClient(TestServer(app)) as client:
+            await client.get("/?token=tok", allow_redirects=False)
+            sock = await client.ws_connect("/ws/terminal?lab=l&node=r1&mode=logs&cols=80&rows=24")
+            output, exit_msg = b"", None
+            async for msg in sock:
+                if msg.type.name == "BINARY":
+                    output += msg.data
+                elif msg.type.name == "TEXT":
+                    exit_msg = json.loads(msg.data)
+            return output.decode(), exit_msg
+
+    output, exit_msg = asyncio.run(scenario())
+    assert "args: logs --follow --tail 2000 clab-l-r1" in output
+    assert "booting line 1" in output
+    assert exit_msg == {"t": "exit", "code": 0}

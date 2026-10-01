@@ -64,6 +64,8 @@ KIND_SSH_USER = {"juniper_crpd": "root", "crpd": "root", "linux": "root"}
 # containerlab's default login on most network kinds
 DEFAULT_SSH_PASSWORD = "admin"
 
+LOG_TAIL_LINES = 2000  # earlier container log lines are skipped in the Logs tab
+
 SHELL_CMD = ["sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l"]
 
 
@@ -87,7 +89,7 @@ def access_modes(kind: str) -> list[str]:
 
 
 def terminal_command(mode: str, kind: str, container: str, ipv4: str) -> list[str]:
-    """argv to run (on the node's host) for an interactive terminal."""
+    """argv to run (on the node's host) for a terminal tab: cli, shell, ssh or logs."""
     if mode == "cli":
         if kind not in KIND_CLI:
             raise ValueError(f"No CLI command known for kind '{kind}'")
@@ -103,6 +105,9 @@ def terminal_command(mode: str, kind: str, container: str, ipv4: str) -> list[st
             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
             f"{user}@{ipv4}",
         ]
+    if mode == "logs":
+        # Works for stopped containers too, which is when logs matter most
+        return ["docker", "logs", "--follow", "--tail", str(LOG_TAIL_LINES), container]
     raise ValueError(f"Unknown terminal mode '{mode}'")
 
 

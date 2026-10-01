@@ -189,6 +189,9 @@ printed in the terminal). Stop it with Ctrl+C.
   - **CLI**: the node's own CLI via `docker exec` (`Cli` on cEOS, `sr_cli`
     on SR Linux, `cli` on cRPD)
   - **Shell**: a shell inside the container
+  - **Logs**: follows the container's log (`docker logs --follow`, last
+    2000 lines). It also works for a container that has stopped, which
+    helps when a VM-based node fails to boot
   - **SSH**: `ssh` to the node's management IP. This is the CLI for VM-based
     kinds such as Cisco IOL. It needs a login on the node: containerlab's
     default configs create `admin`/`admin`, but your own `startup-config`

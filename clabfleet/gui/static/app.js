@@ -60,7 +60,7 @@ function toast(msg) {
   toastTimer = setTimeout(() => (el.hidden = true), 6000);
 }
 
-const MODE_LABEL = { cli: "CLI", shell: "Shell", ssh: "SSH" };
+const MODE_LABEL = { cli: "CLI", shell: "Shell", ssh: "SSH", logs: "Logs" };
 
 // ---------------------------------------------------------------------------
 // Runtime helpers
@@ -367,14 +367,24 @@ function renderRuntimeOverlays() {
 // Nodes table
 // ---------------------------------------------------------------------------
 
-function openButtons(lab, node, modes, running) {
-  return h("span", { class: "open" }, (modes || []).map((m) =>
+// Terminal buttons for a node; Logs also works for a stopped container
+function openButtons(lab, node, modes, running, exists) {
+  const buttons = (modes || []).map((m) =>
     h("button", {
       class: "btn small",
       disabled: !running,
       title: running ? `Open ${MODE_LABEL[m]} on ${node}` : "Node is not running",
       onclick: () => openTerminal(lab, node, m),
-    }, MODE_LABEL[m])));
+    }, MODE_LABEL[m]));
+  if (modes?.length) {
+    buttons.push(h("button", {
+      class: "btn small ghost",
+      disabled: !exists,
+      title: exists ? `Follow the container log of ${node}` : "Node is not deployed",
+      onclick: () => openTerminal(lab, node, "logs"),
+    }, MODE_LABEL.logs));
+  }
+  return h("span", { class: "open" }, buttons);
 }
 
 function renderNodesTable() {
@@ -399,7 +409,7 @@ function renderNodesTable() {
       h("td", { title: n.rt?.ready_detail || "" }, h("span", { class: `dot ${nodeState(n.rt)}` }), " ",
         nodeStateText(n.rt)),
       h("td", { class: "mono small" }, n.rt?.ipv4 || ""),
-      h("td", {}, openButtons(lab, n.name, n.modes, running)));
+      h("td", {}, openButtons(lab, n.name, n.modes, running, !!n.rt)));
   }));
 }
 
@@ -810,7 +820,7 @@ function renderNodeCard() {
       node.name,
       h("button", { class: "close", title: "Close", onclick: () => selectNode(null) }, "×")),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
-    openButtons(lab, node.name, node.modes, running));
+    openButtons(lab, node.name, node.modes, running, !!rt));
   card.hidden = false;
 }
 
@@ -927,15 +937,17 @@ function openTerminal(lab, node, mode) {
     h("span", { class: "dot busy" }),
     `${node} · ${MODE_LABEL[mode]}`,
     h("span", {
-      class: "x", role: "button", title: "Close terminal",
+      class: "x", role: "button", title: mode === "logs" ? "Close log" : "Close terminal",
       onclick: (ev) => { ev.stopPropagation(); closeTerminal(id); },
     }, "×"));
   $("#dock-tabs").append(tab);
 
+  const logs = mode === "logs";
   const term = new Terminal({
     fontFamily: cssVar("--mono") || "monospace",
     fontSize: 13,
-    cursorBlink: true,
+    cursorBlink: !logs,
+    disableStdin: logs,
     scrollback: 5000,
     theme: { background: cssVar("--term-bg") || "#0b0d10" },
   });
