@@ -146,7 +146,8 @@ async def _topology(request):
 async def _start_job(request):
     body = await request.json()
     try:
-        job = request.app[JOBS].start(body.get("action", ""), body.get("topology", ""))
+        options = body.get("options") if isinstance(body.get("options"), dict) else None
+        job = request.app[JOBS].start(body.get("action", ""), body.get("topology", ""), options)
     except KeyError as exc:
         raise web.HTTPNotFound(text=str(exc))
     except ValueError as exc:

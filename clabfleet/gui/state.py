@@ -262,9 +262,25 @@ class Job:
     started: float = field(default_factory=time.time)
     finished: Optional[float] = None
     result: Optional[dict] = None
+    options: dict = field(default_factory=dict)
 
     def add(self, line: str) -> None:
         self.lines.append(ANSI_RE.sub("", line))
+
+    def add_outcome(self, result: dict) -> None:
+        """Spell out a partial or rolled-back deploy."""
+        hosts = result.get("hosts", {})
+        ok = [h for h, r in hosts.items() if "error" not in r]
+        failed = [h for h, r in hosts.items() if "error" in r]
+        status = result.get("status")
+        if status == "partial":
+            self.add(f"✗ partly deployed: running on {', '.join(ok)}, failed on "
+                     f"{', '.join(failed)}. Destroy the lab to clean up.")
+        elif status == "rolled-back":
+            self.add(f"↺ rolled back: removed from {', '.join(result['rollback'])}")
+        elif status == "rollback-failed":
+            bad = [f"{h} ({r})" for h, r in result["rollback"].items() if r != "ok"]
+            self.add(f"✗ rollback incomplete on {', '.join(bad)}. Destroy the lab to clean up.")
 
     def view(self, offset: int = 0) -> dict:
         return {
@@ -290,6 +306,7 @@ class _JobLogHandler(logging.Handler):
 
 class JobManager:
     ACTIONS = {"deploy", "redeploy", "destroy", "save"}
+    OPTIONS = {"rollback"}  # deploy/redeploy only
 
     def __init__(self, workspace: Workspace):
         self.workspace = workspace
@@ -297,16 +314,18 @@ class JobManager:
         self._lock = threading.Lock()
         self.current: Optional[Job] = None
 
-    def start(self, action: str, topo_id: str) -> Job:
+    def start(self, action: str, topo_id: str, options: Optional[dict] = None) -> Job:
         if action not in self.ACTIONS:
             raise ValueError(f"Unknown action '{action}'")
+        options = {k: bool(v) for k, v in (options or {}).items() if k in self.OPTIONS}
         path = self.workspace.topology_path(topo_id)
         with self._lock:
             if self.current and self.current.status == "running":
                 raise RuntimeError(
                     f"Another job is running ({self.current.action} {self.current.topology})"
                 )
-            job = Job(id=uuid.uuid4().hex[:12], action=action, topology=topo_id)
+            job = Job(id=uuid.uuid4().hex[:12], action=action, topology=topo_id,
+                      options=options)
             self.jobs[job.id] = job
             self.current = job
         threading.Thread(target=self._run, args=(job, path), daemon=True).start()
@@ -327,7 +346,8 @@ class JobManager:
             )
             job.add(f"$ {job.action} {job.topology}")
             if job.action in ("deploy", "redeploy"):
-                result = deployer.deploy(path, reconfigure=job.action == "redeploy")
+                result = deployer.deploy(path, reconfigure=job.action == "redeploy",
+                                         rollback=job.options.get("rollback", False))
             elif job.action == "destroy":
                 result = deployer.destroy(path)
             else:
@@ -336,6 +356,7 @@ class JobManager:
             errors = {h: r["error"] for h, r in result.get("hosts", {}).items() if "error" in r}
             for host, err in errors.items():
                 job.add(f"✗ {host}: {err}")
+            job.add_outcome(result)
             job.status = "error" if errors else "ok"
         except Exception as exc:
             logger.exception("Job %s failed", job.id)

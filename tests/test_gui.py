@@ -116,8 +116,8 @@ def test_job_manager_streams_output_and_blocks_concurrent_jobs(tmp_path, monkeyp
             assert interactive_sudo is False
             self.on_output = on_output
 
-        def deploy(self, path, reconfigure=False):
-            calls.append(("deploy", Path(path).name, reconfigure))
+        def deploy(self, path, reconfigure=False, rollback=False):
+            calls.append(("deploy", Path(path).name, reconfigure, rollback))
             self.on_output("\x1b[1mINFO\x1b[0m Creating container")
             time.sleep(0.2)
             return {"hosts": {"localhost": {"status": "deployed"}}}
@@ -130,7 +130,8 @@ def test_job_manager_streams_output_and_blocks_concurrent_jobs(tmp_path, monkeyp
     ws.topologies()
     jobs = JobManager(ws)
 
-    job = jobs.start("redeploy", "t.clab.yml")
+    job = jobs.start("redeploy", "t.clab.yml", {"rollback": 1, "format": True})
+    assert job.options == {"rollback": True}  # unknown options dropped
     with pytest.raises(RuntimeError, match="Another job"):
         jobs.start("destroy", "t.clab.yml")
     for _ in range(50):
@@ -138,7 +139,7 @@ def test_job_manager_streams_output_and_blocks_concurrent_jobs(tmp_path, monkeyp
             break
         time.sleep(0.05)
     assert job.status == "ok"
-    assert calls == [("deploy", "t.clab.yml", True)]
+    assert calls == [("deploy", "t.clab.yml", True, True)]
     assert "INFO Creating container" in job.lines  # ANSI codes stripped
 
     job2 = jobs.start("destroy", "t.clab.yml")
@@ -192,3 +193,16 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
             assert (await client.get("/api/topologies/missing.clab.yml")).status == 404
 
     asyncio.run(scenario())
+
+
+def test_job_outcome_lines():
+    job = state.Job("j", "deploy", "t")
+    job.add_outcome({"status": "partial", "hosts": {"h1": {"status": "deployed"}, "h2": {"error": "x"}}})
+    job.add_outcome({"status": "rolled-back", "hosts": {}, "rollback": {"h1": "ok", "h2": "ok"}})
+    job.add_outcome({"status": "rollback-failed", "hosts": {}, "rollback": {"h1": "ok", "h2": "error: y"}})
+    job.add_outcome({"status": "deployed", "hosts": {"h1": {}}})
+    assert job.lines == [
+        "✗ partly deployed: running on h1, failed on h2. Destroy the lab to clean up.",
+        "↺ rolled back: removed from h1, h2",
+        "✗ rollback incomplete on h2 (error: y). Destroy the lab to clean up.",
+    ]

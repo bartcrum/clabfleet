@@ -765,7 +765,8 @@ async function runAction(action) {
   const lab = S.detail.name;
   if (CONFIRM[action] && !confirm(CONFIRM[action](lab))) return;
   try {
-    const job = await api("/api/jobs", { method: "POST", body: JSON.stringify({ action, topology: S.selected.id }) });
+    const options = action === "deploy" || action === "redeploy" ? { rollback: $("#opt-rollback").checked } : {};
+    const job = await api("/api/jobs", { method: "POST", body: JSON.stringify({ action, topology: S.selected.id, options }) });
     S.state.job = job;
     renderLabHead();
     renderSidebar();
@@ -780,7 +781,7 @@ function appendActivity(lines) {
   if (pre.dataset.fresh !== "1") { pre.textContent = ""; pre.dataset.fresh = "1"; }
   const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
   for (const line of lines) {
-    const cls = /^✗|ERRO|Error/.test(line) ? "err" : /^✓/.test(line) ? "ok" : /^(»|\$)/.test(line) ? "info" : null;
+    const cls = /^✗|ERRO|Error/.test(line) ? "err" : /^[✓↺]/.test(line) ? "ok" : /^(»|\$)/.test(line) ? "info" : null;
     pre.append(cls ? h("span", { class: cls }, line + "\n") : line + "\n");
   }
   if (atBottom) pre.scrollTop = pre.scrollHeight;
@@ -953,6 +954,11 @@ function setup() {
     btn.addEventListener("click", () => runAction(btn.dataset.action));
   }
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
+  const rollback = $("#opt-rollback");
+  try { rollback.checked = localStorage.getItem("clab-rollback") === "1"; } catch { /* private mode */ }
+  rollback.addEventListener("change", () => {
+    try { localStorage.setItem("clab-rollback", rollback.checked ? "1" : "0"); } catch { /* private mode */ }
+  });
   setupDiagramInteraction();
   setupDock();
   window.addEventListener("resize", () => renderDiagram(false));

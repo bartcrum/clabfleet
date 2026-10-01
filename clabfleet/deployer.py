@@ -114,6 +114,7 @@ class LabDeployer:
         check_images: bool = True,
         pull_images: bool = False,
         check_connectivity: bool = True,
+        rollback: bool = False,
     ) -> dict:
         """Deploy a topology.
 
@@ -128,6 +129,13 @@ class LabDeployer:
             pull_images: ``docker pull`` missing images before checking.
             check_connectivity: Before deploying a lab with cross-host
                 links, check the hosts reach each other on the VXLAN port.
+            rollback: If any host fails, destroy the lab on every host it was
+                deployed to (including the failed one, which may hold
+                partly created nodes) instead of leaving it partly running.
+
+        The summary's ``status`` is ``deployed``, ``partial`` (some hosts
+        failed), ``failed`` (all failed), ``rolled-back`` or
+        ``rollback-failed``.
 
         Returns:
             Summary dict with placement, cross-host links and per-host results.
@@ -175,10 +183,12 @@ class LabDeployer:
             if path:
                 summary["placement_record"] = str(path)
 
+            attempted: list[HostInfo] = []
             for host in self.cluster.hosts:
                 data = host_topos.get(host.name)
                 if data is None:
                     continue
+                attempted.append(host)
                 try:
                     summary["hosts"][host.name] = self._deploy_on_host(
                         host, topo, data, reconfigure
@@ -186,6 +196,27 @@ class LabDeployer:
                 except Exception as exc:
                     logger.error("Deployment failed on %s: %s", host.name, exc)
                     summary["hosts"][host.name] = {"error": str(exc)}
+                    if rollback:
+                        break  # no point deploying the rest
+
+            failed = [h for h, r in summary["hosts"].items() if "error" in r]
+            if failed and rollback:
+                summary["rollback"] = self._rollback(topo, attempted)
+                ok = all(r == "ok" for r in summary["rollback"].values())
+                summary["status"] = "rolled-back" if ok else "rollback-failed"
+            elif not failed:
+                summary["status"] = "deployed"
+            elif len(failed) < len(summary["hosts"]):
+                summary["status"] = "partial"
+                logger.warning(
+                    "'%s' is only partly deployed: running on %s, failed on %s. "
+                    "Destroy it to clean up, or deploy with --rollback next time.",
+                    topo.name,
+                    ", ".join(h for h in summary["hosts"] if h not in failed),
+                    ", ".join(failed),
+                )
+            else:
+                summary["status"] = "failed"
         finally:
             self._close_runners()
 
@@ -292,6 +323,27 @@ class LabDeployer:
             )
         except PlacementError as exc:
             raise DeploymentError(f"Placement failed: {exc}") from exc
+
+    def _rollback(self, topo: Topology, hosts: list[HostInfo]) -> dict[str, str]:
+        """Destroy the lab on hosts after a failed deploy. Returns host → outcome."""
+        logger.warning("Rolling back '%s' on %s", topo.name, ", ".join(h.name for h in hosts))
+        outcome: dict[str, str] = {}
+        for host in hosts:
+            try:
+                result = self._on_host(host, topo, "destroy", ["--cleanup"])
+                if result.get("status") == "ok" and not self._in_place(host, topo):
+                    self._runner(host).remove_tree(host.lab_dir(topo.name))
+            except Exception as exc:  # noqa: BLE001 - keep rolling back the others
+                result = {"status": "error", "error": str(exc)}
+            status = result.get("status")
+            if status in ("ok", "not-deployed"):
+                outcome[host.name] = "ok"
+            else:
+                outcome[host.name] = f"error: {result.get('error', status)}"
+                logger.error("Rollback failed on %s: %s", host.name, outcome[host.name])
+        if all(v == "ok" for v in outcome.values()):
+            remove_placement_record(topo)
+        return outcome
 
     def _reserve_running_labs(self, host: HostInfo, lab: str, reserve_ram: bool) -> None:
         """Reserve the estimated CPU (and RAM) of other labs running on a host."""

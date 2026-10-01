@@ -256,6 +256,14 @@ clabfleet destroy topologies/large_campus.clab.yml \
     --cluster topologies/cluster.yaml
 ```
 
+If a host fails during deploy, the others are left running so you can
+look at what went wrong, and the output's `status` is `partial`. With
+`--rollback`, clabfleet stops at the first failing host and destroys the
+lab on every host it reached, including the failed one, which may hold
+partly created nodes. The status is then `rolled-back`, or
+`rollback-failed` if a host could not be cleaned up. The GUI has the same
+option as a "Roll back on failure" checkbox next to Deploy.
+
 Each deploy writes `<lab>.placement.json` next to the topology file. It
 records the host of every node, the VNI range, the cross-host links and
 the cluster file used. `destroy`, `save`, `inspect` and `exec` then only

@@ -2,7 +2,7 @@
 
 Usage:
     clabfleet deploy <topology.clab.yml> [--reconfigure] [--dry-run] [--output-dir DIR]
-                     [--pull] [--skip-image-check]
+                     [--pull] [--skip-image-check] [--skip-link-check] [--rollback]
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
@@ -87,6 +87,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           help="docker pull node images that are missing on their host")
     p_deploy.add_argument("--skip-image-check", action="store_true",
                           help="Deploy without first checking that node images exist")
+    p_deploy.add_argument("--rollback", action="store_true",
+                          help="If any host fails, destroy the lab everywhere it was "
+                               "deployed instead of leaving it partly running")
     p_deploy.add_argument("--skip-link-check", action="store_true",
                           help="Deploy across hosts without first checking that they "
                                "reach each other on the VXLAN port")
@@ -258,6 +261,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             check_images=not args.skip_image_check,
             pull_images=args.pull,
             check_connectivity=not args.skip_link_check,
+            rollback=args.rollback,
         )
     elif cmd in ("destroy", "teardown"):
         summary = deployer.destroy(args.topology, cleanup=not args.keep_lab_dir)

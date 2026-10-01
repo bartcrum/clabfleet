@@ -43,6 +43,9 @@
             <div id="lab-path" class="muted mono small"></div>
           </div>
           <div id="lab-actions" class="actions">
+            <label class="opt" title="If a host fails during Deploy or Redeploy, destroy the lab on every host instead of leaving it partly running">
+              <input type="checkbox" id="opt-rollback"> Roll back on failure
+            </label>
             <button class="btn primary" data-action="deploy">Deploy</button>
             <button class="btn" data-action="redeploy" title="Destroy and recreate all nodes (discards node state)">Redeploy</button>
             <button class="btn" data-action="save" title="Save running configs into the lab directory">Save configs</button>
