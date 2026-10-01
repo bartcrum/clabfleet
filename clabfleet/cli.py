@@ -7,6 +7,7 @@ Usage:
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
     clabfleet inspect [<topology.clab.yml>] [--cluster <cluster.yaml>]
     clabfleet status [--cluster <cluster.yaml>]
+    clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
     clabfleet export-live <devices.yaml> [-o output.clab.yml]
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
 
@@ -34,6 +35,7 @@ from .cluster import (
 from .deployer import LabDeployer
 from .exporter import export_from_live_network
 from .topology import dump_yaml
+from .validate import validate_topology
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -98,6 +100,15 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- status ---
     p_status = sub.add_parser("status", help="Show containerlab version and resources per host")
     add_cluster_arg(p_status)
+
+    # --- validate ---
+    p_validate = sub.add_parser(
+        "validate", help="Check topology files without touching any host")
+    p_validate.add_argument("topologies", nargs="+", metavar="topology",
+                            help="Topology file(s) to check")
+    add_cluster_arg(p_validate)
+    p_validate.add_argument("--strict", action="store_true",
+                            help="Fail on warnings as well as errors")
 
     # --- export-live ---
     p_live = sub.add_parser("export-live",
@@ -179,6 +190,9 @@ def _dispatch(args: argparse.Namespace) -> int:
             print(dump_yaml(topo))
         return 0
 
+    if cmd == "validate":
+        return _validate(args)
+
     cluster = _cluster_from_args(args)
 
     if cmd == "gui":
@@ -229,6 +243,22 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
     run(Workspace(cluster, roots), host=args.bind, port=args.port,
         open_browser=not args.no_browser)
     return 0
+
+
+def _validate(args: argparse.Namespace) -> int:
+    # Only an explicit --cluster is checked: never probe or contact hosts here
+    cluster = load_cluster_config(args.cluster) if args.cluster else None
+    failed = 0
+    for path in args.topologies:
+        report = validate_topology(path, cluster)
+        print(f"{path}: {report.summary()}")
+        for msg in report.errors:
+            print(f"  error: {msg}")
+        for msg in report.warnings:
+            print(f"  warning: {msg}")
+        if report.errors or (args.strict and report.warnings):
+            failed += 1
+    return 1 if failed else 0
 
 
 def _status(cluster: ClusterConfig) -> int:

@@ -21,6 +21,8 @@ deploys with plain `containerlab deploy`.
   running configs and LLDP neighbours, writes a matching containerlab topology
 - **Dry-run** — see the placement plan and the per-host topology files
   without deploying
+- **Validate** — check topology files (and placement labels against a
+  cluster) without touching any host, e.g. in CI
 - **Web GUI** — browse topologies, see live node state on a diagram,
   deploy/destroy with live output, and open CLI/shell/SSH terminals to nodes
   in the browser
@@ -54,6 +56,26 @@ clabfleet --sudo save topologies/three_router_triangle.clab.yml
 # Tear it down (add --keep-lab-dir to keep saved configs)
 clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 ```
+
+### Check a topology before deploying
+
+```bash
+clabfleet validate topologies/*.clab.yml
+clabfleet validate topologies/large_campus.clab.yml --cluster topologies/cluster.yaml
+```
+
+`validate` never contacts a host. It reports:
+
+- **Errors** (exit code 1): files that do not load, links to unknown
+  nodes, an interface used by two links, a missing `startup-config`,
+  `license` or `env-files` file, and with `--cluster`, nodes pinned with
+  `lab.host` to a host the cluster does not have.
+- **Warnings**: a missing bind-mount source, files outside the topology
+  directory (not copied to remote hosts), kinds clabfleet has no placement
+  estimate or CLI access for, and with `--cluster`, `lab.host-tags` no host
+  matches and cluster hosts without a VXLAN address.
+
+Add `--strict` to fail on warnings as well.
 
 ### Single remote host
 
