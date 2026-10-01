@@ -14,10 +14,14 @@ dependencies = [
 
 [project.optional-dependencies]
 napalm = ["napalm>=4.0"]
-dev = ["pytest>=7.0"]
+gui = ["aiohttp>=3.9"]
+dev = ["pytest>=7.0", "aiohttp>=3.9"]
 
 [project.scripts]
 clab-automator = "clab_automator.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["clab_automator*"]
+
+[tool.setuptools.package-data]
+"clab_automator.gui" = ["static/*", "static/vendor/*"]

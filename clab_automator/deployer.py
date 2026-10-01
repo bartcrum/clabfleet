@@ -35,7 +35,7 @@ from .cluster import (
     probe_host_resources,
 )
 from .placement import NodePlacement, PlacementError, PlacementPlan, compute_placement
-from .runner import CommandError, Runner
+from .runner import CommandError, OutputCallback, Runner
 from .topology import Topology, dump_yaml, load_topology, topology_from_dict
 
 logger = logging.getLogger(__name__)
@@ -51,10 +51,24 @@ class LabDeployer:
     A single-host setup is simply a cluster with one host.
     """
 
-    def __init__(self, cluster: ClusterConfig):
+    def __init__(
+        self,
+        cluster: ClusterConfig,
+        on_output: Optional[OutputCallback] = None,
+        interactive_sudo: bool = True,
+    ):
+        """
+        Args:
+            on_output: Receives containerlab's output line by line for
+                deploy/destroy/save (prefixed with the host name when
+                there are several hosts).
+            interactive_sudo: False to never wait on a sudo password prompt.
+        """
         if not cluster.hosts:
             raise DeploymentError("No hosts configured")
         self.cluster = cluster
+        self.on_output = on_output
+        self.interactive_sudo = interactive_sudo
         self._runners: dict[str, Runner] = {}
 
     # ------------------------------------------------------------------
@@ -221,7 +235,7 @@ class LabDeployer:
             logger.info("Deploying '%s' locally from %s", topo.name, topo.path)
             self._run_clab(
                 host, ["deploy", "-t", topo.path.name, *extra],
-                cwd=str(topo.base_dir.resolve()), check=True,
+                cwd=str(topo.base_dir.resolve()), check=True, stream=True,
             )
             return {"status": "deployed", "nodes": nodes,
                     "lab_dir": str(topo.base_dir.resolve() / f"clab-{topo.name}")}
@@ -236,7 +250,8 @@ class LabDeployer:
         runner.write_text(f"{lab_dir}/{topo_file}", dump_yaml(data))
 
         logger.info("Running containerlab deploy on %s", host.name)
-        self._run_clab(host, ["deploy", "-t", topo_file, *extra], cwd=lab_dir, check=True)
+        self._run_clab(host, ["deploy", "-t", topo_file, *extra], cwd=lab_dir,
+                       check=True, stream=True)
         return {"status": "deployed", "nodes": nodes, "lab_dir": lab_dir}
 
     def _on_host(
@@ -252,6 +267,7 @@ class LabDeployer:
             return self._run_clab(
                 host, [command, "-t", topo.path.name, *extra],
                 cwd=str(topo.base_dir.resolve()), parse_json=parse_json,
+                stream=not parse_json,
             )
 
         lab_dir = host.lab_dir(topo.name)
@@ -263,7 +279,8 @@ class LabDeployer:
         if not deployed:
             return {"status": "not-deployed"}
         return self._run_clab(
-            host, [command, "-t", topo_file, *extra], cwd=lab_dir, parse_json=parse_json
+            host, [command, "-t", topo_file, *extra], cwd=lab_dir,
+            parse_json=parse_json, stream=not parse_json,
         )
 
     def _run_clab(
@@ -273,9 +290,16 @@ class LabDeployer:
         cwd: Optional[str],
         check: bool = False,
         parse_json: bool = False,
+        stream: bool = False,
     ) -> dict:
+        on_output = None
+        if stream and self.on_output:
+            prefix = f"[{host.name}] " if self._multi_host else ""
+            on_output = lambda line: self.on_output(prefix + line)  # noqa: E731
         try:
-            result = self._runner(host).containerlab(args, cwd=cwd, check=check)
+            result = self._runner(host).containerlab(
+                args, cwd=cwd, check=check, on_output=on_output
+            )
         except CommandError:
             raise
         except Exception as exc:
@@ -295,7 +319,9 @@ class LabDeployer:
 
     def _runner(self, host: HostInfo) -> Runner:
         if host.name not in self._runners:
-            self._runners[host.name] = create_runner(host)
+            runner = create_runner(host)
+            runner.interactive_sudo = self.interactive_sudo
+            self._runners[host.name] = runner
         return self._runners[host.name]
 
     def _close_runners(self) -> None:

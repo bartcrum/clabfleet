@@ -8,6 +8,7 @@ Usage:
     clab-automator inspect [<topology.clab.yml>] [--cluster <cluster.yaml>]
     clab-automator status [--cluster <cluster.yaml>]
     clab-automator export-live <devices.yaml> [-o output.clab.yml]
+    clab-automator gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
 
 Without --cluster, commands target a single host: this machine by default,
 or a remote server over SSH with --host.
@@ -107,6 +108,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--lab-name", default="imported-topology",
                         help="Name for the generated lab")
 
+    # --- gui ---
+    p_gui = sub.add_parser("gui", help="Open the web GUI")
+    add_cluster_arg(p_gui)
+    p_gui.add_argument("--dir", action="append", metavar="DIR",
+                       help="Directory to search for *.clab.yml topologies "
+                            "(repeatable; default: current directory)")
+    p_gui.add_argument("--port", type=int, default=8650, help="Port (default: 8650)")
+    p_gui.add_argument("--bind", default="127.0.0.1",
+                       help="Address to listen on (default: 127.0.0.1 — the GUI "
+                            "opens shells on lab nodes, so keep it local)")
+    p_gui.add_argument("--no-browser", action="store_true",
+                       help="Don't open a browser window")
+
     return parser
 
 
@@ -167,6 +181,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     cluster = _cluster_from_args(args)
 
+    if cmd == "gui":
+        return _gui(args, cluster)
+
     if cmd == "status":
         return _status(cluster)
 
@@ -194,6 +211,24 @@ def _dispatch(args: argparse.Namespace) -> int:
         if "error" in result
     ]
     return 1 if failed else 0
+
+
+def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
+    try:
+        from .gui.server import run
+        from .gui.state import Workspace
+    except ImportError as exc:
+        raise RuntimeError(
+            f"The GUI needs extra packages ({exc.name}). "
+            "Install them with: pip install 'clab-automator[gui]'"
+        ) from exc
+    roots = [Path(d).expanduser() for d in (args.dir or ["."])]
+    for root in roots:
+        if not root.is_dir():
+            raise FileNotFoundError(f"Not a directory: {root}")
+    run(Workspace(cluster, roots), host=args.bind, port=args.port,
+        open_browser=not args.no_browser)
+    return 0
 
 
 def _status(cluster: ClusterConfig) -> int:

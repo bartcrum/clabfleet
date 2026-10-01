@@ -13,7 +13,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
+
+# Called with each line of output as a command runs (for live job logs)
+OutputCallback = Callable[[str], None]
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,9 @@ class Runner:
 
     def __init__(self, sudo: bool = False):
         self.sudo = sudo
+        # False: use `sudo -n` so a missing NOPASSWD rule fails fast instead
+        # of waiting on a password prompt nobody can see (e.g. the GUI)
+        self.interactive_sudo = True
 
     def __enter__(self):
         return self
@@ -58,14 +64,26 @@ class Runner:
         cwd: Optional[str] = None,
         check: bool = True,
         sudo: Optional[bool] = None,
+        on_output: Optional[OutputCallback] = None,
     ) -> CommandResult:
+        """Run a command.
+
+        With ``on_output``, stdout and stderr are merged and passed to the
+        callback line by line as they arrive; the result then carries the
+        combined output in both ``stdout`` and ``stderr``.
+        """
         raise NotImplementedError
 
     def containerlab(
-        self, args: list[str], cwd: Optional[str] = None, check: bool = True
+        self,
+        args: list[str],
+        cwd: Optional[str] = None,
+        check: bool = True,
+        on_output: Optional[OutputCallback] = None,
     ) -> CommandResult:
         """Run a containerlab subcommand (with sudo if the host needs it)."""
-        return self.run(["containerlab", *args], cwd=cwd, check=check, sudo=self.sudo)
+        return self.run(["containerlab", *args], cwd=cwd, check=check,
+                        sudo=self.sudo, on_output=on_output)
 
     def makedirs(self, path: str) -> None:
         raise NotImplementedError
@@ -96,19 +114,34 @@ class LocalRunner(Runner):
 
     name = "localhost"
 
-    def run(self, args, cwd=None, check=True, sudo=None):
+    def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
         use_sudo = self.sudo if sudo is None else sudo
-        cmd = (["sudo"] if use_sudo else []) + list(args)
+        sudo_cmd = ["sudo"] if self.interactive_sudo else ["sudo", "-n"]
+        cmd = (sudo_cmd if use_sudo else []) + list(args)
         logger.debug("local$ %s (cwd=%s)", shlex.join(cmd), cwd or ".")
         try:
-            proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-            result = CommandResult(proc.returncode, proc.stdout, proc.stderr)
+            if on_output:
+                result = self._run_streaming(cmd, cwd, on_output)
+            else:
+                proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+                result = CommandResult(proc.returncode, proc.stdout, proc.stderr)
         except FileNotFoundError:
             # Same as a shell's "command not found"
             result = CommandResult(127, "", f"{cmd[0]}: command not found")
         if check and result.exit_code != 0:
             raise CommandError(shlex.join(cmd), result.exit_code, result.stderr)
         return result
+
+    @staticmethod
+    def _run_streaming(cmd, cwd, on_output) -> CommandResult:
+        lines = []
+        with subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True) as proc:
+            for line in proc.stdout:
+                lines.append(line)
+                on_output(line.rstrip("\n"))
+        output = "".join(lines)
+        return CommandResult(proc.returncode, output, output)
 
     def makedirs(self, path):
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -152,6 +185,10 @@ class SSHRunner(Runner):
         self._ssh = None
         self._sftp = None
 
+    def client(self):
+        """The underlying paramiko SSHClient (connects on first use)."""
+        return self._client()
+
     def _client(self):
         if self._ssh is None:
             import paramiko
@@ -176,7 +213,7 @@ class SSHRunner(Runner):
             self._sftp = self._client().open_sftp()
         return self._sftp
 
-    def run(self, args, cwd=None, check=True, sudo=None):
+    def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
         use_sudo = self.sudo if sudo is None else sudo
         # -n: never prompt for a password; remote sudo must be NOPASSWD
         cmd = shlex.join((["sudo", "-n"] if use_sudo else []) + list(args))
@@ -184,10 +221,19 @@ class SSHRunner(Runner):
             cmd = f"cd {shlex.quote(cwd)} && {cmd}"
         logger.debug("%s$ %s", self.name, cmd)
         _, stdout, stderr = self._client().exec_command(cmd)
-        exit_code = stdout.channel.recv_exit_status()
-        result = CommandResult(
-            exit_code, stdout.read().decode(), stderr.read().decode()
-        )
+        if on_output:
+            stdout.channel.set_combine_stderr(True)
+            lines = []
+            for line in stdout:
+                lines.append(line)
+                on_output(line.rstrip("\n"))
+            output = "".join(lines)
+            result = CommandResult(stdout.channel.recv_exit_status(), output, output)
+        else:
+            exit_code = stdout.channel.recv_exit_status()
+            result = CommandResult(
+                exit_code, stdout.read().decode(), stderr.read().decode()
+            )
         if check and exit_code != 0:
             raise CommandError(f"[{self.name}] {cmd}", exit_code, result.stderr)
         return result

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>clab-automator</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2316a34a'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h14' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/vendor/xterm.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>clab-automator</span>
+    </div>
+    <div id="hosts" class="hosts" aria-label="Lab hosts"></div>
+    <button id="refresh" class="btn ghost small" title="Refresh now">Refresh</button>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <section>
+        <h2>Topologies</h2>
+        <ul id="topo-list" class="lab-list"></ul>
+      </section>
+      <section id="others-section" hidden>
+        <h2>Other running labs</h2>
+        <ul id="other-list" class="lab-list"></ul>
+      </section>
+    </aside>
+
+    <main class="main">
+      <div id="empty" class="empty">
+        <p>Select a topology on the left.</p>
+      </div>
+
+      <div id="lab" class="lab" hidden>
+        <div class="lab-head">
+          <div class="lab-title">
+            <h1 id="lab-name"></h1>
+            <span id="lab-state" class="badge"></span>
+            <div id="lab-path" class="muted mono small"></div>
+          </div>
+          <div id="lab-actions" class="actions">
+            <button class="btn primary" data-action="deploy">Deploy</button>
+            <button class="btn" data-action="redeploy" title="Destroy and recreate all nodes (discards node state)">Redeploy</button>
+            <button class="btn" data-action="save" title="Save running configs into the lab directory">Save configs</button>
+            <button class="btn danger" data-action="destroy">Destroy</button>
+          </div>
+        </div>
+
+        <nav class="tabs" role="tablist">
+          <button class="tab active" data-view="diagram" role="tab">Diagram</button>
+          <button class="tab" data-view="nodes" role="tab">Nodes</button>
+          <button class="tab" data-view="yaml" role="tab">YAML</button>
+        </nav>
+
+        <div class="views">
+          <section id="view-diagram" class="view">
+            <svg id="diagram" class="diagram" aria-label="Topology diagram"></svg>
+            <div class="diagram-tools">
+              <button id="relayout" class="btn ghost small" title="Discard manual positions">Auto layout</button>
+              <button id="fit" class="btn ghost small">Fit</button>
+            </div>
+            <div id="node-card" class="node-card" hidden></div>
+            <div id="diagram-error" class="diagram-error" hidden></div>
+          </section>
+          <section id="view-nodes" class="view" hidden>
+            <table class="nodes">
+              <thead><tr><th>Node</th><th>Kind</th><th>Image</th><th id="host-col">Host</th><th>State</th><th>Mgmt IPv4</th><th>Open</th></tr></thead>
+              <tbody id="node-rows"></tbody>
+            </table>
+          </section>
+          <section id="view-yaml" class="view" hidden>
+            <pre id="yaml" class="yaml mono"></pre>
+          </section>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <section id="dock" class="dock collapsed">
+    <div id="dock-resize" class="dock-resize" title="Drag to resize"></div>
+    <div class="dock-bar">
+      <div id="dock-tabs" class="dock-tabs">
+        <button class="dock-tab active" data-pane="activity"><span id="activity-dot" class="dot"></span>Activity</button>
+      </div>
+      <button id="dock-toggle" class="btn ghost small" title="Show/hide panel">▴</button>
+    </div>
+    <div id="dock-panes" class="dock-panes">
+      <div class="pane active" data-pane="activity"><pre id="activity" class="activity mono">No jobs yet.</pre></div>
+    </div>
+  </section>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="/static/vendor/xterm.js"></script>
+  <script src="/static/vendor/addon-fit.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
