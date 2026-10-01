@@ -80,8 +80,12 @@ class Runner:
         return self.run(["test", "-e", path], check=False, sudo=False).exit_code == 0
 
     def remove_tree(self, path: str) -> None:
-        # Lab directories created by containerlab are root-owned
-        self.run(["rm", "-rf", "--", path], check=False, sudo=self.sudo)
+        # No sudo: `containerlab destroy --cleanup` has already removed the
+        # root-owned clab-<lab>/ directory; what's left was written by us.
+        result = self.run(["rm", "-rf", "--", path], check=False, sudo=False)
+        if result.exit_code != 0:
+            logger.warning("Could not remove %s on %s: %s",
+                           path, self.name, result.stderr.strip())
 
     def close(self) -> None:
         pass
