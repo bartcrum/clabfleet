@@ -72,6 +72,11 @@ button { font: inherit; color: inherit; }
   background: var(--panel-2); font-size: 12px;
 }
 .host-chip .meta { color: var(--muted); }
+.whoami { color: var(--muted); white-space: nowrap; }
+.whoami b { color: var(--text); font-weight: 600; }
+
+/* Viewers: hide what the server would refuse anyway */
+body.viewer .operator-only { display: none !important; }
 
 /* ---------- buttons ---------- */
 .btn {

@@ -13,15 +13,19 @@ Usage:
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
     clabfleet export-live <devices.yaml> [-o output.clab.yml]
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
+                  [--bind ADDR] [--tls-cert CERT --tls-key KEY] [--users FILE]
+    clabfleet user add|list|remove|rotate [NAME] [--role operator|viewer] [--users FILE]
 
 Without --cluster, commands target a single host: this machine by default,
 or a remote server over SSH with --host.
 """
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
+import socket
 import sys
 from pathlib import Path
 
@@ -179,6 +183,52 @@ def _build_parser() -> argparse.ArgumentParser:
                             "opens shells on lab nodes, so keep it local)")
     p_gui.add_argument("--no-browser", action="store_true",
                        help="Don't open a browser window")
+    p_gui.add_argument("--users", metavar="FILE",
+                       help="Users file for named logins with roles (default: "
+                            "~/.clabfleet/users.yaml if it exists; without one, a "
+                            "single random token is printed at start-up)")
+    p_gui.add_argument("--audit-log", metavar="FILE",
+                       help="JSON Lines log of logins, jobs, edits and terminal "
+                            "sessions (default with users: audit.jsonl next to the "
+                            "users file)")
+    p_gui.add_argument("--tls-cert", metavar="CERT", help="Serve HTTPS with this certificate (PEM)")
+    p_gui.add_argument("--tls-key", metavar="KEY", help="Private key for --tls-cert (PEM)")
+    p_gui.add_argument("--insecure-http", action="store_true",
+                       help="Allow --bind to a non-loopback address without TLS "
+                            "(tokens and terminal traffic travel in clear text)")
+    p_gui.add_argument("--public-url", metavar="URL",
+                       help="Address browsers use to reach the GUI, if it is not the "
+                            "one it listens on (e.g. https://lab.example.com behind a "
+                            "TLS proxy)")
+
+    # --- user ---
+    p_user = sub.add_parser("user", help="Manage named GUI users and their tokens")
+    user_sub = p_user.add_subparsers(dest="user_command", required=True)
+
+    def add_users_arg(p):
+        p.add_argument("--users", metavar="FILE",
+                       help="Users file (default: ~/.clabfleet/users.yaml)")
+
+    def add_url_arg(p):
+        p.add_argument("--url", metavar="URL",
+                       help="GUI address for the printed login link "
+                            "(default: https://<this host's name>:8650)")
+
+    u_add = user_sub.add_parser("add", help="Add a user and print its login token")
+    u_add.add_argument("name")
+    u_add.add_argument("--role", default="operator", choices=["operator", "viewer"],
+                       help="operator: everything (default); viewer: read-only")
+    add_users_arg(u_add)
+    add_url_arg(u_add)
+    u_list = user_sub.add_parser("list", help="List users")
+    add_users_arg(u_list)
+    u_remove = user_sub.add_parser("remove", help="Remove a user (ends their sessions)")
+    u_remove.add_argument("name")
+    add_users_arg(u_remove)
+    u_rotate = user_sub.add_parser("rotate", help="Give a user a new token (ends their sessions)")
+    u_rotate.add_argument("name")
+    add_users_arg(u_rotate)
+    add_url_arg(u_rotate)
 
     return parser
 
@@ -241,6 +291,9 @@ def _dispatch(args: argparse.Namespace) -> int:
     if cmd == "validate":
         return _validate(args)
 
+    if cmd == "user":
+        return _user(args)
+
     cluster = _cluster_from_args(args)
 
     if cmd == "gui":
@@ -297,12 +350,87 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
             f"The GUI needs extra packages ({exc.name}). "
             "Install them with: pip install 'clabfleet[gui]'"
         ) from exc
+    from .gui.auth import AUDIT_FILE_NAME, AuditLog
+
     roots = [Path(d).expanduser() for d in (args.dir or ["."])]
     for root in roots:
         if not root.is_dir():
             raise FileNotFoundError(f"Not a directory: {root}")
+
+    ssl_context = None
+    if bool(args.tls_cert) != bool(args.tls_key):
+        raise ValueError("--tls-cert and --tls-key go together")
+    if args.tls_cert:
+        import ssl
+        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        ssl_context.load_cert_chain(args.tls_cert, args.tls_key)
+    if not _is_loopback(args.bind) and not ssl_context:
+        if not args.insecure_http:
+            raise ValueError(
+                f"Refusing to listen on {args.bind} without TLS: login tokens and terminal "
+                "sessions would cross the network in clear text. Use --tls-cert/--tls-key, "
+                "or --insecure-http if the network is trusted.")
+        print(f"WARNING: listening on {args.bind} over plain HTTP (--insecure-http): "
+              "tokens and terminal traffic are not encrypted.", file=sys.stderr)
+
+    users = _user_store(args, must_exist=bool(args.users))
+    if users:
+        users.validate()
+    audit_path = args.audit_log or (users.path.parent / AUDIT_FILE_NAME if users else None)
     run(Workspace(cluster, roots), host=args.bind, port=args.port,
-        open_browser=not args.no_browser)
+        open_browser=not args.no_browser, users=users, audit=AuditLog(audit_path),
+        ssl_context=ssl_context, public_url=args.public_url)
+    return 0
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # a host name: could resolve to anything
+
+
+def _user_store(args: argparse.Namespace, must_exist: bool = True):
+    """The users file from --users or the default; None if the default does
+    not exist and ``must_exist`` is false."""
+    from .gui.auth import DEFAULT_USERS_FILE, UserStore
+
+    path = Path(args.users or DEFAULT_USERS_FILE).expanduser()
+    if not must_exist and not path.exists():
+        return None
+    return UserStore(path)
+
+
+def _user(args: argparse.Namespace) -> int:
+    store = _user_store(args)
+    cmd = args.user_command
+    if cmd == "list":
+        users = store.validate() if store.path.exists() else {}
+        if not users:
+            print(f"No users in {store.path}")
+            return 0
+        width = max(len(n) for n in users)
+        for name, user in sorted(users.items()):
+            print(f"{name:<{width}}  {user.role:<8}  created {user.created}")
+        return 0
+    if cmd == "remove":
+        store.remove(args.name)
+        print(f"Removed user '{args.name}' from {store.path}")
+        return 0
+
+    if cmd == "add":
+        token = store.add(args.name, args.role)
+        print(f"Added {args.role} '{args.name}' to {store.path}")
+    else:  # rotate
+        token = store.rotate(args.name)
+        print(f"New token for '{args.name}'; the old one and its sessions no longer work")
+    base = (args.url or f"https://{socket.gethostname()}:8650").rstrip("/")
+    print(f"\nToken (shown only once, it is not stored):\n\n    {token}\n")
+    print(f"Login link (adjust the address to where the GUI runs):\n\n"
+          f"    {base}/?token={token}\n")
     return 0
 
 
