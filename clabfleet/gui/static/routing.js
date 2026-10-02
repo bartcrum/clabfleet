@@ -73,6 +73,7 @@ async function rtLoad() {
   }
   rtRender();
   renderLabHead();
+  renderNodeCard();  // its protocol summary
 }
 
 function rtDeployed() {
@@ -104,6 +105,7 @@ async function rtLoadLive(force = false) {
   }
   rtRender();
   renderLabHead();
+  renderNodeCard();  // its protocol summary
   clearTimeout(RT.liveRetry);
   if (!RT.live.updated || RT.live.refreshing) RT.liveRetry = setTimeout(() => rtLoadLive(force), 2000);
 }
@@ -391,6 +393,7 @@ function rtRender() {
     msg.hidden = false;
     msg.replaceChildren(...text);
     $("#routing-card").hidden = true;
+    syncInspector();
     $("#routing-legend").hidden = true;
   };
   if (!S.detail || S.detail.error) return fail([`This topology could not be loaded${S.detail?.error ? `: ${S.detail.error}` : ""}.`]);
@@ -678,12 +681,13 @@ function rtRenderCard() {
   const card = $("#routing-card");
   const sel = RT.sel;
   const body = sel && (sel.type === "node" ? rtNodeCard(sel.id) : rtEdgeCard(sel.id));
-  if (!body) { card.hidden = true; return; }
+  if (!body) { card.hidden = true; syncInspector(); return; }
   if (rtLiveData()) body.parts.push(...(sel.type === "node" ? rtLiveNodeParts(sel.id) : rtLiveEdgeParts(sel.id)));
   card.replaceChildren(
-    h("h3", {}, body.title, h("button", { class: "close", title: "Close", onclick: () => { RT.sel = null; rtRender(); } }, "×")),
+    h("h3", {}, body.title, h("button", { class: "close", title: "Close", "aria-label": "Close", onclick: () => { RT.sel = null; rtRender(); } }, "×")),
     ...body.parts.filter(Boolean));
   card.hidden = false;
+  syncInspector();
 }
 
 function rtNodeCard(id) {
@@ -746,6 +750,40 @@ function rtNodeCard(id) {
       rtCardProblems(nodeProblems),
     ],
   };
+}
+
+// One line per protocol a node runs, for the node inspector of the
+// Diagram and Nodes tabs: [{label, text, go}]
+function rtNodeSummary(name) {
+  const d = RT.data;
+  if (!d || d.error || RT.topo !== rtTopoId()) return [];
+  const L = rtFreshLive();
+  const upOf = (ids, kind) => {
+    if (!L) return "";
+    const up = ids.filter((id) => L[kind]?.[id]?.state === "up").length;
+    return `, ${up} up`;
+  };
+  const go = (proto) => () => rtFocus(proto, { type: "node", id: name }, false);
+  const out = [];
+  const o = d.ospf?.nodes?.[name];
+  if (o) {
+    const adj = d.ospf.adjacencies.filter((a) => a.a.node === name || a.b.node === name).map((a) => a.id);
+    out.push({ label: "OSPF", go: go("ospf"),
+               text: `area ${o.areas.join(", ")} · ${adj.length} adj${upOf(adj, "ospf")}${o.abr ? " · ABR" : ""}` });
+  }
+  const b = d.bgp?.nodes?.[name];
+  if (b) {
+    const ses = d.bgp.sessions.filter((x) => x.a.node === name || x.b.node === name).map((x) => x.id);
+    out.push({ label: "BGP", go: go("bgp"), text: `AS ${b.asn} · ${ses.length} session${ses.length === 1 ? "" : "s"}${upOf(ses, "bgp")}` });
+  }
+  const vt = d.evpn?.vteps?.[name];
+  if (vt) {
+    const n = vt.l2_vnis.length + vt.l3_vnis.length;
+    out.push({ label: "EVPN", go: go("evpn"), text: `VTEP ${vt.ip || "?"} · ${n} VNI${n === 1 ? "" : "s"}` });
+  } else if (d.evpn?.speakers?.includes(name)) {
+    out.push({ label: "EVPN", go: go("evpn"), text: "route server" });
+  }
+  return out;
 }
 
 function rtLiveEdgeParts(id) {
@@ -945,6 +983,7 @@ window.Routing = {
   prefetch() { if (RT.topo !== rtTopoId()) rtLoad(); },
   loaded() { return !!RT.data && RT.topo === rtTopoId() && !RT.data.error; },
   health: rtHealth,
+  nodeSummary: rtNodeSummary,
   // Keep the live state fresh while the Health panel is open (called on
   // every render, so at most one request per few seconds)
   pollLive() {

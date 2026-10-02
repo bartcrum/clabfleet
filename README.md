@@ -408,6 +408,14 @@ printed in the terminal). Stop it with Ctrl+C.
   writes them into the topology file as `graph-posX`/`graph-posY` node
   labels, so the layout travels with the file. Only those labels change:
   comments, ordering, quoting and indentation are kept.
+- **Inspector:** clicking a node (on the Diagram, the Nodes table or the
+  Routing tab) or a link opens its details in a panel on the right, which
+  narrows the canvas instead of covering it. Drag its left edge to resize
+  it; on narrow screens it opens from the bottom. A node shows its state,
+  CPU and memory, its interfaces with their peers and live state (click
+  one to select the link), the protocols it runs (click one to see it on
+  the Routing tab), and its terminal and Config diff buttons. A link
+  shows the state of each end and the packet capture form.
 - **Live link and node state:** while a deployed lab is open, links with
   an end down are drawn red and dashed. The link's tooltip says which
   end is down: **admin down** is the end that was shut, **no carrier** is
@@ -466,7 +474,7 @@ printed in the terminal). Stop it with Ctrl+C.
   took, and the time each host took. The last 50 jobs are kept in
   `.clabfleet/jobs/` under the first workspace directory, so they survive
   a restart of the GUI.
-- **Config diff:** the node card's button opens a tab with the node's
+- **Config diff:** the inspector's button opens a tab with the node's
   config in the latest snapshot against its `startup-config` or the
   previous snapshot
 - **Terminals** in tabs at the bottom:

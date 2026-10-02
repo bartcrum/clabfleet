@@ -288,18 +288,45 @@ body.viewer .operator-only { display: none !important; }
   color: var(--danger); background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 12px;
 }
-.node-card {
-  position: absolute; right: 12px; top: 46px; width: 280px; max-height: calc(100% - 58px); overflow: auto;
-  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 12px 14px; box-shadow: 0 8px 24px rgb(0 0 0 / .25);
+/* ---------- inspector (details of the selection) ---------- */
+.lab-body { flex: 1; min-height: 0; display: flex; position: relative; }
+.lab-body .views { flex: 1; min-width: 0; }
+.inspector {
+  flex: none; width: 320px; min-width: 260px; max-width: 60%; position: relative; overflow: auto;
+  background: var(--panel); border-left: 1px solid var(--line);
 }
-.node-card h3 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
-.node-card dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0 0 12px; font-size: 12px; }
-.node-card dt { color: var(--muted); }
-.node-card dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
-.node-card .open { display: flex; gap: 6px; }
-.node-card .diff-open { margin-top: 6px; }
-.node-card .close { margin-left: auto; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 16px; }
+.inspector[hidden] { display: none; }
+.inspector-resize { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 2; }
+.inspector-resize:hover, .inspector-resize.dragging { background: color-mix(in srgb, var(--select) 35%, transparent); }
+.insp-card { padding: 14px 16px 16px; }
+.insp-card[hidden], .insp-card.off-view { display: none; }
+.insp-card h3 { margin: 0 0 10px; font-size: 15px; display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+.insp-card h4 {
+  margin: 14px 0 6px; font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted);
+}
+.insp-card dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0 0 12px; font-size: 12px; }
+.insp-card dt { color: var(--muted); }
+.insp-card dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+.insp-card .open { display: flex; flex-wrap: wrap; gap: 6px; }
+.insp-card .diff-open { margin-top: 6px; }
+.insp-card .close { margin-left: auto; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 16px; }
+.insp-card .rt-table tr.go { cursor: pointer; }
+.insp-card .rt-table tr.go:hover td { background: var(--panel-2); }
+.insp-card .rt-table .down { color: var(--danger); }
+.insp-card .rt-table .up { color: var(--ok); }
+.insp-card .proto-list { display: grid; gap: 2px; margin: 0 0 4px; }
+.insp-card .proto-row {
+  display: grid; grid-template-columns: 44px 1fr auto; gap: 8px; align-items: baseline; width: 100%;
+  border: 0; background: none; padding: 4px 6px; margin: 0 -6px; border-radius: 5px; text-align: left;
+  cursor: pointer; font-size: 12px;
+}
+.insp-card .proto-row:hover { background: var(--panel-2); }
+.insp-card .proto-row b { font-size: var(--fs-xs); color: var(--muted); }
+.insp-card .proto-row .go-arrow { color: var(--muted); }
+table.nodes tbody tr.pick { cursor: pointer; }
+table.nodes tbody tr.pick:hover td { background: var(--panel); }
+table.nodes tbody tr.selected td { background: color-mix(in srgb, var(--select) 12%, transparent); }
 
 /* ---------- packet capture (link card) ---------- */
 .diagram .link.selected { stroke: var(--select); stroke-width: 3; }
@@ -429,7 +456,12 @@ table.nodes td .open { display: flex; gap: 6px; }
 
 @media (max-width: 760px) {
   .sidebar { width: 200px; }
-  .node-card { width: auto; right: 14px; }
+  /* The inspector becomes a bottom sheet over the canvas */
+  .inspector {
+    position: absolute; left: 0; right: 0; bottom: 0; width: auto !important; max-width: none; max-height: 55%;
+    border-left: 0; border-top: 1px solid var(--line); box-shadow: 0 -8px 24px rgb(0 0 0 / .25); z-index: 4;
+  }
+  .inspector-resize { display: none; }
 }
 
 /* ---------- routing view ---------- */
@@ -528,7 +560,6 @@ table.nodes td .open { display: flex; gap: 6px; }
 
 .routing-empty { color: var(--muted); top: 50px; }
 .routing-empty p { margin: 0 0 6px; }
-.routing-card { width: 320px; }
 .rt-table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin: 0 0 10px; }
 .rt-table th { text-align: left; font-weight: 600; color: var(--muted); padding: 2px 6px 3px 0; border-bottom: 1px solid var(--line); }
 .rt-table td { padding: 3px 6px 3px 0; font-family: var(--mono); border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); }

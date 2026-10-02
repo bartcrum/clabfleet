@@ -702,6 +702,49 @@ function showView(view) {
   for (const v of ["diagram", "nodes", "routing", "yaml"]) $(`#view-${v}`).hidden = v !== view;
   if (view === "diagram") renderDiagram(false);
   if (view === "routing") window.Routing?.show();
+  syncInspector();
+}
+
+function currentView() {
+  return document.querySelector(".tab.active")?.dataset.view;
+}
+
+// Show the inspector while the current tab has a selection to describe.
+// Each card says on which tabs it belongs (data-views).
+function syncInspector() {
+  const insp = $("#inspector");
+  const view = currentView();
+  let any = false;
+  for (const card of insp.querySelectorAll(".insp-card")) {
+    const here = card.dataset.views.split(" ").includes(view);
+    card.classList.toggle("off-view", !here);
+    if (here && !card.hidden && getComputedStyle(card).display !== "none") any = true;
+  }
+  insp.hidden = !any;
+}
+
+const INSPECTOR_MIN = 260;
+
+function setupInspector() {
+  const insp = $("#inspector"), handle = $("#inspector-resize");
+  try {
+    const w = Number(localStorage.getItem("clab-inspector-w"));
+    if (w >= INSPECTOR_MIN) insp.style.width = `${w}px`;
+  } catch { /* private mode */ }
+  handle.addEventListener("pointerdown", (ev) => {
+    handle.setPointerCapture(ev.pointerId);
+    handle.classList.add("dragging");
+    const startX = ev.clientX, startW = insp.offsetWidth;
+    const move = (e) => { insp.style.width = `${Math.max(INSPECTOR_MIN, startW + startX - e.clientX)}px`; };
+    const up = () => {
+      handle.classList.remove("dragging");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      try { localStorage.setItem("clab-inspector-w", String(insp.offsetWidth)); } catch { /* private mode */ }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  });
 }
 
 function renderRuntimeOverlays() {
@@ -900,9 +943,13 @@ function renderNodesTable() {
   } else {
     rows = labContainers(lab).map((c) => ({ name: c.node, kind: c.kind, image: c.image, modes: c.modes, rt: c }));
   }
+  const pick = S.selected.type === "topo";
   $("#node-rows").replaceChildren(...rows.map((n) => {
     const running = n.rt?.state === "running";
-    return h("tr", {},
+    return h("tr", {
+      class: pick ? `pick${S.selectedNode === n.name ? " selected" : ""}` : null,
+      onclick: pick ? (ev) => { if (!ev.target.closest("button")) selectNode(S.selectedNode === n.name ? null : n.name); } : null,
+    },
       h("td", {}, h("strong", {}, n.name)),
       h("td", { class: "mono small" }, n.kind + (n.type ? ` (${n.type})` : "")),
       h("td", { class: "img" }, n.rt?.image || n.image || ""),
@@ -1356,22 +1403,19 @@ function selectNode(id) {
   S.selectedLink = null;
   renderDiagram(false);
   renderNodeCard();
+  if (currentView() === "nodes") renderNodesTable();
 }
 
 function renderNodeCard() {
   renderLinkCard();  // the link card refreshes at the same points
   const card = $("#node-card");
   const node = S.detail?.nodes?.find((n) => n.name === S.selectedNode);
-  if (!node) { card.hidden = true; return; }
+  if (!node) { card.hidden = true; syncInspector(); return; }
   const lab = S.detail.name;
   const rt = nodeRuntime(lab, node.name);
   const running = rt?.state === "running";
   const live = liveData();
   const res = running ? live?.nodes?.[node.name] : null;
-  const down = Object.values(live?.links || {})
-    .flatMap((ls) => [ls.a, ls.b])
-    .filter((e) => e?.node === node.name && e.state === "down")
-    .map((e) => `${e.iface} (${e.detail})`);
   const rows = [
     ["Kind", node.kind + (node.type ? ` (${node.type})` : "")],
     ["Image", rt?.image || node.image],
@@ -1382,15 +1426,22 @@ function renderNodeCard() {
     res?.mem != null ? ["Memory", `${fmtBytes(res.mem)}` +
       (res.mem_limit ? ` of ${fmtBytes(res.mem_limit)}` : "") +
       (res.mem_percent != null ? ` (${res.mem_percent}%)` : "")] : null,
-    down.length ? ["Links down", down.join(", ")] : null,
     S.state?.multi_host ? ["Host", rt?.host || placedHost(node.name) || (node.host_pin && `${node.host_pin} (pinned)`) || (node.host_tags && `tags: ${node.host_tags}`)] : null,
   ].filter((r) => r && r[1]);
+  const protos = window.Routing?.nodeSummary(node.name) || [];
   card.replaceChildren(
     h("h3", {},
       h("span", { class: `dot ${nodeState(rt)}` }),
       node.name,
-      h("button", { class: "close", title: "Close", onclick: () => selectNode(null) }, "×")),
+      h("button", { class: "close", title: "Close", "aria-label": "Close", onclick: () => selectNode(null) }, "×")),
+    h("h4", {}, "Overview"),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
+    ...(nodeInterfaces(node.name, live) || []),
+    protos.length ? h("h4", {}, "Protocols") : null,
+    protos.length ? h("div", { class: "proto-list" }, protos.map((p) => h("button", {
+      class: "proto-row", title: `Show ${node.name} in the Routing tab (${p.label})`, onclick: p.go,
+    }, h("b", {}, p.label), h("span", { class: "mono" }, p.text), h("span", { class: "go-arrow", "aria-hidden": "true" }, "→")))) : null,
+    h("h4", {}, "Actions"),
     openButtons(lab, node.name, node.modes, running, !!rt),
     S.selected?.type === "topo" && canOperate() && h("span", { class: "open diff-open" },
       h("button", {
@@ -1399,6 +1450,34 @@ function renderNodeCard() {
         onclick: () => openDiff(S.selected.id, node.name),
       }, "Config diff")));
   card.hidden = false;
+  syncInspector();
+}
+
+// The node's links: interface, far end and (live) state; a row selects the link
+function nodeInterfaces(name, live) {
+  const rows = [];
+  for (const l of S.detail.links) {
+    for (const [mine, other, side] of [[l.a, l.b, "a"], [l.b, l.a, "b"]]) {
+      if (mine.node !== name) continue;
+      const end = live?.links?.[l.id]?.[side];
+      rows.push({ l, iface: mine.iface, peer: endpointLabel(other), state: end?.state, detail: end?.detail });
+    }
+  }
+  if (!rows.length) return null;
+  rows.sort((x, y) => naturalCmp(x.iface || "", y.iface || ""));
+  const showState = rows.some((r) => r.state);
+  return [
+    h("h4", {}, "Interfaces"),
+    h("table", { class: "rt-table" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Interface"), h("th", {}, "Peer"), showState ? h("th", {}, "State") : null)),
+      h("tbody", {}, rows.map((r) => h("tr", {
+        class: "go", title: `Select the link ${name}:${r.iface} ↔ ${r.peer}`,
+        onclick: () => { showView("diagram"); selectLink(r.l.id); },
+      },
+        h("td", {}, r.iface),
+        h("td", {}, r.peer),
+        showState ? h("td", { class: r.state || "", title: r.detail || "" }, r.state === "down" ? `down · ${r.detail}` : r.state || "") : null)))),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,8 +1533,11 @@ function buildLinkCard(card, l) {
     onkeydown: (ev) => { if (ev.key === "Enter") startCapture("live"); },
   });
   card.replaceChildren(
-    h("h3", {}, "Capture packets",
-      h("button", { class: "close", title: "Close", onclick: () => selectLink(null) }, "×")),
+    h("h3", {}, h("span", { class: "mono" }, `${endpointLabel(l.a)} ↔ ${endpointLabel(l.b)}`),
+      h("button", { class: "close", title: "Close", "aria-label": "Close", onclick: () => selectLink(null) }, "×")),
+    h("h4", {}, "Overview"),
+    h("dl", { class: "link-overview" }),
+    h("h4", {}, "Capture packets"),
     h("div", { class: "sides" }, ["a", "b"].map((k) =>
       h("label", { class: "side", "data-side": k },
         h("input", { type: "radio", name: "cap-side", value: k, onchange: () => { f.side = k; syncLinkCard(card, l); } }),
@@ -1477,6 +1559,19 @@ function buildLinkCard(card, l) {
 }
 
 function syncLinkCard(card, l) {
+  const ls = liveData()?.links?.[l.id];
+  const lab = S.detail.name;
+  const ha = l.a.node && nodeHost(lab, l.a.node), hb = l.b.node && nodeHost(lab, l.b.node);
+  const vni = crossLinkVnis()[`${endpointLabel(l.a)}|${endpointLabel(l.b)}`];
+  const endState = (e) => (e ? (e.state === "down" ? `down · ${e.detail}` : e.state) : "");
+  const rows = [
+    ["State", ls ? (ls.state === "down" ? "down" : ls.state) : "not known"],
+    ls?.a ? [endpointLabel(l.a), endState(ls.a)] : null,
+    ls?.b ? [endpointLabel(l.b), endState(ls.b)] : null,
+    l.type ? ["Type", l.type] : null,
+    S.state?.multi_host && ha && hb && ha !== hb ? ["VXLAN", `${ha} ↔ ${hb}${vni !== undefined ? `, VNI ${vni}` : ""}`] : null,
+  ].filter(Boolean);
+  card.querySelector(".link-overview").replaceChildren(...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
   const sides = { a: captureSide(l.a), b: captureSide(l.b) };
   if (!sides[captureForm.side].ok) {
     const other = captureForm.side === "a" ? "b" : "a";
@@ -1562,14 +1657,15 @@ function renderDownloads() {
   if (!list) return;
   list.replaceChildren(...[...downloads].map(([id, dl]) => h("li", {},
     h("span", { class: "dot busy" }),
-    h("span", { class: "mono small" }, `${dl.label} · ${fmtBytes(dl.bytes)}`),
+    h("span", { class: "mono small" }, `${dl.label} · ${fmtSize(dl.bytes)}`),
     h("button", {
       class: "btn small ghost", disabled: dl.stopped, title: "Stop capturing and save the file",
       onclick: () => { dl.stopped = true; dl.ctrl.abort(); },
     }, "Stop & save"))));
 }
 
-function fmtBytes(n) {
+// Capture download sizes (fmtBytes is for memory, in MiB / GiB)
+function fmtSize(n) {
   return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(0)} KB` : `${n} B`;
 }
 
@@ -1965,6 +2061,7 @@ function setup() {
     try { localStorage.setItem("clab-rollback", rollback.checked ? "1" : "0"); } catch { /* private mode */ }
   });
   setupDiagramInteraction();
+  setupInspector();
   setupEditor();
   setupDock();
   window.addEventListener("resize", () => { renderDiagram(false); window.Routing?.resize(); });

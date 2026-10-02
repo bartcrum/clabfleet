@@ -86,6 +86,7 @@ level-of-detail rule (see C3) instead of shrinking.
 ### B. Layout and information architecture
 
 **B1. Lab header as a status strip — S**
+**Done** (branch `gui-structure`).
 Today: name, a state badge, the file path and five equal buttons.
 Proposal:
 - A row of compact stats under the name: *6/6 running · 2 hosts ·
@@ -98,6 +99,7 @@ Proposal:
 - The file path moves into a tooltip or a copy button.
 
 **B2. Docked inspector instead of floating cards — M**
+**Done** (branch `gui-structure`).
 Today: node, link and routing cards float at top-right over the canvas.
 Proposal: a resizable right-hand inspector panel, shared by Diagram and
 Routing, that pushes the canvas instead of covering it. The selection
@@ -110,6 +112,7 @@ Collapses to a thin rail when nothing is selected; becomes a bottom sheet
 on narrow screens.
 
 **B3. One Health panel — M**
+**Done** (branch `gui-structure`).
 Today: problems are spread across tabs and popovers.
 Proposal: a *Health* tab in the bottom dock (next to Activity) that lists
 everything wrong with the open lab, one row each, filterable by severity
