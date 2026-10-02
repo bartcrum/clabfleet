@@ -33,7 +33,7 @@ from typing import Optional
 
 import yaml
 
-from .runner import CommandError, LocalRunner, Runner, SSHRunner
+from .runner import HOST_KEY_POLICIES, CommandError, LocalRunner, Runner, SSHRunner
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ class HostInfo:
     ssh_key: Optional[str] = None
     ssh_password: Optional[str] = None
     sudo: bool = False
+    host_key_policy: str = "accept-new"  # see runner.HOST_KEY_POLICIES
     vtep_ip: Optional[str] = None
     workdir: str = DEFAULT_WORKDIR  # relative paths are under the user's home
     max_cpu: float = 0     # 0 = probe the host
@@ -134,6 +135,7 @@ def load_cluster_config(file_path: str | Path) -> ClusterConfig:
     if not hosts_section:
         raise ClusterConfigError("Cluster config must have at least one host")
 
+    default_policy = cluster_section.get("host_key_policy", "accept-new")
     hosts = []
     seen_names = set()
     for i, h in enumerate(hosts_section):
@@ -143,6 +145,11 @@ def load_cluster_config(file_path: str | Path) -> ClusterConfig:
         if name in seen_names:
             raise ClusterConfigError(f"Duplicate host name: {name}")
         seen_names.add(name)
+        policy = h.get("host_key_policy", default_policy)
+        if policy not in HOST_KEY_POLICIES:
+            raise ClusterConfigError(
+                f"Host {name}: host_key_policy must be one of {', '.join(HOST_KEY_POLICIES)}"
+            )
         hosts.append(HostInfo(
             name=name,
             host=h["host"],
@@ -151,6 +158,7 @@ def load_cluster_config(file_path: str | Path) -> ClusterConfig:
             ssh_key=h.get("ssh_key"),
             ssh_password=h.get("ssh_password"),
             sudo=h.get("sudo", False),
+            host_key_policy=policy,
             vtep_ip=h.get("vtep_ip"),
             workdir=h.get("workdir", DEFAULT_WORKDIR),
             max_cpu=h.get("max_cpu", 0),
@@ -188,6 +196,7 @@ def create_runner(host_info: HostInfo) -> Runner:
         password=host_info.ssh_password,
         sudo=host_info.sudo,
         name=host_info.name,
+        host_key_policy=host_info.host_key_policy,
     )
 
 

@@ -62,6 +62,7 @@ from .deployer import LabDeployer
 from .execute import LabExecutor
 from .linkcheck import all_pairs, check_links, describe, failures
 from .nodes import inspect_all, running_usage
+from .runner import HOST_KEY_POLICIES
 from .exporter import (
     ExportOptions,
     build_topology,
@@ -104,6 +105,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ssh-key", default=os.environ.get("CLAB_SSH_KEY"),
                         help="SSH private key for --host (or CLAB_SSH_KEY)")
     parser.add_argument("--ssh-port", type=int, default=22)
+    parser.add_argument("--host-key-policy", choices=HOST_KEY_POLICIES,
+                        default=os.environ.get("CLAB_HOST_KEY_POLICY", "accept-new"),
+                        help="SSH host keys of --host: accept-new remembers a new key in "
+                             "~/.clabfleet/known_hosts, strict only accepts known keys "
+                             "(default: accept-new, or CLAB_HOST_KEY_POLICY)")
     parser.add_argument("--sudo", action="store_true",
                         default=os.environ.get("CLAB_SUDO", "") not in ("", "0", "false"),
                         help="Run containerlab with sudo (or CLAB_SUDO=1)")
@@ -456,6 +462,7 @@ def _cluster_from_args(args: argparse.Namespace) -> ClusterConfig:
         ssh_key=args.ssh_key,
         ssh_password=os.environ.get("CLAB_SSH_PASS"),
         sudo=args.sudo,
+        host_key_policy=args.host_key_policy,
     )])
 
 
