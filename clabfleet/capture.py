@@ -142,14 +142,15 @@ def node_interfaces(topo: Topology, node: str) -> list[str]:
 def check_interface(topo: Topology, node: str, iface: str) -> str:
     """The name tcpdump needs inside the container for a node interface.
 
-    ``iface`` may be the topology's name (e.g. cEOS ``Ethernet1``) or the
-    Linux name (``eth1``).
+    ``iface`` may be the Linux name (``eth1``) or the kind's own name
+    (cEOS ``Ethernet1``), whichever of the two the topology uses.
     """
     known = node_interfaces(topo, node)
     kind = topo.effective_node(node)["kind"]
+    wanted = linux_iface_names(kind, iface)[0][0]
     for name in known:
         linux = linux_iface_names(kind, name)[0][0]
-        if iface in (name, linux):
+        if wanted == linux:
             return linux
     raise ValueError(f"Node '{node}' has no interface '{iface}' in the topology "
                      f"(known: {', '.join(known)})")

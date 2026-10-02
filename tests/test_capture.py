@@ -96,6 +96,8 @@ def test_interface_aliases_map_to_linux_names():
     assert check_interface(topo, "s1", "eth1_2") == "eth1_2"
     assert check_interface(topo, "r1", "Ethernet0/3") == "eth3"
     assert check_interface(topo, "r1", "eth0") == "eth0"
+    # The kind's own name also works when the topology uses Linux names
+    assert check_interface(topology_from_dict(TOPO), "r1", "Ethernet1") == "eth1"
     with pytest.raises(ValueError, match="no interface 'eth5'"):
         check_interface(topo, "r1", "eth5")
 
