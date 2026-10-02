@@ -13,6 +13,8 @@ Usage:
                    [--against previous|startup|latest|SNAPSHOT] [--json]
     clabfleet inspect [<topology.clab.yml>] [--cluster <cluster.yaml>]
     clabfleet exec <topology.clab.yml> <command> [--nodes GLOB] [--mode auto|cli|shell|ssh] [--json]
+    clabfleet capture <topology.clab.yml> <node>:<iface> [-w FILE.pcap|-] [-f FILTER]
+                      [-c COUNT] [--duration SECONDS] [--snaplen BYTES] [--via auto|node|helper]
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
     clabfleet export-live <devices.yaml> [-o output.clab.yml]
@@ -31,12 +33,21 @@ import ipaddress
 import json
 import logging
 import os
+import signal
 import socket
 import sys
 from pathlib import Path
 
 import yaml
 
+from .capture import (
+    DEFAULT_HELPER_IMAGE,
+    Capture,
+    CaptureSpec,
+    check_interface,
+    find_container,
+    parse_target,
+)
 from .cluster import (
     ClusterConfig,
     HostInfo,
@@ -206,6 +217,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p_exec.add_argument("--timeout", type=float, default=60,
                         help="SSH connect/command timeout in seconds (default: 60)")
     p_exec.add_argument("--json", action="store_true", help="Print results as JSON")
+
+    # --- capture ---
+    p_cap = sub.add_parser(
+        "capture", help="Capture packets on a lab node interface",
+        description="Run tcpdump on a node interface and print a live decode, or write a "
+                    "pcap with -w. Stream into Wireshark with: "
+                    "clabfleet capture lab.clab.yml r1:eth1 -w - | wireshark -k -i -")
+    p_cap.add_argument("topology", help="Topology file the lab was deployed from")
+    p_cap.add_argument("target", metavar="node:iface", help="Node and interface, e.g. spine1:eth1")
+    add_cluster_arg(p_cap)
+    p_cap.add_argument("-w", "--write", metavar="FILE",
+                       help="Write a pcap to FILE ('-' for stdout) instead of a text decode")
+    p_cap.add_argument("-f", "--filter", default="", metavar="FILTER",
+                       help="BPF capture filter, e.g. 'tcp port 179' (quote it)")
+    p_cap.add_argument("-c", "--count", type=int, help="Stop after this many packets")
+    p_cap.add_argument("--duration", type=float, metavar="SECONDS",
+                       help="Stop after this many seconds")
+    p_cap.add_argument("--snaplen", type=int, metavar="BYTES",
+                       help="Bytes to keep per packet (default: tcpdump's, 262144)")
+    p_cap.add_argument("--via", default="auto", choices=["auto", "node", "helper"],
+                       help="auto (default): the node's own tcpdump if it has one, else a "
+                            "helper container in the node's network namespace")
+    p_cap.add_argument("--helper-image", default=os.environ.get("CLAB_CAPTURE_IMAGE"),
+                       metavar="IMAGE",
+                       help=f"Image with tcpdump for --via helper (default: "
+                            f"{DEFAULT_HELPER_IMAGE}, or CLAB_CAPTURE_IMAGE)")
 
     # --- status ---
     p_status = sub.add_parser("status", help="Show containerlab version and resources per host")
@@ -408,6 +445,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "snapshot":
         return _snapshot(args, cluster)
+
+    if cmd == "capture":
+        return _capture(args, cluster)
 
     deployer = LabDeployer(cluster)
     if cmd == "deploy":
@@ -658,6 +698,55 @@ def _diff(args: argparse.Namespace) -> int:
     print(f"{out['from']} vs {out['against']}: {out['changed']} of {len(compared)} "
           "nodes differ", file=sys.stderr)
     return rc
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def _capture(args: argparse.Namespace, cluster: ClusterConfig) -> int:
+    node, iface = parse_target(args.target)
+    topo = load_topology(args.topology)
+    iface = check_interface(topo, node, iface)
+    spec = CaptureSpec(node, iface, format="pcap" if args.write else "text",
+                       bpf_filter=args.filter, count=args.count, duration=args.duration,
+                       snaplen=args.snaplen)
+    host, container = find_container(cluster, topo, node)
+
+    def message(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
+    to_file = args.write and args.write != "-"
+    out = open(args.write, "wb") if to_file else sys.stdout.buffer
+    # Stop tcpdump in the container on `kill` too, not only on Ctrl+C
+    signal.signal(signal.SIGTERM, _raise_interrupt)
+    runner = create_runner(host)
+    capture = Capture(runner, container["container"], spec, host_sudo=host.sudo,
+                      method=args.via, helper_image=args.helper_image, on_message=message)
+    try:
+        capture.start()
+        where = f" on {host.name}" if len(cluster.hosts) > 1 else ""
+        message(f"Capturing on {capture.describe()}{where}"
+                + (f", writing {args.write}" if to_file else "")
+                + ". Ctrl+C to stop.")
+        while True:
+            chunk = capture.read()
+            if not chunk:
+                break
+            out.write(chunk)
+            out.flush()
+    except KeyboardInterrupt:
+        capture.stop("interrupted")
+    except BrokenPipeError:  # e.g. Wireshark closed
+        capture.stop("output closed")
+        # Nothing reads stdout any more: don't fail flushing it at exit
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    finally:
+        capture.stop()
+        runner.close()
+        if to_file:
+            out.close()
+    if capture.stop_reason in ("interrupted", "output closed", "duration"):
+        return 0
+    return 0 if capture.exit_code in (0, None) else 1
 
 
 def _validate(args: argparse.Namespace) -> int:

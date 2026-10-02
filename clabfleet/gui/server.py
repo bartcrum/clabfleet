@@ -32,12 +32,16 @@ from typing import Optional
 from aiohttp import WSMsgType, web
 from yarl import URL
 
+from ..capture import GUI_MAX_BYTES, CaptureError
 from ..nodes import access_modes, terminal_command
 from ..snapshots import SnapshotError
-from .auth import ACCESS_ATTR, OPERATOR, VIEWER, AuditLog, User, UserStore, allow_viewer
+from .auth import (
+    ACCESS_ATTR, OPERATOR, VIEWER, AuditLog, User, UserStore, allow_viewer, operator_only,
+)
+from .captures import open_capture, pcap_filename, spec_from_query
 from .editing import EditConflict
 from .state import Job, JobManager, UnloadableTopology, Workspace
-from .terminals import LocalTerminal, SSHTerminal
+from .terminals import CaptureSession, LocalTerminal, SSHTerminal
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +122,7 @@ WORKSPACE = web.AppKey("workspace", Workspace)
 JOBS = web.AppKey("jobs", JobManager)
 AUTH = web.AppKey("auth", Auth)
 AUDIT = web.AppKey("audit", AuditLog)
+CAPTURES = web.AppKey("captures", set)
 
 
 def create_app(workspace: Workspace, token: Optional[str] = None, *,
@@ -134,6 +139,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app[AUDIT] = audit_log = audit or AuditLog(None)
     app[JOBS].on_finished = lambda job: _audit_job_finished(audit_log, job)
     app.on_response_prepare.append(_security_headers)
+    app[CAPTURES] = set()  # running packet captures, stopped on shutdown
     app.router.add_get("/", _index)
     app.router.add_post("/logout", _logout)
     app.router.add_get("/api/me", _me)
@@ -148,7 +154,9 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/api/jobs", _jobs)
     app.router.add_post("/api/jobs", _start_job)
     app.router.add_get("/api/jobs/{id}", _job)
+    app.router.add_get("/api/capture", _capture_download)
     app.router.add_get("/ws/terminal", _terminal)
+    app.router.add_get("/ws/capture", _capture_live)
     app.router.add_static("/static", STATIC_DIR)
     app.on_shutdown.append(_on_shutdown)
     return app
@@ -196,6 +204,10 @@ def _base_url(host: str, port: int, tls: bool) -> str:
 
 
 async def _on_shutdown(app):
+    # Kill tcpdump in the containers before the runners go away
+    captures = list(app[CAPTURES])
+    if captures:
+        await asyncio.gather(*(asyncio.to_thread(c.stop) for c in captures))
     app[WORKSPACE].close()
 
 
@@ -551,3 +563,166 @@ async def _terminal(request):
         audit(request, "terminal_closed", **where, seconds=round(time.monotonic() - opened, 1),
               exit_code=session.exit_code)
     return ws_resp
+
+
+# ----------------------------------------------------------------------
+# Packet capture
+# ----------------------------------------------------------------------
+
+def _capture_error(exc: Exception) -> web.HTTPException:
+    if isinstance(exc, KeyError):
+        return web.HTTPNotFound(text=exc.args[0])
+    if isinstance(exc, ValueError):
+        return web.HTTPBadRequest(text=str(exc))
+    return web.HTTPBadGateway(text=str(exc))
+
+
+async def _capture_live(request):
+    """Live decode of a node interface in a terminal tab.
+
+    /ws/capture?topo=<id>&node=&iface=&filter=&count=&duration=
+    """
+    ws_resp = web.WebSocketResponse(heartbeat=30)
+    await ws_resp.prepare(request)
+    q = request.query
+    loop = asyncio.get_running_loop()
+    session = CaptureSession(loop)
+
+    try:
+        spec = spec_from_query(q, "text")
+        capture, _ = await asyncio.to_thread(open_capture, request.app[WORKSPACE],
+                                             q.get("topo", ""), spec, session.message)
+    except Exception as exc:
+        known = isinstance(exc, (KeyError, ValueError, CaptureError))
+        text = _capture_error(exc).text if known else str(exc)
+        await ws_resp.send_bytes(f"\r\n\x1b[31m{text}\x1b[0m\r\n".encode())
+        await ws_resp.send_str(json.dumps({"t": "exit", "code": -1}))
+        await ws_resp.close()
+        return ws_resp
+
+    captures = request.app[CAPTURES]
+    captures.add(capture)
+    session.capture = capture
+    filt = f", filter '{spec.bpf_filter}'" if spec.bpf_filter else ""
+    session.message(f"Capturing on {capture.describe()}{filt} for up to "
+                    f"{spec.duration:g}s. Ctrl+C or close the tab to stop.")
+    where = _capture_where(q, spec, "live")
+    audit(request, "capture_started", **where)
+    started = time.monotonic()
+    try:
+        session.start(loop)
+        await _serve_session(ws_resp, session)
+    finally:
+        session.close()
+        try:
+            await session.wait_closed()
+        finally:
+            captures.discard(capture)
+            audit(request, "capture_finished", **where,
+                  seconds=round(time.monotonic() - started, 1))
+    return ws_resp
+
+
+async def _serve_session(ws_resp, session) -> None:
+    """Shuttle a started session's output and the browser's input until either ends."""
+    async def pump_output():
+        async for chunk in session.output():
+            if ws_resp.closed:
+                return
+            await ws_resp.send_bytes(chunk)
+        if not ws_resp.closed:
+            await ws_resp.send_str(json.dumps({"t": "exit", "code": session.exit_code}))
+            await ws_resp.close()
+
+    pump = asyncio.create_task(pump_output())
+    try:
+        async for msg in ws_resp:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            data = json.loads(msg.data)
+            if data.get("t") == "i":
+                session.write(data.get("d", "").encode())
+            elif data.get("t") == "r":
+                session.resize(int(data["c"]), int(data["r"]))
+    finally:
+        session.close()
+        pump.cancel()
+
+
+def _capture_where(q, spec, mode: str) -> dict:
+    return {"topology": q.get("topo", ""), "node": spec.node, "interface": spec.interface,
+            "filter": spec.bpf_filter, "mode": mode}
+
+
+def _client_gone(request) -> bool:
+    transport = request.transport
+    return transport is None or transport.is_closing()
+
+
+@operator_only
+async def _capture_download(request):
+    """Stream a pcap of a node interface as a download.
+
+    /api/capture?topo=<id>&node=&iface=&filter=&count=&duration=&snaplen=
+
+    Ends at the capture's count or duration, at GUI_MAX_BYTES, or as soon as
+    the browser cancels the download; tcpdump is stopped in every case.
+    """
+    q = request.query
+    messages: list[str] = []
+    try:
+        spec = spec_from_query(q, "pcap")
+        capture, lab = await asyncio.to_thread(open_capture, request.app[WORKSPACE],
+                                               q.get("topo", ""), spec, messages.append)
+    except (KeyError, ValueError, CaptureError) as exc:
+        raise _capture_error(exc)
+
+    captures = request.app[CAPTURES]
+    captures.add(capture)
+    where = _capture_where(q, spec, "pcap")
+    audit(request, "capture_started", **where)
+    started = time.monotonic()
+    sent = 0
+    try:
+        read = asyncio.ensure_future(asyncio.to_thread(capture.read))
+        # tcpdump fails fast on a bad filter: report that as an error
+        # rather than as an empty download
+        await asyncio.wait({read}, timeout=3)
+        if read.done() and not read.result():
+            detail = "; ".join(m for m in messages if "listening on" not in m)
+            raise web.HTTPBadGateway(text=f"tcpdump failed: {detail or 'no output'}")
+
+        resp = web.StreamResponse(headers={
+            "Content-Type": "application/vnd.tcpdump.pcap",
+            "Content-Disposition": f'attachment; filename="{pcap_filename(lab, spec)}"',
+            "Cache-Control": "no-store",
+        })
+        await resp.prepare(request)
+        while True:
+            done, _ = await asyncio.wait({read}, timeout=1)
+            if not done:
+                if _client_gone(request):
+                    break
+                continue
+            chunk = read.result()
+            if not chunk:
+                break
+            try:
+                await resp.write(chunk)
+            except ConnectionError:
+                break
+            sent += len(chunk)
+            if sent >= GUI_MAX_BYTES:
+                break
+            read = asyncio.ensure_future(asyncio.to_thread(capture.read))
+        if not _client_gone(request):
+            await resp.write_eof()
+        return resp
+    finally:
+        # Shielded: a cancelled handler must still kill tcpdump
+        try:
+            await asyncio.shield(asyncio.to_thread(capture.stop))
+        finally:
+            captures.discard(capture)
+            audit(request, "capture_finished", **where,
+                  seconds=round(time.monotonic() - started, 1), bytes=sent)

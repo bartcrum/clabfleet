@@ -212,6 +212,10 @@ node.
 
 ### 3.4 Packet capture from the diagram — L
 
+**Done.** Also `clabfleet capture` on the CLI. Nodes without `tcpdump` get
+a helper container in their network namespace. GUI captures always have a
+time limit, and tcpdump is killed inside the container when they end.
+
 Click a link, pick a side, and stream `tcpdump` from the container's
 network namespace to a download or a live decode. Fits the terminal
 websocket plumbing in `clabfleet/gui/terminals.py`.

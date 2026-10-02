@@ -29,6 +29,8 @@ deploys with plain `containerlab deploy`.
   addressing and routing configs for cEOS, IOL or plain Linux nodes
 - **Config snapshots** — copy saved node configs into dated local folders
   and diff them against each other or the topology's `startup-config`
+- **Capture** — `tcpdump` on any node interface as a live decode or a pcap
+  you can pipe into Wireshark, from the CLI or by clicking a link in the GUI
 - **Validate** — check topology files (and placement labels against a
   cluster) without touching any host, e.g. in CI
 - **Web GUI** — browse topologies, see live node state on a diagram,
@@ -159,6 +161,41 @@ a diff against `startup` even without changes: the saved config is the
 whole running config, including defaults and the management interface
 containerlab sets up. The exit code is 0 with no differences, 1 with
 differences and 2 on errors. Add `--json` for machine-readable output.
+
+### Capture packets
+
+```bash
+# Live decode, BGP only, 5 packets
+clabfleet capture topologies/spine_leaf.clab.yml Spine-1:eth1 -f 'tcp port 179' -c 5
+
+# pcap file, stopped after 60 seconds
+clabfleet capture topologies/spine_leaf.clab.yml Leaf-1:eth1 -w leaf1.pcap --duration 60
+
+# Straight into Wireshark
+clabfleet capture topologies/spine_leaf.clab.yml Spine-1:eth1 -w - | wireshark -k -i -
+```
+
+`capture` runs `tcpdump` in the node's network namespace on whichever host
+the node runs on. Without `-w` it prints a live text decode; with `-w FILE`
+(or `-w -` for stdout) it writes a pcap. `-f` takes a BPF filter, `-c` a
+packet count, `--duration` a time limit in seconds and `--snaplen` the bytes
+kept per packet. Without a limit it runs until Ctrl+C.
+
+The interface must be one the node uses in the topology's links, or `eth0`
+(management). Nodes with their own `tcpdump`, such as cEOS, use it through
+`docker exec`. For nodes without one, such as `alpine`, clabfleet starts a
+throwaway helper container that shares the node's network namespace
+(`docker run --net container:<node>`). The helper image is
+`nicolaka/netshoot` by default, pulled on first use; set `--helper-image`
+or `CLAB_CAPTURE_IMAGE` to use another image with `tcpdump`, and `--via
+node|helper` to force either way.
+
+Stopping the local `docker` client does not stop a process inside a
+container, so clabfleet always stops captures explicitly: it kills the
+node's `tcpdump` by PID, or removes the helper container. With
+`--duration`, the node's `tcpdump` also runs under `timeout` (when the node
+has it), so it ends even if clabfleet is killed outright. Like `exec`,
+captures need Docker access on the host, with the same `sudo` retry.
 
 ### Check a topology before deploying
 
@@ -316,6 +353,16 @@ printed in the terminal). Stop it with Ctrl+C.
     kinds such as Cisco IOL. It needs a login on the node: containerlab's
     default configs create `admin`/`admin`, but your own `startup-config`
     must include a user
+- **Packet capture:** click a link in the diagram, pick which end to
+  capture on, and optionally set a BPF filter, a packet count and a time
+  limit (60 seconds by default). **Live** decodes packets in a tab at the
+  bottom; press Ctrl+C there or close the tab to stop. **Download .pcap**
+  captures to a file for Wireshark; **Stop & save** ends it early and keeps
+  what was captured. Every GUI capture has a time limit: up to 10 minutes
+  for a download, which also stops at 200 MB, and 30 minutes for a live
+  tab. tcpdump is stopped inside the container when the tab closes, the
+  download is cancelled or the GUI stops. See
+  [Capture packets](#capture-packets) for how it reaches the node.
 - Nodes on remote hosts are reached over the host's SSH connection, so the
   SSH user there needs Docker access (the `docker` group)
 
@@ -595,6 +642,7 @@ See `topologies/live_devices_example.yaml` for the inventory format.
 | `CLAB_SSH_KEY` | SSH agent / defaults | SSH private key |
 | `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
 | `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
+| `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot:latest` | Image with `tcpdump` for capturing on nodes that have none |
 
 ## Development
 
@@ -618,6 +666,7 @@ clabfleet/
   exporter.py      # Build a topology from live devices (NAPALM)
   execute.py       # Run a command on lab nodes (clabfleet exec)
   snapshots.py     # Config snapshots and diffs (clabfleet snapshot/diff)
+  capture.py       # tcpdump on node interfaces (clabfleet capture, GUI)
   nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
   validate.py      # Topology checks (clabfleet validate)
   templates.py     # Lab templates (clabfleet new)
@@ -628,7 +677,8 @@ clabfleet/
     server.py      # aiohttp app: API, auth middleware, terminal websockets
     auth.py        # Users file, roles, audit log
     state.py       # Topology discovery, running labs, deploy/destroy jobs
-    terminals.py   # Local pty and SSH-channel terminal sessions
+    terminals.py   # Local pty, SSH-channel and live capture sessions
+    captures.py    # GUI packet captures: limits, pcap downloads
     editing.py     # Format-preserving saves of topology files
     static/        # Web UI (vanilla JS; xterm.js bundled in vendor/)
 topologies/        # Example topologies and cluster inventory

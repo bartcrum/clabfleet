@@ -10,7 +10,8 @@ const S = {
   selected: null,       // {type: "topo", id} | {type: "lab", lab}
   detail: null,         // /api/topologies/<id>
   selectedNode: null,
-  positions: {},        // node name -> [x, y] for the open topology
+  selectedLink: null,   // {topo, id} of the clicked diagram link (packet capture)
+  positions: {},       // node name -> [x, y] for the open topology
   view: { x: 0, y: 0, k: 1 },
   jobPolling: null,
   live: null,           // /api/live/<id> for the open topology, plus its id
@@ -864,10 +865,14 @@ function renderDiagram(fit) {
     const ls = live?.links?.[l.id];
     const down = ls?.state === "down";
     const stateText = down ? `\nDOWN: ${downEnds(ls).join(", ")}` : ls?.state === "up" ? "\nup" : "";
+    const d = `M${p0[0]},${p0[1]} Q${c[0]},${c[1]} ${p1[0]},${p1[1]}`;
     g.append(s("path", {
-      class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}${down ? " down" : ""}`,
-      d: `M${p0[0]},${p0[1]} Q${c[0]},${c[1]} ${p1[0]},${p1[1]}`,
+      class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}${down ? " down" : ""}${selectedLink()?.id === l.id ? " selected" : ""}`,
+      d,
     }, s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}${stateText}`)));
+    // Wide invisible stroke so links are easy to click (packet capture)
+    g.append(s("path", { class: "link-hit", d, "data-link": l.id },
+      s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}${stateText}\nClick to capture packets`)));
     for (const [end, from, alt, side] of [[l.a, p0, false, "a"], [l.b, p1, true, "b"]]) {
       if (!end.iface) continue;
       const pseudo = end.id.startsWith("~");
@@ -947,7 +952,9 @@ function setupDiagramInteraction() {
       const id = nodeEl.dataset.id;
       drag = { type: "node", id, sx: ev.clientX, sy: ev.clientY, start: [...S.positions[id]], moved: false };
     } else {
-      drag = { type: "pan", sx: ev.clientX, sy: ev.clientY, start: { ...S.view }, moved: false };
+      // A press on a link that does not move is a click on the link
+      const link = ev.target.closest(".link-hit")?.dataset.link || null;
+      drag = { type: "pan", link, sx: ev.clientX, sy: ev.clientY, start: { ...S.view }, moved: false };
       svg.classList.add("panning");
     }
   });
@@ -972,7 +979,8 @@ function setupDiagramInteraction() {
       if (drag.moved) savePositions();
       else nodeClicked(drag.id);
     } else if (!drag.moved) {
-      selectNode(null);
+      if (drag.link) selectLink(drag.link);
+      else selectNode(null);
     }
     drag = null;
   });
@@ -1012,11 +1020,13 @@ function nodeClicked(id) {
 
 function selectNode(id) {
   S.selectedNode = id;
+  S.selectedLink = null;
   renderDiagram(false);
   renderNodeCard();
 }
 
 function renderNodeCard() {
+  renderLinkCard();  // the link card refreshes at the same points
   const card = $("#node-card");
   const node = S.detail?.nodes?.find((n) => n.name === S.selectedNode);
   if (!node) { card.hidden = true; return; }
@@ -1056,6 +1066,178 @@ function renderNodeCard() {
         onclick: () => openDiff(S.selected.id, node.name),
       }, "Config diff")));
   card.hidden = false;
+}
+
+// ---------------------------------------------------------------------------
+// Packet capture (click a link, pick a side)
+// ---------------------------------------------------------------------------
+
+const CAPTURE_MAX_SECONDS = 600;   // server limit for downloads (live: 1800)
+const CAPTURE_MAX_COUNT = 100000;
+const captureForm = { side: "a", filter: "", count: "", duration: "60" };
+const downloads = new Map();       // id -> {label, bytes, ctrl, stopped}
+let downloadSeq = 0;
+let linkCardKey = null;
+
+function selectedLink() {
+  const sel = S.selectedLink;
+  if (!sel || S.selected?.type !== "topo" || S.selected.id !== sel.topo) return null;
+  return S.detail?.links?.find((l) => l.id === sel.id) || null;
+}
+
+function selectLink(id) {
+  S.selectedLink = id && S.selected?.type === "topo" ? { topo: S.selected.id, id } : null;
+  S.selectedNode = null;
+  renderDiagram(false);
+  renderNodeCard();
+}
+
+function endpointLabel(e) {
+  return e.node ? `${e.node}:${e.iface}` : `${e.special}${e.iface ? `:${e.iface}` : ""}`;
+}
+
+// Can this side of a link be captured on? Only running lab nodes can.
+function captureSide(e) {
+  if (!e.node) return { ok: false, why: "not a lab node" };
+  const rt = nodeRuntime(S.detail.name, e.node);
+  return rt?.state === "running" ? { ok: true, why: "" } : { ok: false, why: "not running" };
+}
+
+function renderLinkCard() {
+  const card = $("#link-card");
+  const l = selectedLink();
+  if (!l) { card.hidden = true; linkCardKey = null; return; }
+  // Built once per link so a refresh never clears what is being typed
+  const key = `${S.selected.id}|${l.id}|${endpointLabel(l.a)}|${endpointLabel(l.b)}`;
+  if (key !== linkCardKey) { buildLinkCard(card, l); linkCardKey = key; }
+  syncLinkCard(card, l);
+  card.hidden = false;
+}
+
+function buildLinkCard(card, l) {
+  const f = captureForm;
+  const field = (name, attrs) => h("input", {
+    ...attrs, value: f[name], oninput: (ev) => { f[name] = ev.target.value; },
+    onkeydown: (ev) => { if (ev.key === "Enter") startCapture("live"); },
+  });
+  card.replaceChildren(
+    h("h3", {}, "Capture packets",
+      h("button", { class: "close", title: "Close", onclick: () => selectLink(null) }, "×")),
+    h("div", { class: "sides" }, ["a", "b"].map((k) =>
+      h("label", { class: "side", "data-side": k },
+        h("input", { type: "radio", name: "cap-side", value: k, onchange: () => { f.side = k; syncLinkCard(card, l); } }),
+        h("span", { class: "mono" }, endpointLabel(l[k])),
+        h("span", { class: "why muted small" })))),
+    h("label", { class: "field" }, h("span", {}, "Filter"),
+      field("filter", { class: "mono", placeholder: "e.g. tcp port 179", spellcheck: "false", autocomplete: "off" })),
+    h("div", { class: "row" },
+      h("label", { class: "field" }, h("span", {}, "Packets"),
+        field("count", { type: "number", min: 1, max: CAPTURE_MAX_COUNT, placeholder: "no limit" })),
+      h("label", { class: "field" }, h("span", {}, "Seconds"),
+        field("duration", { type: "number", min: 1, max: CAPTURE_MAX_SECONDS }))),
+    h("div", { class: "open" },
+      h("button", { class: "btn small primary", "data-act": "live", title: "Decode packets live in a tab below",
+        onclick: () => startCapture("live") }, "Live"),
+      h("button", { class: "btn small", "data-act": "pcap", title: "Capture to a .pcap file for Wireshark",
+        onclick: () => startCapture("pcap") }, "Download .pcap")),
+    h("ul", { class: "downloads" }));
+}
+
+function syncLinkCard(card, l) {
+  const sides = { a: captureSide(l.a), b: captureSide(l.b) };
+  if (!sides[captureForm.side].ok) {
+    const other = captureForm.side === "a" ? "b" : "a";
+    if (sides[other].ok) captureForm.side = other;
+  }
+  for (const k of ["a", "b"]) {
+    const label = card.querySelector(`.side[data-side="${k}"]`);
+    const radio = label.querySelector("input");
+    radio.disabled = !sides[k].ok;
+    radio.checked = captureForm.side === k;
+    label.classList.toggle("off", !sides[k].ok);
+    label.querySelector(".why").textContent = sides[k].why;
+  }
+  const ok = sides[captureForm.side].ok;
+  for (const btn of card.querySelectorAll("button[data-act]")) btn.disabled = !ok;
+  renderDownloads();
+}
+
+function captureParams() {
+  const l = selectedLink();
+  const e = l?.[captureForm.side];
+  if (!e?.node || S.selected?.type !== "topo") return null;
+  const p = { topo: S.selected.id, node: e.node, iface: e.iface, duration: captureForm.duration || "60" };
+  if (captureForm.filter.trim()) p.filter = captureForm.filter.trim();
+  if (captureForm.count) p.count = captureForm.count;
+  return p;
+}
+
+function startCapture(kind) {
+  const p = captureParams();
+  if (!p) return;
+  if (kind === "live") {
+    openTermTab(`${p.node}:${p.iface} · Capture`, "/ws/capture", p,
+      { closeTitle: "Stop capture", blink: false });
+  } else {
+    downloadPcap(p);
+  }
+}
+
+// Streamed with fetch rather than a plain link, so it can be stopped
+// early and still keep what was captured so far
+async function downloadPcap(p) {
+  const id = ++downloadSeq;
+  const dl = { label: `${p.node}:${p.iface}`, bytes: 0, ctrl: new AbortController(), stopped: false };
+  downloads.set(id, dl);
+  renderDownloads();
+  const chunks = [];
+  let name = `${p.node}-${p.iface}.pcap`.replace(/[^\w.-]/g, "_");
+  try {
+    const res = await fetch(`/api/capture?${new URLSearchParams(p)}`,
+      { signal: dl.ctrl.signal, credentials: "same-origin" });
+    if (!res.ok) throw new Error((await res.text()) || res.statusText);
+    name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "")?.[1] || name;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      dl.bytes += value.length;
+      renderDownloads();
+    }
+  } catch (e) {
+    if (!dl.stopped) {
+      downloads.delete(id);
+      renderDownloads();
+      toast(`Capture failed: ${e.message}`);
+      return;
+    }
+  }
+  downloads.delete(id);
+  renderDownloads();
+  if (!chunks.length) { toast(`No packets captured on ${dl.label}`); return; }
+  const url = URL.createObjectURL(new Blob(chunks, { type: "application/vnd.tcpdump.pcap" }));
+  const a = h("a", { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function renderDownloads() {
+  const list = document.querySelector("#link-card .downloads");
+  if (!list) return;
+  list.replaceChildren(...[...downloads].map(([id, dl]) => h("li", {},
+    h("span", { class: "dot busy" }),
+    h("span", { class: "mono small" }, `${dl.label} · ${fmtBytes(dl.bytes)}`),
+    h("button", {
+      class: "btn small ghost", disabled: dl.stopped, title: "Stop capturing and save the file",
+      onclick: () => { dl.stopped = true; dl.ctrl.abort(); },
+    }, "Stop & save"))));
+}
+
+function fmtBytes(n) {
+  return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(0)} KB` : `${n} B`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,25 +1345,32 @@ function setDockCollapsed(collapsed) {
 }
 
 function openTerminal(lab, node, mode) {
+  const logs = mode === "logs";
+  openTermTab(`${node} · ${MODE_LABEL[mode]}`, "/ws/terminal", { lab, node, mode },
+    { closeTitle: logs ? "Close log" : "Close terminal", blink: !logs, readOnly: logs });
+}
+
+// A dock tab with an xterm attached to a session websocket (terminal,
+// log or live packet capture)
+function openTermTab(label, wsPath, params, opts = {}) {
   const id = `term-${++termSeq}`;
   const pane = h("div", { class: "pane term", "data-pane": id });
   $("#dock-panes").append(pane);
 
   const tab = h("button", { class: "dock-tab", "data-pane": id, onclick: () => activatePane(id) },
     h("span", { class: "dot busy" }),
-    `${node} · ${MODE_LABEL[mode]}`,
+    label,
     h("span", {
-      class: "x", role: "button", title: mode === "logs" ? "Close log" : "Close terminal",
+      class: "x", role: "button", title: opts.closeTitle || "Close",
       onclick: (ev) => { ev.stopPropagation(); closeTerminal(id); },
     }, "×"));
   $("#dock-tabs").append(tab);
 
-  const logs = mode === "logs";
   const term = new Terminal({
     fontFamily: cssVar("--mono") || "monospace",
     fontSize: 13,
-    cursorBlink: !logs,
-    disableStdin: logs,
+    cursorBlink: !!opts.blink,
+    disableStdin: !!opts.readOnly,
     scrollback: 5000,
     theme: { background: cssVar("--term-bg") || "#0b0d10" },
   });
@@ -1191,9 +1380,9 @@ function openTerminal(lab, node, mode) {
   activatePane(id, true);
   fit.fit();
 
-  const qs = new URLSearchParams({ lab, node, mode, cols: term.cols, rows: term.rows });
+  const qs = new URLSearchParams({ ...params, cols: term.cols, rows: term.rows });
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws/terminal?${qs}`);
+  const ws = new WebSocket(`${proto}://${location.host}${wsPath}?${qs}`);
   ws.binaryType = "arraybuffer";
   const dot = tab.querySelector(".dot");
 
