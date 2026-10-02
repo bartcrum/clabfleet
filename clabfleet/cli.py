@@ -25,8 +25,8 @@ Usage:
     clabfleet new <template> [--spines N ...] [--kind KIND] [--image IMAGE] [-o FILE] [--force]
     clabfleet new --list
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
-                  [--bind ADDR] [--tls-cert CERT --tls-key KEY] [--users FILE]
-    clabfleet user add|list|remove|rotate [NAME] [--role operator|viewer] [--users FILE]
+                  [--bind ADDR] [--tls-cert CERT --tls-key KEY] [--users FILE | --single-token]
+    clabfleet user add|passwd|list|remove|rotate [NAME] [--role operator|viewer] [--token]
 
 Without --cluster, commands target a single host: this machine by default,
 or a remote server over SSH with --host.
@@ -425,8 +425,12 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Don't open a browser window")
     p_gui.add_argument("--users", metavar="FILE",
                        help="Users file for named logins with roles (default: "
-                            "~/.clabfleet/users.yaml if it exists; without one, a "
-                            "single random token is printed at start-up)")
+                            "~/.clabfleet/users.yaml; when it does not exist yet, it "
+                            "is created with the user admin and a random password, "
+                            "printed at start-up, to be changed at the first login)")
+    p_gui.add_argument("--single-token", action="store_true",
+                       help="No users: print a random token at start-up and let "
+                            "whoever has it in as an operator")
     p_gui.add_argument("--audit-log", metavar="FILE",
                        help="JSON Lines log of logins, jobs, edits and terminal "
                             "sessions (default with users: audit.jsonl next to the "
@@ -447,7 +451,7 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Open terminal tabs allowed per user (default: 16)")
 
     # --- user ---
-    p_user = sub.add_parser("user", help="Manage named GUI users and their tokens")
+    p_user = sub.add_parser("user", help="Manage named GUI users and their logins")
     user_sub = p_user.add_subparsers(dest="user_command", required=True)
 
     def add_users_arg(p):
@@ -459,18 +463,32 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="GUI address for the printed login link "
                             "(default: https://<this host's name>:8650)")
 
-    u_add = user_sub.add_parser("add", help="Add a user and print its login token")
+    def add_password_arg(p):
+        p.add_argument("--password-stdin", action="store_true",
+                       help="Read the password from the first line of stdin instead of "
+                            "asking (for scripts)")
+
+    u_add = user_sub.add_parser("add", help="Add a user who logs in with a name and password")
     u_add.add_argument("name")
     u_add.add_argument("--role", default="operator", choices=["operator", "viewer"],
                        help="operator: everything (default); viewer: read-only")
+    u_add.add_argument("--token", action="store_true",
+                       help="Give the user a login token (printed once, with a login link) "
+                            "instead of a password")
+    add_password_arg(u_add)
     add_users_arg(u_add)
     add_url_arg(u_add)
+    u_passwd = user_sub.add_parser("passwd", help="Set a user's password (ends their sessions)")
+    u_passwd.add_argument("name")
+    add_password_arg(u_passwd)
+    add_users_arg(u_passwd)
     u_list = user_sub.add_parser("list", help="List users")
     add_users_arg(u_list)
     u_remove = user_sub.add_parser("remove", help="Remove a user (ends their sessions)")
     u_remove.add_argument("name")
     add_users_arg(u_remove)
-    u_rotate = user_sub.add_parser("rotate", help="Give a user a new token (ends their sessions)")
+    u_rotate = user_sub.add_parser("rotate", help="Give a user a new login token "
+                                                  "(ends their sessions)")
     u_rotate.add_argument("name")
     add_users_arg(u_rotate)
     add_url_arg(u_rotate)
@@ -632,8 +650,11 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
         print(f"WARNING: listening on {args.bind} over plain HTTP (--insecure-http): "
               "tokens and terminal traffic are not encrypted.", file=sys.stderr)
 
-    users = _user_store(args, must_exist=bool(args.users))
-    if users:
+    if args.single_token and args.users:
+        raise ValueError("--single-token and --users exclude each other")
+    users = None
+    if not args.single_token:
+        users = _user_store(args, must_exist=bool(args.users), bootstrap=not args.users)
         users.validate()
     audit_path = args.audit_log or (users.path.parent / AUDIT_FILE_NAME if users else None)
     run(Workspace(cluster, roots), host=args.bind, port=args.port,
@@ -652,12 +673,16 @@ def _is_loopback(host: str) -> bool:
         return False  # a host name: could resolve to anything
 
 
-def _user_store(args: argparse.Namespace, must_exist: bool = True):
+def _user_store(args: argparse.Namespace, must_exist: bool = True, bootstrap: bool = False):
     """The users file from --users or the default; None if the default does
-    not exist and ``must_exist`` is false."""
+    not exist and ``must_exist`` is false. With ``bootstrap``, a missing
+    file is created with the first user (admin / admin, to be changed)."""
     from .gui.auth import DEFAULT_USERS_FILE, UserStore
 
     path = Path(args.users or DEFAULT_USERS_FILE).expanduser()
+    if bootstrap and UserStore(path).bootstrap():
+        print(f"Created {path} with the first user, admin, and a random password "
+              "(shown below; it must be changed at the first login)", file=sys.stderr)
     if not must_exist and not path.exists():
         return None
     return UserStore(path)
@@ -675,11 +700,27 @@ def _user(args: argparse.Namespace) -> int:
             return 0
         width = max(len(n) for n in users)
         for name, user in sorted(users.items()):
-            print(f"{name:<{width}}  {user.role:<8}  created {user.created}")
+            logins = "+".join(m for m, on in (("password", user.password),
+                                              ("token", user.token_sha256)) if on)
+            print(f"{name:<{width}}  {user.role:<8}  {logins:<14}  created {user.created}")
         return 0
     if cmd == "remove":
         store.remove(args.name)
         print(f"Removed user '{args.name}' from {store.path}")
+        return 0
+    if cmd == "passwd":
+        if args.name not in (store.validate() if store.path.exists() else {}):
+            raise KeyError(f"No user '{args.name}'")  # before asking for a password
+        store.set_password(args.name, _new_password(args))
+        print(f"Password set for '{args.name}'; their sessions have ended")
+        return 0
+    if cmd == "add" and not args.token:
+        if store.path.exists() and args.name in store.validate():
+            raise ValueError(f"User '{args.name}' already exists (use 'clabfleet user passwd')")
+        store.add(args.name, args.role, password=_new_password(args))
+        base = args.url or f"https://{socket.gethostname()}:8650"
+        print(f"Added {args.role} '{args.name}' to {store.path}")
+        print(f"They log in at {base}/ with their name and this password.")
         return 0
 
     if cmd == "add":
@@ -693,6 +734,20 @@ def _user(args: argparse.Namespace) -> int:
     print(f"Login link (adjust the address to where the GUI runs):\n\n"
           f"    {login_link(base, token)}\n")
     return 0
+
+
+def _new_password(args: argparse.Namespace) -> str:
+    """A new password from stdin (--password-stdin) or asked twice."""
+    from .gui.auth import check_new_password
+
+    if args.password_stdin:
+        password = sys.stdin.readline().rstrip("\r\n")
+    else:
+        password = getpass.getpass(f"Password for {args.name}: ")
+        if getpass.getpass("Again: ") != password:
+            raise ValueError("The passwords do not match")
+    check_new_password(password)
+    return password
 
 
 def _exec(args: argparse.Namespace, cluster: ClusterConfig) -> int:

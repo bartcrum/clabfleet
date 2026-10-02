@@ -3,20 +3,22 @@
 Security: the GUI can open shells on lab nodes, so it only listens on
 localhost by default and every request must be authenticated. Two modes:
 
-- Single token (no users file): whoever has the random token printed at
-  startup is an operator.
-- Named users (``clabfleet user add``): each user has their own token, and
-  the user's role decides what they may do (see ``_allowed``: anything but
-  a plain read needs an operator unless the handler is marked
-  ``allow_viewer``). Logins, jobs, edits and terminal sessions go to the
-  audit log.
+- Single token (``--single-token``): whoever has the random token printed
+  at startup is an operator.
+- Named users (the users file; a new install starts with the user admin
+  and a random password printed at start-up, which it must change first): each user logs in with a password or
+  their own token, and the user's role decides what they may do (see
+  ``_allowed``: anything but a plain read needs an operator unless the
+  handler is marked ``allow_viewer``). Logins, jobs, edits and terminal
+  sessions go to the audit log.
 
-In both modes the token is only sent in the body of ``POST /login`` (login
-links carry it in the URL fragment, which browsers do not send to the
-server) and is exchanged for a random session id in a SameSite=Strict
-cookie; logging out ends the session. Websocket and POST requests must
-also come from the GUI's own origin, so other websites open in the
-browser cannot drive it.
+In both modes passwords and tokens are only sent in the body of
+``POST /login`` (login links carry the token in the URL fragment, which
+browsers do not send to the server) and are exchanged for a random
+session id in a SameSite=Strict cookie; logging out ends the session.
+Sessions are kept on disk (hashed) so a restart on the same port logs
+nobody out. Websocket and POST requests must also come from the GUI's
+own origin, so other websites open in the browser cannot drive it.
 """
 
 import asyncio
@@ -31,7 +33,7 @@ import ssl
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -44,7 +46,8 @@ from ..capture import GUI_MAX_BYTES, CaptureError
 from ..nodes import access_modes, run_docker, terminal_command, terminal_stop_command
 from ..snapshots import SnapshotError
 from .auth import (
-    ACCESS_ATTR, OPERATOR, VIEWER, AuditLog, User, UserStore, allow_viewer, hash_token,
+    ACCESS_ATTR, BOOTSTRAP_USER, DEFAULT_USERS_FILE, OPERATOR, VIEWER,
+    AuditLog, SessionFile, User, UserStore, allow_viewer, check_new_password, hash_token,
     login_link, operator_only,
 )
 from .captures import open_capture, pcap_filename, spec_from_query
@@ -60,13 +63,16 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE = "clabfleet_session"  # plus the instance id; "__Host-" prefix over HTTPS
-SESSION_IDLE = 12 * 3600              # seconds without a request before a session ends
-SESSION_MAX_AGE = 7 * 24 * 3600       # seconds after login a session ends regardless
+SESSION_IDLE = 7 * 24 * 3600          # seconds without a request before a session ends
+SESSION_MAX_AGE = 30 * 24 * 3600      # seconds after login a session ends regardless
+SESSION_SAVE_EVERY = 60               # seconds between writes of last-use times only
+SESSION_FILE = "gui-sessions-{instance}.json"  # next to the users file, or in ~/.clabfleet
 SESSIONS_PER_USER = 20                # a further login ends that user's oldest session
 LOGIN_FAILURES = 5                    # failed logins allowed per remote address ...
 LOGIN_WINDOW = 60                     # ... in this many seconds; then 429 until it ends
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 PUBLIC_PATHS = {"/", "/login"}        # the page (it shows the login form) and the login
+MUST_CHANGE_PATHS = {"/api/me", "/api/password", "/logout"}  # all a must_change user may do
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
        "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
@@ -83,8 +89,8 @@ USER_KEY = web.RequestKey("user", User) if hasattr(web, "RequestKey") else "clab
 @dataclass
 class _Session:
     name: str
-    token_sha256: str  # the token the session came from; rotating it ends the session
-    created: float
+    credential: str    # User.credential at login: a new token or password ends the session
+    created: float     # Unix seconds, so sessions kept on disk survive a restart
     last_seen: float
 
 
@@ -99,10 +105,17 @@ class Auth:
     """Who a request comes from, in single-token or named-user mode.
 
     Both modes hand out the same kind of session: a random id in a cookie,
-    mapped to a user here. The token itself never goes into a cookie."""
+    mapped to a user here. The token itself never goes into a cookie.
+
+    With a ``session_file``, sessions are kept on disk (by the hash of their
+    id) and a restarted GUI with the same ``instance`` (its port) takes them
+    over, so nobody has to log in again. In single-token mode the token
+    changes with each start; sessions then belong to "the operator" rather
+    than to one token."""
 
     def __init__(self, token: Optional[str] = None, users: Optional[UserStore] = None,
-                 public_url: Optional[str] = None):
+                 public_url: Optional[str] = None, *, instance: Optional[str] = None,
+                 session_file: Optional[SessionFile] = None):
         if not token and not users:
             raise ValueError("Need a token or a users file")
         self.token = token
@@ -110,9 +123,14 @@ class Auth:
         self.public_url = public_url
         # Browsers send a host's cookies to all of its ports, so each GUI
         # instance has its own cookie name
-        self.instance = secrets.token_hex(4)
+        self.instance = instance or secrets.token_hex(4)
         self._operator = None if users else User("", OPERATOR, hash_token(token))
-        self._sessions: dict[str, _Session] = {}
+        self._file = session_file
+        self._sessions: dict[str, _Session] = {}  # by hash_token(session id)
+        if session_file:
+            self._sessions = {k: _Session(**v) for k, v in session_file.load().items()}
+            self._expire()
+        self._saved = time.time()
         self._failures: dict[str, _Failures] = {}
 
     @property
@@ -137,38 +155,56 @@ class Auth:
             return self._operator if hmac.compare_digest(raw, self.token.encode()) else None
         return self.users.authenticate(token)
 
+    def check_password(self, name, password) -> Optional[User]:
+        """The named user if ``password`` is theirs (slow: scrypt)."""
+        if not self.multi_user or not isinstance(name, str) or not isinstance(password, str):
+            return None
+        return self.users.check_password(name, password)
+
     def start_session(self, user: User) -> str:
         """A new session id for ``user``. Beyond SESSIONS_PER_USER, the
         user's oldest sessions end."""
         self._expire()
-        now = time.monotonic()
-        mine = sorted((s.created, sid) for sid, s in self._sessions.items() if s.name == user.name)
-        for _, sid in mine[:max(0, len(mine) - SESSIONS_PER_USER + 1)]:
-            del self._sessions[sid]
+        now = time.time()
+        mine = sorted((s.created, key) for key, s in self._sessions.items() if s.name == user.name)
+        for _, key in mine[:max(0, len(mine) - SESSIONS_PER_USER + 1)]:
+            del self._sessions[key]
         sid = secrets.token_urlsafe(32)
-        self._sessions[sid] = _Session(user.name, user.token_sha256, now, now)
+        # Single-token mode: no token to tie the session to (it changes per start)
+        tied = user.credential if self.multi_user else ""
+        self._sessions[hash_token(sid)] = _Session(user.name, tied, now, now)
+        self._save()
         return sid
 
     def identify(self, request: web.Request, touch: bool = True) -> Optional[User]:
         """The request's user, or None. ``touch=False`` checks a long-lived
         request (an open terminal) without counting it as activity."""
-        session = self._sessions.get(self._session_id(request))
-        now = time.monotonic()
+        session = self._sessions.get(self._session_key(request))
+        now = time.time()
         if not session or self._expired(session, now):
             return None
-        # Re-read the user each time: removed or rotated users are out at once
-        user = self.users.get(session.name) if self.multi_user else self._operator
-        if not user or not hmac.compare_digest(user.token_sha256, session.token_sha256):
+        if self.multi_user:
+            # Re-read the user each time: removed or rotated users are out at once
+            user = self.users.get(session.name)
+            if not user or not hmac.compare_digest(user.credential, session.credential):
+                return None
+        elif session.name:  # a named user's session from a run with a users file
             return None
+        else:
+            user = self._operator
         if touch:
             session.last_seen = now
+            if now - self._saved > SESSION_SAVE_EVERY:
+                self._save()
         return user
 
     def logout(self, request: web.Request) -> None:
-        self._sessions.pop(self._session_id(request), None)
+        if self._sessions.pop(self._session_key(request), None):
+            self._save()
 
-    def _session_id(self, request: web.Request) -> str:
-        return request.cookies.get(self.cookie_name(_cookie_secure(request)), "")
+    def _session_key(self, request: web.Request) -> str:
+        sid = request.cookies.get(self.cookie_name(_cookie_secure(request)), "")
+        return hash_token(sid) if sid else ""
 
     @staticmethod
     def _expired(session: _Session, now: float) -> bool:
@@ -176,11 +212,18 @@ class Auth:
                 or now - session.created > SESSION_MAX_AGE)
 
     def _expire(self) -> None:
-        now = time.monotonic()
-        for sid in [k for k, v in self._sessions.items() if self._expired(v, now)]:
-            del self._sessions[sid]
+        now = time.time()
+        for key in [k for k, v in self._sessions.items() if self._expired(v, now)]:
+            del self._sessions[key]
 
-    # --- failed logins, per remote address ---
+    def _save(self) -> None:
+        self._saved = time.time()
+        if self._file:
+            self._file.save({k: asdict(v) for k, v in self._sessions.items()})
+
+    # --- failed logins, per remote address and per user name ---
+    # (keys: the address, or "user:<name>" so guesses at one account from
+    # many addresses are limited too)
 
     def throttled(self, remote: str) -> int:
         """0 if ``remote`` may try to log in, else how many of its attempts
@@ -217,16 +260,19 @@ CAPTURE_POOL = web.AppKey("capture_pool", ThreadPoolExecutor)
 def create_app(workspace: Workspace, token: Optional[str] = None, *,
                users: Optional[UserStore] = None, audit: Optional[AuditLog] = None,
                public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
-               max_user_sessions: int = MAX_USER_SESSIONS) -> web.Application:
+               max_user_sessions: int = MAX_USER_SESSIONS, instance: Optional[str] = None,
+               session_file: Optional[SessionFile] = None) -> web.Application:
     """The GUI app. Pass ``token`` for single-token mode or ``users`` for
     named users; ``public_url`` is the address browsers use when it differs
     from what the server sees (e.g. behind a TLS-terminating proxy).
-    ``max_sessions``/``max_user_sessions`` cap open terminal tabs."""
+    ``max_sessions``/``max_user_sessions`` cap open terminal tabs.
+    ``instance`` names the session cookie and ``session_file`` keeps logins
+    across restarts (see ``Auth``)."""
     # Topologies with inline startup configs can be large
     app = web.Application(middlewares=[_auth_middleware], client_max_size=16 * 1024 * 1024)
     app[WORKSPACE] = workspace
     app[JOBS] = JobManager(workspace)
-    app[AUTH] = Auth(token, users, public_url)
+    app[AUTH] = Auth(token, users, public_url, instance=instance, session_file=session_file)
     app[AUDIT] = audit_log = audit or AuditLog(None)
     app[JOBS].on_finished = lambda job: _audit_job_finished(audit_log, job)
     app.on_response_prepare.append(_security_headers)
@@ -241,6 +287,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_post("/login", _login)
     app.router.add_post("/logout", _logout)
     app.router.add_get("/api/me", _me)
+    app.router.add_post("/api/password", _change_password)
     app.router.add_get("/api/state", _state)
     app.router.add_get("/api/hosts", _hosts)
     app.router.add_get("/api/topologies/{id:.+}", _topology)
@@ -269,8 +316,12 @@ def run(workspace: Workspace, host: str = "127.0.0.1", port: int = 8650,
         public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
         max_user_sessions: int = MAX_USER_SESSIONS) -> None:
     token = None if users else secrets.token_urlsafe(24)
+    # Logins are kept per port: a restart on the same port keeps them
+    state_dir = users.path.parent if users else DEFAULT_USERS_FILE.expanduser().parent
+    session_file = SessionFile(state_dir / SESSION_FILE.format(instance=port))
     app = create_app(workspace, token, users=users, audit=audit, public_url=public_url,
-                     max_sessions=max_sessions, max_user_sessions=max_user_sessions)
+                     max_sessions=max_sessions, max_user_sessions=max_user_sessions,
+                     instance=str(port), session_file=session_file)
     base = public_url.rstrip("/") if public_url else _base_url(host, port, ssl_context is not None)
 
     async def _announce(_app):
@@ -297,14 +348,23 @@ def startup_message(base: str, token: Optional[str], users: Optional[UserStore],
     if users:
         url = f"{base}/"
         lines = [f"clabfleet GUI running at:\n\n    {url}\n",
-                 f"Users log in with their own link from `clabfleet user add`: "
-                 f"{login_link(base, '<token>')}",
+                 "Users log in with their name and password (or token link).",
                  f"Users file: {users.path}"]
+        first = users.get(BOOTSTRAP_USER)
+        if first and first.must_change:
+            password = users.initial_password()
+            lines.append(
+                f"\nFirst login: {BOOTSTRAP_USER} / "
+                f"{password or '(see ' + str(users.initial_password_file) + ')'}\n"
+                f"(also in {users.initial_password_file} until it is changed). "
+                "It asks for a new password first.\n")
         if not users.users():
             lines.append("No users yet: add one with `clabfleet user add NAME`.")
     else:
         url = login_link(base, token)
-        lines = [f"clabfleet GUI running at:\n\n    {url}\n"]
+        lines = [f"clabfleet GUI running at:\n\n    {url}\n",
+                 "To log in with a name and password instead, add yourself with "
+                 "`clabfleet user add NAME` and restart the GUI."]
     if audit and audit.path:
         lines.append(f"Audit log: {audit.path}")
     lines.append("Press Ctrl+C to stop.")
@@ -407,10 +467,16 @@ async def _auth_middleware(request: web.Request, handler):
     if request.path.startswith("/static/") or request.path in PUBLIC_PATHS:
         return await handler(request)
 
-    user = request.app[AUTH].identify(request)
+    auth: Auth = request.app[AUTH]
+    user = auth.identify(request)
     if not user:
-        raise web.HTTPUnauthorized(text="not logged in")
+        # Tells the login form what to ask for: a name and password (named
+        # users, who may also have a token) or the start-up token
+        mode = "password" if auth.multi_user else "token"
+        raise web.HTTPUnauthorized(text="not logged in", headers={"X-Clabfleet-Login": mode})
     request[USER_KEY] = user
+    if user.must_change and request.path not in MUST_CHANGE_PATHS:
+        raise web.HTTPForbidden(text="Set a new password first")
 
     if request.method != "GET" or _is_websocket(request):
         if not _same_origin(request):
@@ -438,30 +504,46 @@ async def _security_headers(request, response):
 
 
 async def _login(request):
-    """Swap a token for a session cookie: ``{"token": ..., "switch": bool}``.
+    """Swap a password or a token for a session cookie:
+    ``{"username": ..., "password": ...}`` or ``{"token": ...}``, plus
+    ``"switch": bool``.
 
     Only from the GUI's own origin and as JSON, which a form on another
     site cannot send. A session of a different user is only replaced with
-    ``switch``, so a stranger's login link cannot quietly swap accounts."""
+    ``switch``, so a stranger's login link cannot quietly swap accounts.
+    Failures are limited per address and, for passwords, per user name."""
     auth: Auth = request.app[AUTH]
     remote = request.remote or ""
     if not _same_origin(request):
         raise web.HTTPForbidden(text="cross-origin request refused")
     if request.content_type != "application/json":
         raise web.HTTPUnsupportedMediaType(text="expected JSON")
-    refused = auth.throttled(remote)
-    if refused:
-        if refused == 1:  # one audit line per address and window
-            request.app[AUDIT].record("login_throttled", None, remote,
-                                      failures=LOGIN_FAILURES, seconds=LOGIN_WINDOW)
-        raise web.HTTPTooManyRequests(text="too many failed logins; try again in a minute",
-                                      headers={"Retry-After": str(LOGIN_WINDOW)})
     body = await _json_body(request)
-    user = auth.check_token(body.get("token"))
+    username = body.get("username")
+    by_password = "username" in body or "password" in body
+    keys = [remote] + ([f"user:{username}"] if by_password and isinstance(username, str) else [])
+    for key in keys:
+        refused = auth.throttled(key)
+        if refused:
+            if refused == 1:  # one audit line per address (or name) and window
+                details = {"username": username} if key != remote else {}
+                request.app[AUDIT].record("login_throttled", None, remote, **details,
+                                          failures=LOGIN_FAILURES, seconds=LOGIN_WINDOW)
+            raise web.HTTPTooManyRequests(text="too many failed logins; try again in a minute",
+                                          headers={"Retry-After": str(LOGIN_WINDOW)})
+    if by_password:
+        user = await asyncio.get_running_loop().run_in_executor(
+            None, auth.check_password, username, body.get("password"))
+    else:
+        user = auth.check_token(body.get("token"))
     if not user:
-        auth.login_failed(remote)
-        request.app[AUDIT].record("login_failed", None, remote, reason="invalid token")
-        raise web.HTTPUnauthorized(text="invalid token")
+        for key in keys:
+            auth.login_failed(key)
+        what = "user name or password" if by_password else "token"
+        details = {"username": username} if by_password and isinstance(username, str) else {}
+        request.app[AUDIT].record("login_failed", None, remote, reason=f"invalid {what}",
+                                  **details)
+        raise web.HTTPUnauthorized(text=f"invalid {what}")
 
     current = auth.identify(request)
     if current and current.name != user.name and body.get("switch") is not True:
@@ -470,9 +552,12 @@ async def _login(request):
     auth.logout(request)  # a login always starts a fresh session
     secure = _cookie_secure(request)
     resp = web.json_response({"user": user.name or None, "role": user.role})
+    # Max-Age: the login outlives the browser window, up to the session's end
     resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
-                    httponly=True, samesite="Strict", secure=secure or None)
-    request.app[AUDIT].record("login", user, remote)
+                    max_age=SESSION_MAX_AGE, httponly=True, samesite="Strict",
+                    secure=secure or None)
+    request.app[AUDIT].record("login", user, remote,
+                              method="password" if by_password else "token")
     return resp
 
 
@@ -491,7 +576,50 @@ async def _logout(request):
 async def _me(request):
     user = current_user(request)
     return web.json_response({"user": user.name or None, "role": user.role,
-                              "multi_user": request.app[AUTH].multi_user})
+                              "multi_user": request.app[AUTH].multi_user,
+                              "has_password": bool(user.password),
+                              "must_change": user.must_change})
+
+
+@allow_viewer
+async def _change_password(request):
+    """Set your own password: ``{"current": ..., "new": ...}``. Your other
+    sessions end; this one goes on with a new cookie. Wrong current
+    passwords count as failed logins (per address and per user name)."""
+    auth: Auth = request.app[AUTH]
+    user = current_user(request)
+    if not auth.multi_user or not user.password:
+        raise web.HTTPBadRequest(text="This login has no password to change")
+    body = await _json_body(request)
+    current, new = body.get("current"), body.get("new")
+    if not isinstance(current, str) or not isinstance(new, str):
+        raise web.HTTPBadRequest(text="Expected the current and the new password")
+    keys = [request.remote or "", f"user:{user.name}"]
+    if any(auth.throttled(k) for k in keys):
+        raise web.HTTPTooManyRequests(text="too many failed logins; try again in a minute",
+                                      headers={"Retry-After": str(LOGIN_WINDOW)})
+    loop = asyncio.get_running_loop()
+    if not await loop.run_in_executor(None, auth.check_password, user.name, current):
+        for key in keys:
+            auth.login_failed(key)
+        audit(request, "password_change_failed", reason="wrong current password")
+        raise web.HTTPForbidden(text="The current password is wrong")
+    if new == current:
+        raise web.HTTPBadRequest(text="Choose a password different from the current one")
+    try:
+        check_new_password(new)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+    await loop.run_in_executor(None, auth.users.set_password, user.name, new)
+    audit(request, "password_changed")
+    auth.logout(request)
+    user = auth.users.get(user.name)
+    secure = _cookie_secure(request)
+    resp = web.json_response({"user": user.name, "role": user.role})
+    resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
+                    max_age=SESSION_MAX_AGE, httponly=True, samesite="Strict",
+                    secure=secure or None)
+    return resp
 
 
 def _audit_job_finished(log: AuditLog, job: Job) -> None:

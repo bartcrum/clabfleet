@@ -30,6 +30,13 @@ topology:
 """
 
 
+@pytest.fixture(autouse=True)
+def cheap_scrypt(monkeypatch):
+    """Passwords hashed at a low cost, so the tests stay fast (stored
+    hashes carry their parameters, so checks use the same cost)."""
+    monkeypatch.setattr(auth, "SCRYPT_N", 2 ** 10)
+
+
 # ----------------------------------------------------------------------
 # Users file
 # ----------------------------------------------------------------------
@@ -132,14 +139,14 @@ def test_audit_log_does_not_follow_symlinks(tmp_path):
 
 def test_user_cli(tmp_path, capsys):
     users = str(tmp_path / "users.yaml")
-    assert cli.main(["user", "add", "alice", "--users", users,
+    assert cli.main(["user", "add", "alice", "--token", "--users", users,
                      "--url", "https://lab.example.com:8650"]) == 0
     out = capsys.readouterr().out
     token = out.split("#token=")[1].split()[0]
     assert UserStore(users).authenticate(token).role == "operator"
     assert "https://lab.example.com:8650/#token=" in out
 
-    assert cli.main(["user", "add", "bob", "--role", "viewer", "--users", users]) == 0
+    assert cli.main(["user", "add", "bob", "--role", "viewer", "--token", "--users", users]) == 0
     capsys.readouterr()
     assert cli.main(["user", "list", "--users", users]) == 0
     listing = capsys.readouterr().out
@@ -252,7 +259,8 @@ def test_roles_sessions_and_audit(tmp_path, monkeypatch):
             assert "clabfleet_session_" in cookie and "HttpOnly" in cookie
             assert "SameSite=Strict" in cookie and view_token not in cookie
             assert await (await client.get("/api/me")).json() == {
-                "user": "bob", "role": "viewer", "multi_user": True}
+                "user": "bob", "role": "viewer", "multi_user": True,
+                "has_password": False, "must_change": False}
             for path in ("/", "/api/state", "/api/jobs", "/api/topologies/t.clab.yml"):
                 assert (await client.get(path)).status == 200, path
             denied = [
@@ -376,7 +384,8 @@ def test_single_token_mode_is_one_operator(tmp_path, monkeypatch):
             assert cookie["httponly"] and cookie["samesite"] == "Strict"
             assert cookie["path"] == "/" and not cookie["secure"]
             assert await (await client.get("/api/me")).json() == {
-                "user": None, "role": "operator", "multi_user": False}
+                "user": None, "role": "operator", "multi_user": False,
+                "has_password": False, "must_change": False}
             resp = await client.get("/api/state")
             assert resp.headers["X-Frame-Options"] == "DENY"
 
@@ -466,7 +475,7 @@ def test_failed_logins_are_throttled_per_address(tmp_path, monkeypatch):
 
 def test_session_limits(tmp_path, monkeypatch):
     clock = [1000.0]
-    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
     users = UserStore(tmp_path / "users.yaml")
     users.add("alice")
     users.add("bob", "viewer")
@@ -587,9 +596,10 @@ def test_access_log_has_no_tokens(tmp_path, caplog):
 def test_startup_message_and_links(tmp_path):
     url, text = server.startup_message("http://localhost:8650", "tok", None, None)
     assert url == "http://localhost:8650/#token=tok" and url in text and "?token" not in text
+    assert "clabfleet user add" in text  # how to log in with a password instead
     users = UserStore(tmp_path / "users.yaml")
     url, text = server.startup_message("https://lab:8650", None, users, AuditLog(None))
-    assert url == "https://lab:8650/" and "https://lab:8650/#token=<token>" in text
+    assert url == "https://lab:8650/" and "name and password" in text and "#token" not in text
     assert auth.login_link("https://lab:8650/", "t") == "https://lab:8650/#token=t"
 
 
@@ -645,18 +655,35 @@ def test_gui_refuses_remote_plain_http(tmp_path, fake_run, capsys):
 def test_gui_users_file_selection(tmp_path, fake_run, monkeypatch, capsys):
     monkeypatch.setattr(auth, "DEFAULT_USERS_FILE", tmp_path / "home" / "users.yaml")
     base = ["gui", "--dir", str(tmp_path), "--no-browser"]
-    # No users file: the single-token mode, no audit log unless asked for
-    assert cli.main(base) == 0
+    home = tmp_path / "home" / "users.yaml"
+    # --single-token: no users, no audit log unless asked for
+    assert cli.main([*base, "--single-token"]) == 0
     assert fake_run[-1]["users"] is None and fake_run[-1]["audit"].path is None
-    assert cli.main([*base, "--audit-log", str(tmp_path / "a.jsonl")]) == 0
+    assert cli.main([*base, "--single-token", "--audit-log", str(tmp_path / "a.jsonl")]) == 0
     assert fake_run[-1]["audit"].path == tmp_path / "a.jsonl"
-    # An explicit --users must exist
+    assert not home.exists()
+    assert cli.main([*base, "--single-token", "--users", str(home)]) == 1
+    # An explicit --users must exist (it is not created)
     assert cli.main([*base, "--users", str(tmp_path / "missing.yaml")]) == 1
     assert "not found" in capsys.readouterr().err
-    # The default file switches to named users when it exists
-    UserStore(tmp_path / "home" / "users.yaml").add("alice")
+    assert not (tmp_path / "missing.yaml").exists()
+    # No default file yet: created with admin and a random password to change
     assert cli.main(base) == 0
-    assert fake_run[-1]["users"].path == tmp_path / "home" / "users.yaml"
+    assert fake_run[-1]["users"].path == home
+    assert fake_run[-1]["audit"].path == home.parent / "audit.jsonl"
+    assert "random password" in capsys.readouterr().err
+    initial = (home.parent / "initial-admin-password").read_text().strip()
+    assert stat.S_IMODE((home.parent / "initial-admin-password").stat().st_mode) == 0o600
+    admin = UserStore(home).check_password("admin", initial)
+    assert admin.role == "operator" and admin.must_change
+    assert UserStore(home).check_password("admin", "admin") is None
+    # Once it exists it is used as it is
+    UserStore(home).add("alice")
+    UserStore(home).set_password("admin", "a good new password")
+    assert not (home.parent / "initial-admin-password").exists()
+    assert cli.main(base) == 0
+    assert "random password" not in capsys.readouterr().err
+    assert set(fake_run[-1]["users"].users()) == {"admin", "alice"}
 
 
 def test_run_installs_the_access_logger(tmp_path, monkeypatch):
@@ -664,3 +691,356 @@ def test_run_installs_the_access_logger(tmp_path, monkeypatch):
     monkeypatch.setattr(server.web, "run_app", lambda app, **kw: calls.append(kw))
     server.run(_workspace(tmp_path), open_browser=False)
     assert calls[0]["access_log_class"] is server.AccessLogger
+
+
+# ----------------------------------------------------------------------
+# Logins kept across restarts
+# ----------------------------------------------------------------------
+
+def _restart(tmp_path, token=None, users=None):
+    """A GUI app as ``run`` makes it: sessions kept per port in a file."""
+    sessions = auth.SessionFile(tmp_path / "state" / "gui-sessions-8650.json")
+    return server.create_app(_workspace(tmp_path), token, users=users, instance="8650",
+                             session_file=sessions)
+
+
+def test_logins_survive_a_restart(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    alice, bob = users.add("alice"), users.add("bob", "viewer")
+    path = tmp_path / "state" / "gui-sessions-8650.json"
+
+    async def scenario():
+        cookies = {}
+        async with TestClient(TestServer(_restart(tmp_path, users=users))) as client:
+            for name, tok in (("alice", alice), ("bob", bob)):
+                client.session.cookie_jar.clear()
+                resp = await _login(client, tok)
+                assert resp.status == 200
+                assert f"Max-Age={server.SESSION_MAX_AGE}" in resp.headers["Set-Cookie"]
+                cookies[name] = resp.cookies["clabfleet_session_8650"].value
+        # Only hashes of the session ids, in a private file
+        text = path.read_text()
+        assert all(sid not in text for sid in cookies.values())
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+        users.rotate("bob")  # ends bob's sessions, even those on disk
+        async with TestClient(TestServer(_restart(tmp_path, users=users))) as client:
+            name = "clabfleet_session_8650"
+            client.session.cookie_jar.update_cookies({name: cookies["alice"]})
+            assert (await (await client.get("/api/me")).json())["user"] == "alice"
+            client.session.cookie_jar.update_cookies({name: cookies["bob"]})
+            assert (await client.get("/api/me")).status == 401
+            # Logging out ends the session for the next run too
+            client.session.cookie_jar.update_cookies({name: cookies["alice"]})
+            assert (await client.post("/logout")).status == 200
+        async with TestClient(TestServer(_restart(tmp_path, users=users))) as client:
+            client.session.cookie_jar.update_cookies({name: cookies["alice"]})
+            assert (await client.get("/api/me")).status == 401
+
+    asyncio.run(scenario())
+
+
+def test_single_token_logins_survive_a_new_token(tmp_path):
+    async def scenario():
+        async with TestClient(TestServer(_restart(tmp_path, "first"))) as client:
+            assert (await _login(client, "first")).status == 200
+            jar = client.session.cookie_jar.filter_cookies(client.make_url("/"))
+            sid = jar["clabfleet_session_8650"].value
+        # The next start prints another token; the browser stays logged in
+        async with TestClient(TestServer(_restart(tmp_path, "second"))) as client:
+            client.session.cookie_jar.update_cookies({"clabfleet_session_8650": sid})
+            me = await (await client.get("/api/me")).json()
+            assert me == {"user": None, "role": "operator", "multi_user": False,
+                          "has_password": False, "must_change": False}
+            assert (await _login(client, "first")).status == 401  # the old token is gone
+
+    asyncio.run(scenario())
+
+
+def test_sessions_do_not_cross_modes_and_expire_on_disk(tmp_path, monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice")
+    path = tmp_path / "s.json"
+    named = server.Auth(users=users, instance="1", session_file=auth.SessionFile(path))
+    sid = named.start_session(users.get("alice"))
+    single = server.Auth("tok", instance="1", session_file=auth.SessionFile(path))
+    req = make_mocked_request("GET", "/api/me", app=server.create_app(_workspace(tmp_path), "tok"),
+                              headers={"Cookie": f"{single.cookie_name(False)}={sid}"})
+    assert single.identify(req) is None  # a named user's session is no operator's
+    # Expired sessions are dropped when the next run loads the file
+    clock[0] += server.SESSION_IDLE + 1
+    later = server.Auth(users=users, instance="1", session_file=auth.SessionFile(path))
+    later.start_session(users.get("alice"))
+    assert len(json.loads(path.read_text())["sessions"]) == 1
+
+
+def test_sessions_file_others_can_change_is_not_used(tmp_path, caplog):
+    path = tmp_path / "gui-sessions-8650.json"
+    path.write_text(json.dumps({"version": 1, "sessions": {}}))
+    path.chmod(0o666)
+    store = auth.SessionFile(path)
+    with caplog.at_level(logging.ERROR):
+        assert store.load() == {}
+    assert "writable by other users" in caplog.text
+    store.save({"a" * 64: {}})  # left alone
+    assert json.loads(path.read_text())["sessions"] == {}
+
+
+# ----------------------------------------------------------------------
+# Names and passwords
+# ----------------------------------------------------------------------
+
+PASSWORD = "correct horse battery"
+
+
+def test_user_store_passwords(tmp_path):
+    store = UserStore(tmp_path / "users.yaml")
+    assert store.add("alice", password=PASSWORD) is None  # no token
+    text = (tmp_path / "users.yaml").read_text()
+    assert PASSWORD not in text and "password: scrypt$1024$8$1$" in text
+    assert "token_sha256" not in text
+    alice = store.check_password("alice", PASSWORD)
+    assert alice.name == "alice" and alice.role == "operator"
+    for name, pw in (("alice", "wrong password!"), ("nobody", PASSWORD), ("alice", ""),
+                     ("alice", None), (None, PASSWORD), ("alice", "\ud800")):
+        assert store.check_password(name, pw) is None
+    assert store.authenticate("") is None  # no token: an empty one matches nothing
+
+    with pytest.raises(ValueError, match="at least 12"):
+        store.add("bob", password="short")
+    with pytest.raises(ValueError, match="at least 12"):
+        store.set_password("alice", "short")
+    with pytest.raises(KeyError):
+        store.set_password("nobody", PASSWORD)
+
+    # A new password, or a token next to it, changes the user's credential
+    before = store.get("alice").credential
+    store.set_password("alice", "another good password")
+    assert store.check_password("alice", PASSWORD) is None
+    changed = store.get("alice").credential
+    assert changed != before
+    token = store.rotate("alice")
+    assert store.authenticate(token).name == "alice" and store.get("alice").credential != changed
+    assert store.check_password("alice", "another good password").name == "alice"
+
+
+@pytest.mark.parametrize("entry, error", [
+    ({"role": "operator"}, "neither a password nor a token"),
+    ({"role": "operator", "password": "plain text"}, "not an scrypt hash"),
+])
+def test_user_store_refuses_bad_password_entries(tmp_path, caplog, entry, error):
+    path = tmp_path / "users.yaml"
+    path.write_text(json.dumps({"users": {"alice": entry}}))
+    path.chmod(0o600)
+    with pytest.raises(ValueError, match=error):
+        UserStore(path).validate()
+
+
+def test_password_login(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "LOGIN_FAILURES", 100)
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice", password=PASSWORD)
+    users.add("bob", "viewer")  # a token user
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users, audit=AuditLog(audit_path))
+        async with TestClient(TestServer(app)) as client:
+            # The login form learns what to ask for from the 401
+            resp = await client.get("/api/me")
+            assert resp.status == 401 and resp.headers["X-Clabfleet-Login"] == "password"
+            for body in ({"username": "alice", "password": "wrong password!"},
+                         {"username": "nobody", "password": PASSWORD},
+                         {"username": "alice"}, {"username": ["alice"], "password": PASSWORD},
+                         {"password": PASSWORD}):
+                resp = await client.post("/login", json=body)
+                assert resp.status == 401, body
+                assert await resp.text() == "invalid user name or password"
+            resp = await client.post("/login", json={"username": "alice", "password": PASSWORD})
+            assert resp.status == 200 and await resp.json() == {"user": "alice", "role": "operator"}
+            assert PASSWORD not in resp.headers["Set-Cookie"]
+            assert (await (await client.get("/api/me")).json())["user"] == "alice"
+            # A new password ends the session
+            users.set_password("alice", "another good password")
+            assert (await client.get("/api/me")).status == 401
+
+    asyncio.run(scenario())
+    events = _events(audit_path)
+    failed = [e for e in events if e["event"] == "login_failed"]
+    assert failed[0]["details"] == {"reason": "invalid user name or password", "username": "alice"}
+    assert failed[1]["details"]["username"] == "nobody"
+    assert PASSWORD not in audit_path.read_text()
+    assert [e["details"] for e in events if e["event"] == "login"] == [{"method": "password"}]
+
+
+def test_single_token_mode_asks_for_the_token(tmp_path):
+    async def scenario():
+        async with TestClient(TestServer(server.create_app(_workspace(tmp_path), "tok"))) as client:
+            resp = await client.get("/api/me")
+            assert resp.status == 401 and resp.headers["X-Clabfleet-Login"] == "token"
+            # No users: no password can be right
+            resp = await client.post("/login", json={"username": "", "password": "tok"})
+            assert resp.status == 401
+
+    asyncio.run(scenario())
+
+
+def test_failed_passwords_are_throttled_per_user_name(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice", password=PASSWORD)
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users, audit=AuditLog(audit_path))
+        auth_ = app[server.AUTH]
+        async with TestClient(TestServer(app)) as client:
+            for _ in range(server.LOGIN_FAILURES):
+                resp = await client.post("/login", json={"username": "alice", "password": "nope"})
+                assert resp.status == 401
+            # The name is locked for the window, whatever the address
+            auth_._failures.pop("127.0.0.1")  # as if from another address
+            resp = await client.post("/login", json={"username": "alice", "password": PASSWORD})
+            assert resp.status == 429
+            # Other names are not
+            assert auth_.throttled("user:bob") == 0
+            clock[0] += server.LOGIN_WINDOW
+            resp = await client.post("/login", json={"username": "alice", "password": PASSWORD})
+            assert resp.status == 200
+
+    asyncio.run(scenario())
+    throttled = [e for e in _events(audit_path) if e["event"] == "login_throttled"]
+    assert throttled[0]["details"]["username"] == "alice"
+
+
+def test_user_cli_passwords(tmp_path, capsys, monkeypatch):
+    users = str(tmp_path / "users.yaml")
+
+    def run(*argv, stdin=None, prompts=()):
+        answers = iter(prompts)
+        monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": next(answers))
+        monkeypatch.setattr(cli.sys, "stdin", __import__("io").StringIO(stdin or ""))
+        return cli.main(["user", *argv, "--users", users])
+
+    assert run("add", "alice", prompts=[PASSWORD, PASSWORD]) == 0
+    out = capsys.readouterr().out
+    assert "#token" not in out and "name and this password" in out
+    assert UserStore(users).check_password("alice", PASSWORD).name == "alice"
+    assert run("add", "alice", prompts=[PASSWORD, PASSWORD]) == 1  # exists
+    assert run("add", "bob", prompts=[PASSWORD, "something else!"]) == 1  # mismatch
+    assert "do not match" in capsys.readouterr().err
+    assert run("add", "bob", "--password-stdin", stdin="short\n") == 1
+    assert "at least 12" in capsys.readouterr().err
+    assert run("add", "bob", "--role", "viewer", "--password-stdin", stdin=PASSWORD + "\n") == 0
+    assert UserStore(users).check_password("bob", PASSWORD).role == "viewer"
+
+    assert run("passwd", "nobody", prompts=[]) == 1  # before asking anything
+    assert run("passwd", "alice", "--password-stdin", stdin="another good password\n") == 0
+    assert UserStore(users).check_password("alice", "another good password")
+    capsys.readouterr()
+    assert run("list") == 0
+    listing = capsys.readouterr().out
+    assert re.search(r"alice\s+operator\s+password\s", listing)
+    assert run("rotate", "bob") == 0
+    capsys.readouterr()
+    assert run("list") == 0
+    assert re.search(r"bob\s+viewer\s+password\+token\s", capsys.readouterr().out)
+
+
+# ----------------------------------------------------------------------
+# First login: admin / admin, then a new password
+# ----------------------------------------------------------------------
+
+def test_first_admin_must_set_a_new_password(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "LOGIN_FAILURES", 100)
+    users = UserStore(tmp_path / "users.yaml")
+    initial = users.bootstrap()
+    assert len(initial) >= 16 and users.bootstrap() is None  # only once
+    assert users.initial_password() == initial
+    audit_path = tmp_path / "audit.jsonl"
+    new = "a much better password"
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users, audit=AuditLog(audit_path))
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/login", json={"username": "admin", "password": "admin"})
+            assert resp.status == 401  # no default password
+            resp = await client.post("/login", json={"username": "admin", "password": initial})
+            assert resp.status == 200
+            me = await (await client.get("/api/me")).json()
+            assert me["must_change"] is True and me["has_password"] is True
+            # Nothing else until the password changes, terminals included
+            for path in ("/api/state", "/api/jobs", "/api/topologies/t.clab.yml"):
+                assert (await client.get(path)).status == 403, path
+            assert (await client.post("/api/jobs", json={})).status == 403
+            with pytest.raises(WSServerHandshakeError):
+                await client.ws_connect("/ws/terminal?lab=t&node=a&mode=shell")
+
+            change = lambda body: client.post("/api/password", json=body)  # noqa: E731
+            assert (await change({"current": "wrong", "new": new})).status == 403
+            assert (await change({"current": initial, "new": initial})).status == 400
+            assert (await change({"current": initial, "new": "short"})).status == 400
+            assert (await change({"current": initial})).status == 400
+            resp = await change({"current": initial, "new": new})
+            assert resp.status == 200
+            # This browser goes on with a new session; the rest is open now
+            assert (await (await client.get("/api/me")).json())["must_change"] is False
+            assert (await client.get("/api/state")).status == 200
+
+        assert users.check_password("admin", initial) is None
+        assert users.check_password("admin", new).must_change is False
+        assert users.initial_password() is None
+        assert not users.initial_password_file.exists()  # gone once changed
+
+    asyncio.run(scenario())
+    events = [e["event"] for e in _events(audit_path)]
+    assert "password_change_failed" in events and "password_changed" in events
+    assert initial not in audit_path.read_text() and new not in audit_path.read_text()
+
+
+def test_password_change_by_other_users(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice", "viewer", password=PASSWORD)
+    bob = users.add("bob")  # token only
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users)
+        async with TestClient(TestServer(app)) as client:
+            # Viewers may change their own password
+            await client.post("/login", json={"username": "alice", "password": PASSWORD})
+            other = TestClient(TestServer(app))
+            async with other:
+                await other.post("/login", json={"username": "alice", "password": PASSWORD})
+                resp = await client.post("/api/password",
+                                         json={"current": PASSWORD, "new": "alice's new password"})
+                assert resp.status == 200
+                assert (await other.get("/api/me")).status == 401  # her other sessions end
+            # A token user has no password to change
+            assert (await _login(client, bob)).status == 200
+            resp = await client.post("/api/password", json={"current": "", "new": PASSWORD})
+            assert resp.status == 400
+
+    asyncio.run(scenario())
+
+
+def test_single_token_mode_has_no_password_to_change(tmp_path):
+    async def scenario():
+        async with TestClient(TestServer(server.create_app(_workspace(tmp_path), "tok"))) as client:
+            assert (await _login(client, "tok")).status == 200
+            resp = await client.post("/api/password", json={"current": "tok", "new": PASSWORD})
+            assert resp.status == 400
+
+    asyncio.run(scenario())
+
+
+def test_startup_message_tells_the_first_login(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    initial = users.bootstrap()
+    _, text = server.startup_message("http://localhost:8650", None, users, None)
+    assert f"admin / {initial}" in text and "initial-admin-password" in text
+    users.set_password("admin", "a good new password")
+    _, text = server.startup_message("http://localhost:8650", None, users, None)
+    assert "First login" not in text and initial not in text
