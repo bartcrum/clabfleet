@@ -311,6 +311,12 @@ def test_roles_sessions_and_audit(tmp_path, monkeypatch):
             sock = await client.ws_connect("/ws/terminal?lab=t&node=a&mode=shell")
             assert re.search(r"args: exec -it -e CLABFLEET_TERMINAL=\w+ clab-t-a",
                              await _drain(sock))
+            # terminal_closed is written once the process has exited, after the
+            # socket closes: wait for it before the server shuts down
+            for _ in range(250):
+                if sum(e["event"] == "terminal_closed" for e in _events(audit_path)) == 2:
+                    break
+                await asyncio.sleep(0.02)
 
             # Rotating a token ends that user's sessions at once
             users.rotate("alice")
