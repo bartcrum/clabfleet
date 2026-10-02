@@ -83,10 +83,17 @@ async def _read_until(sock, text: bytes, timeout=5.0):
 
 
 async def _close_code(sock, timeout=5.0):
-    """Read until the server closes; the close code."""
+    """Read until the server closes; the close code it sent.
+
+    The code comes from the close frame, as browsers report it: the
+    client's own close_code can read 1006 when the server drops the
+    connection before the client's reply (as it does on Python 3.10).
+    """
     while True:
         msg = await asyncio.wait_for(sock.receive(), timeout)
-        if msg.type.name in ("CLOSE", "CLOSING", "CLOSED"):
+        if msg.type.name == "CLOSE":
+            return msg.data
+        if msg.type.name in ("CLOSING", "CLOSED"):
             return sock.close_code
 
 
