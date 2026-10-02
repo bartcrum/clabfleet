@@ -9,14 +9,16 @@ import logging
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from ..capture import sweep_helpers
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
 from ..livestate import LiveCache, link_states, probe_ifaces, probe_stats
@@ -41,6 +43,7 @@ SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox"}
 MAX_SCAN_DEPTH = 5
 GUI_PROBE_TIMEOUT = 5  # seconds; the GUI re-probes not-ready nodes anyway
 LIVE_INTERVAL = 5.0  # seconds between live link/CPU refreshes of a lab being viewed
+RUNTIME_TTL = 2.0  # seconds a `containerlab inspect` result is reused for
 
 # ANSI escape sequences (colors, bold) in containerlab output
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -54,7 +57,8 @@ def find_topologies(roots: list[Path]) -> dict[str, Path]:
 
     Returns {id: path}; the id is the path relative to its root (prefixed
     with the root name when there are several roots) and is what the
-    browser uses to refer to a topology.
+    browser uses to refer to a topology. Symlinks that lead out of the
+    root are left out: the GUI shows the file to viewers.
     """
     found: dict[str, Path] = {}
     for root in roots:
@@ -70,6 +74,9 @@ def find_topologies(roots: list[Path]) -> dict[str, Path]:
             for fn in sorted(filenames):
                 if fn.endswith(TOPOLOGY_SUFFIXES):
                     path = Path(dirpath) / fn
+                    if not path.resolve().is_relative_to(root):
+                        logger.warning("Ignoring %s: it links outside %s", path, root)
+                        continue
                     rel = path.relative_to(root).as_posix()
                     topo_id = f"{root.name}/{rel}" if len(roots) > 1 else rel
                     found[topo_id] = path
@@ -144,6 +151,14 @@ class HostState:
     containers: list[dict] = field(default_factory=list)
 
 
+class _Flight(Future):
+    """One running inspect that concurrent ``runtime()`` callers share."""
+
+    def __init__(self, generation: int):
+        super().__init__()
+        self.generation = generation
+
+
 class Workspace:
     """Hosts + topology roots the GUI manages, with cached runners."""
 
@@ -158,6 +173,9 @@ class Workspace:
         self.live = LiveCache(LIVE_INTERVAL)
         self._live_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="live")
         self._last_runtime: Optional[tuple[float, list[HostState]]] = None
+        self._runtime_lock = threading.Lock()
+        self._runtime_flight: Optional[_Flight] = None  # the inspect running now
+        self._runtime_generation = 0
 
     @property
     def multi_host(self) -> bool:
@@ -211,7 +229,22 @@ class Workspace:
             self._topologies = find_topologies(self.roots)
         if topo_id not in self._topologies:
             raise KeyError(f"Unknown topology '{topo_id}'")
-        return self._topologies[topo_id]
+        path = self._topologies[topo_id]
+        # Again now: it may have been replaced by a symlink since the scan
+        if not any(path.resolve().is_relative_to(root.resolve()) for root in self.roots):
+            raise KeyError(f"Topology '{topo_id}' links outside the workspace")
+        return path
+
+    def workspace_labs(self) -> set[str]:
+        """Names of the labs the workspace's topologies define."""
+        self._topologies = find_topologies(self.roots)
+        labs = set()
+        for path in self._topologies.values():
+            try:
+                labs.add(load_topology(path).name)
+            except Exception:  # noqa: BLE001 - an invalid file defines no lab
+                continue
+        return labs
 
     def topology_detail(self, topo_id: str) -> dict:
         path = self.topology_path(topo_id)
@@ -275,8 +308,46 @@ class Workspace:
 
     # --- runtime ---
 
-    def runtime(self) -> list[HostState]:
-        """Containers running on each host (one `containerlab inspect` per host)."""
+    def runtime(self, max_age: float = RUNTIME_TTL) -> list[HostState]:
+        """Containers running on each host (one `containerlab inspect` per host).
+
+        Reuses a result younger than ``max_age`` seconds, and callers that
+        arrive while an inspect is running wait for it instead of starting
+        their own, so many browsers polling cost one inspect per host.
+        """
+        with self._runtime_lock:
+            last = self._last_runtime
+            if last and max_age > 0 and time.monotonic() - last[0] < max_age:
+                return last[1]
+            flight = self._runtime_flight
+            leader = flight is None
+            if leader:
+                flight = self._runtime_flight = _Flight(self._runtime_generation)
+        if not leader:
+            return flight.result()
+        try:
+            states = self._inspect_runtime()
+        except BaseException as exc:
+            flight.set_exception(exc)
+            raise
+        finally:
+            with self._runtime_lock:
+                if self._runtime_flight is flight:
+                    self._runtime_flight = None
+        with self._runtime_lock:
+            if flight.generation == self._runtime_generation:  # not invalidated meanwhile
+                self._last_runtime = (time.monotonic(), states)
+        flight.set_result(states)
+        return states
+
+    def invalidate_runtime(self) -> None:
+        """Forget the cached runtime (labs changed): the next caller inspects again."""
+        with self._runtime_lock:
+            self._last_runtime = None
+            self._runtime_flight = None
+            self._runtime_generation += 1
+
+    def _inspect_runtime(self) -> list[HostState]:
         states = []
         live: set[tuple] = set()
         for host in self.cluster.hosts:
@@ -292,7 +363,6 @@ class Workspace:
             self._annotate_ready(host, state.containers, live)
             states.append(state)
         self.readiness.prune(live)
-        self._last_runtime = (time.monotonic(), states)
         return states
 
     def _annotate_ready(self, host: HostInfo, containers: list[dict], live: set) -> None:
@@ -417,11 +487,27 @@ class Workspace:
             return None
 
     def find_node(self, lab: str, node: str) -> dict:
+        # Only labs of this workspace: viewers may follow node logs, and the
+        # hosts can run other people's labs too
+        if lab not in self.workspace_labs():
+            raise KeyError(f"Lab '{lab}' is not in this workspace")
         for state in self.runtime():
             for c in state.containers:
                 if c["lab"] == lab and c["node"] == node:
                     return c
         raise KeyError(f"Node '{node}' of lab '{lab}' is not running")
+
+    def sweep_capture_helpers(self) -> None:
+        """Remove capture helper containers left behind on any host (start-up)."""
+        for host in self.cluster.hosts:
+            try:
+                removed = sweep_helpers(self.runner(host), host.sudo)
+            except Exception as exc:  # noqa: BLE001 - best effort, tried at every start
+                logger.debug("Capture helper sweep on %s failed: %s", host.name, exc)
+                continue
+            if removed:
+                logger.warning("Removed %d leftover capture helper(s) on %s: %s",
+                               len(removed), host.name, ", ".join(removed))
 
     def host_status(self) -> list[dict]:
         result = []
@@ -518,7 +604,8 @@ class JobHistory:
     """Finished and running jobs as JSON files in ``<workspace>/.clabfleet/jobs``.
 
     Keeps the newest ``keep`` jobs. Without a writable directory, history
-    simply is not kept.
+    simply is not kept. Job output can show configs, so the directory is
+    0700 and the files 0600.
     """
 
     def __init__(self, directory: Optional[Path], keep: int = 50):
@@ -530,6 +617,8 @@ class JobHistory:
             return []
         jobs = []
         for path in self.directory.glob("*.json"):
+            if path.is_symlink():
+                continue
             try:
                 job = Job.from_dict(json.loads(path.read_text()))
             except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -546,10 +635,18 @@ class JobHistory:
         if not self.directory:
             return
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            tmp = self.directory / f".{job.id}.tmp"
-            tmp.write_text(json.dumps(job.to_dict()))
-            tmp.replace(self.directory / f"{job.id}.json")
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if self.directory.stat().st_mode & 0o077:
+                self.directory.chmod(0o700)
+            # A fresh name each time, so nothing in the directory can redirect the write
+            fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=f".{job.id}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(json.dumps(job.to_dict()))
+                os.replace(tmp, self.directory / f"{job.id}.json")
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
             self._prune()
         except OSError as exc:
             logger.warning("Could not save job history in %s: %s", self.directory, exc)
@@ -666,6 +763,7 @@ class JobManager:
             if times:
                 job.add("» time per host: " + ", ".join(f"{h} {t:g}s" for h, t in times.items()))
             job.add("✓ done" if job.status == "ok" else "✗ failed")
+            self.workspace.invalidate_runtime()  # the lab's containers changed
             self.history.save(job)
             if self.on_finished:
                 try:

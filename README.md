@@ -42,7 +42,7 @@ deploys with plain `containerlab deploy`.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - On every lab host: Docker and containerlab
   (`bash -c "$(curl -sL https://get.containerlab.dev)"`)
 - Remote hosts: SSH access (key-based recommended). containerlab needs root,
@@ -109,8 +109,10 @@ output. Each node is reached the best way its kind allows (`--mode auto`):
 | `shell` | Everything else | `sh -c` inside the container |
 
 SSH mode logs in with containerlab's default `admin`/`admin`, or `root`
-for cRPD. Use `--user` and `--password`, or set `CLAB_NODE_PASSWORD`, if
-your startup configs create other logins. Words after the topology are
+for cRPD. Use `--user` with `CLAB_NODE_PASSWORD` or `--ask-password` (a
+prompt) if your startup configs create other logins. `--password PW` works
+too, but other users on the machine can see it in `ps` and it stays in your
+shell history. Words after the topology are
 joined with spaces, as `ssh` does, so quote the command or put it after
 `--` when it has options of its own. Like the GUI terminals, the CLI and
 shell modes need Docker access on the host. If Docker refuses and the
@@ -144,6 +146,8 @@ Snapshots go to `snapshots/<lab>/` next to the topology, or
 give `--name`. Configs are read with `cat` on each node's host, from the
 placement record, so nodes on remote hosts work too. If the file is not
 readable and the host uses `sudo`, clabfleet retries with `sudo`.
+Snapshots hold whole device configs (password hashes, keys), so their
+folders are created mode 0700 and the files 0600.
 
 | Kind | Saved config |
 |------|--------------|
@@ -158,7 +162,8 @@ save.
 `diff` prints a unified diff per node of a snapshot (`--from`, default
 the latest) against `previous` (the snapshot before it, the default),
 `startup` (the node's `startup-config` in the topology, inline or a
-file), `latest` or a snapshot name. Lines that change on every save, such
+file inside the topology's folder; a path that leads outside it, also
+through a symlink, is skipped), `latest` or a snapshot name. Lines that change on every save, such
 as cEOS's `! Startup-config last modified at` comment, are ignored. Expect
 a diff against `startup` even without changes: the saved config is the
 whole running config, including defaults and the management interface
@@ -189,16 +194,24 @@ The interface must be one the node uses in the topology's links, or `eth0`
 `docker exec`. For nodes without one, such as `alpine`, clabfleet starts a
 throwaway helper container that shares the node's network namespace
 (`docker run --net container:<node>`). The helper image is
-`nicolaka/netshoot` by default, pulled on first use; set `--helper-image`
-or `CLAB_CAPTURE_IMAGE` to use another image with `tcpdump`, and `--via
-node|helper` to force either way.
+`nicolaka/netshoot`, pinned by digest, pulled on first use; set
+`--helper-image` or `CLAB_CAPTURE_IMAGE` to use another image with
+`tcpdump` and `sh`, and `--via node|helper` to force either way. The
+helper runs with `--log-driver none` (so captured traffic is not copied
+into Docker's log on the host) and modest limits (`--pids-limit 64
+--memory 256m`).
 
 Stopping the local `docker` client does not stop a process inside a
 container, so clabfleet always stops captures explicitly: it kills the
 node's `tcpdump` by PID, or removes the helper container. With
-`--duration`, the node's `tcpdump` also runs under `timeout` (when the node
-has it), so it ends even if clabfleet is killed outright. Like `exec`,
-captures need Docker access on the host, with the same `sudo` retry.
+`--duration`, `tcpdump` also runs under `timeout` (when the node or helper
+image has it), so it ends even if clabfleet is killed outright. A helper
+with a duration is labelled with the time it will have stopped by
+(`clabfleet.capture.expires`); when the GUI starts, it removes helpers
+more than a minute past that time on every host. That leaves the captures
+of other running GUIs and of `clabfleet capture` alone, and never touches
+helpers without a duration. Like `exec`, captures need Docker access on
+the host, with the same `sudo` retry.
 
 ### Check a topology before deploying
 
@@ -293,6 +306,14 @@ The topology and every file it references (startup configs, licenses,
 bind-mount sources, env files) are copied to `~/clabfleet/<lab>/` on the
 host, and containerlab runs there. `destroy` removes that directory.
 
+The first connection to a host remembers its SSH host key in
+`~/.clabfleet/known_hosts` (keys in `~/.ssh/known_hosts` count too), and
+later connections refuse a host whose key has changed, like OpenSSH's
+`StrictHostKeyChecking accept-new`. With `--host-key-policy strict` (or
+`host_key_policy: strict` per host or under `cluster:` in a cluster file)
+only already-known keys are accepted; add them with `ssh-keyscan` or one
+manual `ssh` first.
+
 ## Web GUI
 
 ```bash
@@ -303,7 +324,7 @@ clabfleet --sudo gui                     # this machine
 clabfleet gui --cluster topologies/cluster.yaml   # all cluster hosts
 ```
 
-It opens your browser at a `http://localhost:8650/?token=...` link (also
+It opens your browser at a `http://localhost:8650/#token=...` link (also
 printed in the terminal). Stop it with Ctrl+C.
 
 - **Sidebar:** every `*.clab.yml` under the current directory (or each
@@ -356,6 +377,16 @@ printed in the terminal). Stop it with Ctrl+C.
     kinds such as Cisco IOL. It needs a login on the node: containerlab's
     default configs create `admin`/`admin`, but your own `startup-config`
     must include a user
+
+  Closing a CLI or Shell tab also ends what it started inside the
+  container (the shell, its children and anything else in its session);
+  killing the local `docker exec` alone would leave them running. Open
+  tabs are limited to 16 per user and 64 in all (`--max-user-sessions N`,
+  `--max-sessions N`), and captures (live tabs and downloads together) to
+  4 per user and 8 in all; a tab over the limit says so. A browser that
+  stops reading a tab's output for 30 seconds is disconnected, and the
+  command's output is not read meanwhile, so a stuck tab cannot fill the
+  GUI's memory.
 - **Packet capture:** click a link in the diagram, pick which end to
   capture on, and optionally set a BPF filter, a packet count and a time
   limit (60 seconds by default). **Live** decodes packets in a tab at the
@@ -371,7 +402,9 @@ printed in the terminal). Stop it with Ctrl+C.
 
 Security: terminals are shell access, so the GUI listens on `127.0.0.1`
 only and needs the random token from its start-up URL. Requests from other
-websites are refused. Use `--bind` with care.
+websites are refused. Use `--bind` with care. See
+[Login and sessions](#login-and-sessions) below; they work the same way
+with a single token.
 
 ### Several users on a shared lab server
 
@@ -393,27 +426,36 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   named logins instead of the start-up token. Only SHA-256 hashes of the
   tokens are stored. `user add` and `user rotate` print the token once,
   with a login link (`--url https://lab.example.com:8650` sets its
-  address). Changes apply to a running GUI right away.
-- **Login:** each user opens `https://<server>:8650/?token=<their token>`.
-  The token is swapped for a session cookie (HttpOnly, SameSite=Strict,
-  Secure over HTTPS) that ends after 12 hours idle, on **Log out**, or
-  when the user is removed or rotated. Sessions live in memory, so a GUI
-  restart logs everyone out. The header shows who you are and your role.
+  address). Changes apply to a running GUI right away. A users file that
+  other users could change (group/world-writable, owned by someone else,
+  or in such a directory) is refused and nobody can log in until it is
+  fixed.
+- **Login:** each user opens `https://<server>:8650/#token=<their token>`
+  or pastes their token into the login form. See
+  [Login and sessions](#login-and-sessions). The header shows who you are
+  and your role.
 - **Roles:**
   - `operator`: deploy, redeploy, save and destroy, terminals, YAML edits
     and layout saves
   - `viewer`: topologies, diagrams, YAML, node state, job output and node
-    logs (the Logs tab). Controls they cannot use are hidden. The server
+    logs (the Logs tab) of the labs defined by the workspace's topologies.
+    Viewers cannot see config diffs (configs hold password hashes), open
+    terminals or follow logs of other labs on the hosts, and topology
+    files that are symlinks to somewhere outside the workspace are not
+    shown at all. Controls they cannot use are hidden. The server
     refuses everything else with 403. Any route that is not a plain GET
     is operator-only unless the code marks it otherwise, so new features
     are protected by default.
 - **Audit log:** `audit.jsonl` next to the users file (or `--audit-log
   FILE`; in single-token mode only with `--audit-log`). One JSON object
   per line with `ts`, `user`, `role`, `remote`, `event` and `details`.
-  Events: `login`, `login_failed`, `logout`, `denied`, `job_started`
+  Events: `login`, `login_failed`, `login_throttled` (once per address
+  and minute after 5 failed logins), `logout`, `denied`, `job_started`
   (action, topology, options), `job_finished` (status, seconds),
   `topology_saved`, `positions_saved`, `terminal_opened` and
-  `terminal_closed` (lab, node, mode, host, seconds, exit code). Jobs also
+  `terminal_closed` (lab, node, mode, host, seconds, exit code),
+  `capture_started`, `capture_finished` and `session_revoked` (an open
+  terminal or capture ended because its login no longer holds). Jobs also
   record who started them, shown in the Activity panel.
 
   ```json
@@ -426,14 +468,46 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   `--insecure-http` overrides that with a warning, for trusted networks
   only. Behind a reverse proxy that terminates TLS, keep the GUI on
   `127.0.0.1` and pass `--public-url https://lab.example.com` so the
-  origin check and secure cookies match the address browsers use.
+  origin check and secure cookies match the address browsers use. Over
+  HTTPS the GUI sends `Strict-Transport-Security` (one year), so browsers
+  will then use HTTPS for every port of that host name.
 
-Security notes: an operator can open shells on every node and, through
-`docker exec`, act as the account the GUI runs as on each lab host, so
-make only trusted people operators. Tokens are bearer secrets: anyone with
-a login link is that user until you rotate it. Terminals that are already
-open stay open when a user is removed or rotated; close their tabs (or
-restart the GUI) to cut them off.
+### Login and sessions
+
+- Login links put the token after `#` (`/#token=...`). Browsers do not
+  send that part to the server, so it stays out of access logs and proxy
+  logs; the page posts the token to `/login` and removes it from the
+  address bar. Without a link, the page asks for the token. Old
+  `/?token=...` links still work (they are redirected to the `#` form)
+  but are deprecated: the token in them reaches the server's URL. The
+  access log (`-v`) never shows query strings.
+- `/login` only accepts JSON from the GUI's own origin, so another website
+  cannot log your browser in. A login link of a different user does not
+  replace your session unless you confirm the switch.
+- A login gives the browser a random session id in a cookie (HttpOnly,
+  SameSite=Strict; over HTTPS Secure with the `__Host-` prefix). The token
+  itself is never stored in the browser. The cookie name is unique to each
+  GUI run, because browsers send a host's cookies to all of its ports.
+- A session ends after 12 hours idle, 7 days after login, on **Log out**,
+  or when the user is removed or rotated. Each user keeps at most 20
+  sessions; another login ends the oldest. Sessions live in memory, so a
+  GUI restart logs everyone out.
+- After 5 failed logins from one address within a minute, logins from it
+  are refused (429) for the rest of that minute. Behind a reverse proxy
+  every client shares the proxy's address.
+- Responses carry a Content-Security-Policy (no inline scripts, no
+  framing) and `Cache-Control: no-store` for everything but static files.
+
+Security notes: **operators are effectively root on the lab hosts.** That
+is by design: containerlab runs as root, and an operator can edit and
+deploy a topology that mounts any host path or runs privileged
+containers. They can also open shells on every node and, through
+`docker exec`, act as the account the GUI runs as on each lab host. Make
+only trusted people operators; `viewer` is the role for anyone else.
+Tokens are bearer secrets: anyone with a login link is that user until you
+rotate it. Terminals and captures that are already open are closed
+within a few seconds when their user is removed, rotated, demoted from
+operator or logs out.
 
 For the CLI and Shell buttons, your user must be able to run `docker`
 (member of the `docker` group, in a session started after you were added).
@@ -629,6 +703,11 @@ per node, every interface rename, where the image came from and what
 `--sanitise` changed (counts only, never values). Without `-o` the
 topology is printed with the configs inline.
 
+Without `--sanitise` the configs are saved as they are, with the
+network's passwords, keys and SNMP communities, and export-live says so
+on stderr. Either way `configs/` is created readable by you only (0700),
+and the configs, the topology and the report are written 0600.
+
 ### Device sources
 
 | Source | How |
@@ -647,7 +726,13 @@ topology is printed with the configs inline.
   the platform's NAPALM driver field, else a guess from the platform name
   (`ios`, `eos`, `nxos`, `iosxr`, `junos`, ...); devices with no driver are
   skipped with a warning. Use `--token-env VAR` or `source.token_env` for
-  another token variable.
+  another token variable. The token is only sent to the URL you give:
+  it must be `https://` (a plain `http://` URL needs `--allow-http` or
+  `source.allow_http: true`, and warns), redirects are not followed, and
+  pagination links to another host are refused (links to `http://` on the
+  same host, as a NetBox behind a TLS proxy returns, are fetched from your
+  URL). `source.verify_tls: false` turns certificate checks off, with a
+  warning.
 - **Ansible:** YAML or INI static inventories, including `[group:vars]`,
   `[group:children]`, host ranges such as `leaf[01:04]`, and `group_vars/`
   and `host_vars/` next to the file. Variables merge like Ansible's (`all`,
@@ -663,6 +748,20 @@ topology is printed with the configs inline.
   variable named by `password_env` / `username_env`, then
   `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD`. Passwords and
   tokens are never logged or written to the output.
+- **Allowed networks:** the device login usually works on every device,
+  so whoever can edit a device's address (in NetBox, say) could point it
+  at a machine of theirs and collect the password. `allowed_networks:`
+  in the inventory (a list of CIDRs), or `--allowed-network CIDR`
+  (repeatable), leaves out every device whose address, or any address its
+  name resolves to, is outside them, and lists them in a warning.
+- **Device identity:** NAPALM's drivers do not all check who they talk
+  to. For `ios`, `iosxr` and `nxos_ssh` (SSH through Netmiko) export-live
+  sets `system_host_keys: true`, so a device in your `~/.ssh/known_hosts`
+  whose host key changed is refused; add `ssh_strict: true` to
+  `optional_args` to refuse unknown devices too (connect once with `ssh`
+  first). The `eos` https transport and the `junos` NETCONF driver do not
+  verify the device by default: run imports from a management network you
+  trust and use `allowed_networks`. See `topologies/live_devices_example.yaml`.
 
 ### Kinds and images
 
@@ -712,8 +811,10 @@ ports and logical interfaces (loopbacks, VLANs, port-channels, tunnels,
 subinterfaces) are never mapped. Interfaces beyond a kind's port count
 are listed as dropped in the report: their links are left out and their
 IOS-style config stanzas removed. `--keep-interface-names` turns mapping
-off. A port is only ever used by one link: when the LLDP data of the two
-ends disagrees, the second link is left out with a warning.
+off; names must then be 1-64 letters, digits and `_ . / : -`, and links
+with other names (LLDP data comes from the neighbour) are left out with a
+warning. A port is only ever used by one link: when the LLDP data of the
+two ends disagrees, the second link is left out with a warning.
 
 ### Sanitising configs
 
@@ -722,21 +823,50 @@ and Junos (with it, configs of other platforms are not saved at all):
 
 - **Removed:** `enable secret/password`, all `username` lines, `aaa ...`,
   TACACS+/RADIUS servers and keys, `snmp-server community/user/host`,
-  `crypto pki` / `crypto ca` trustpoints and certificate chains,
-  `key config-key`. Junos: `tacplus-server`, `radius-server`,
-  `authentication-order`, SNMP communities and SNMPv3, SSH public keys.
-- **Replaced with `lab-key`:** OSPF/IS-IS/BGP/HSRP/VRRP authentication keys,
-  key-chain `key-string`, NTP authentication keys, ISAKMP/IKE pre-shared
-  keys, line and other `password`/`secret` values, Junos `$9$` secrets.
-  Both ends get the same value, so authenticated adjacencies still form.
+  `snmp mib community-map`, `crypto pki` / `crypto ca` trustpoints and
+  certificate chains, `key config-key`, PEM private keys, banners,
+  comments, `snmp-server location/contact`. Junos: `tacplus-server`,
+  `radius-server`, `authentication-order`, SNMP communities, SNMPv3,
+  location and contact, SSH public keys, local certificates, login
+  messages, comments.
+- **Replaced with `lab-key`:** OSPF/OSPFv3/IS-IS/BGP/HSRP/VRRP/GLBP/NHRP/
+  PIM/BFD authentication keys (hex keys get a hex placeholder of the right
+  length), key-chain `key-string`, NTP authentication keys, ISAKMP, IKEv2
+  and EzVPN pre-shared keys, WPA PSKs, passwords in URLs
+  (`tftp://user:...@host`), `event manager environment` values,
+  `--token`/`--password` options of EOS daemons, line and other
+  `password`/`secret` values, Junos `$9$`/`$8$` secrets and every quoted
+  value of a statement Junos marks `## SECRET-DATA`. Both ends get the
+  same value, so authenticated adjacencies still form. Descriptions and
+  remarks that mention a password, key or community lose their text.
 - **Management:** addresses on management interfaces (`Management*`,
-  `mgmt0`, `fxp0`, `em0`, or any interface in a management VRF) and static
-  routes in the management VRF are removed; `--mgmt-address dhcp` turns the
-  addresses into DHCP instead, `keep` leaves them.
+  `mgmt0`, `fxp0`, `em0`, or any interface in a management VRF), static
+  routes in the management VRF or via the management subnet, and the
+  Junos management routing instance are removed; `--mgmt-address dhcp`
+  turns the addresses into DHCP instead, `keep` leaves them.
 - **Login:** a placeholder user (`--lab-user` / `--lab-password`, default
   `admin`/`admin`) is added after `hostname` so the node stays reachable.
   Junos keeps its users, but every `encrypted-password` becomes the hash of
   `admin@123` (the vrnetlab default).
+- **Report:** a sanitised import report leaves out the devices' addresses
+  and the LLDP names of neighbour placeholders.
+
+Sanitising is best effort: configs keep secrets in more places than any
+list of commands covers. So every sanitised config is then checked for
+anything that still looks like one (a `password`, `key`, `secret`,
+`community`, `key-string` ... followed by something other than the
+placeholder, crypt hashes such as `$1$` or `$9$`, private keys, passwords
+in URLs, `SECRET-DATA` marks, long hex keys). If any config is flagged,
+nothing is written and export-live lists the node, line and kind of
+secret (never the value); fix or check those lines, or add
+`--allow-residual` to write the configs anyway (the report keeps the
+findings). Review the configs before you share them. Node names are the
+devices' hostnames and placeholders are named after their LLDP system
+names: these are not anonymised.
+
+A re-sync with `--apply` or `--overwrite` over a sanitised import must
+sanitise again: without `--sanitise` it is refused, unless you pass
+`--no-sanitise` to write the configs as they are.
 
 ### Neighbours outside the inventory
 
@@ -792,14 +922,16 @@ fetch (such as `! Last configuration change`) are not a config change.
 | `CLAB_SSH_USER` | your SSH config | SSH username |
 | `CLAB_SSH_KEY` | SSH agent / defaults | SSH private key |
 | `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
+| `CLAB_HOST_KEY_POLICY` | `accept-new` | SSH host key checking for `--host`: `accept-new` or `strict` |
+| `CLAB_NODE_PASSWORD` | `admin` | `exec`: SSH password on the lab nodes |
 | `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
-| `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot:latest` | Image with `tcpdump` for capturing on nodes that have none |
+| `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot@sha256:…` (pinned) | Image with `tcpdump` for capturing on nodes that have none |
 | `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD` | — | `export-live`: device login when the inventory gives none |
-| `NETBOX_TOKEN` / `NAUTOBOT_TOKEN` | — | `export-live`: API token for `--netbox` / `--nautobot` |
+| `NETBOX_TOKEN` / `NAUTOBOT_TOKEN` | — | `export-live`: API token for `--netbox` / `--nautobot` (sent only to that URL, over HTTPS) |
 
 ## Development
 
-Tests run automatically on every pull request (GitHub Actions, Python 3.10, 3.12 and 3.14).
+Tests run automatically on every pull request (GitHub Actions, Python 3.11, 3.12, 3.13 and 3.14).
 
 ```bash
 pip install -e ".[dev]"
@@ -835,6 +967,7 @@ clabfleet/
     auth.py        # Users file, roles, audit log
     state.py       # Topology discovery, running labs, deploy/destroy jobs
     terminals.py   # Local pty, SSH-channel and live capture sessions
+    sessions.py    # Open terminal/capture sessions: limits, revocation
     captures.py    # GUI packet captures: limits, pcap downloads
     editing.py     # Format-preserving saves of topology files
     static/        # Web UI (vanilla JS; xterm.js bundled in vendor/)

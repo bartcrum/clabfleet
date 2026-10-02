@@ -7,6 +7,7 @@ not care where containerlab actually runs.
 """
 
 import logging
+import os
 import posixpath
 import shlex
 import shutil
@@ -158,6 +159,31 @@ class LocalRunner(Runner):
         dest.write_text(text)
 
 
+# How SSHRunner treats a lab host's SSH host key: "accept-new" trusts and
+# remembers a key it has never seen (like OpenSSH's StrictHostKeyChecking
+# accept-new); "strict" only accepts keys already in a known_hosts file. Both
+# refuse a key that differs from the remembered one.
+HOST_KEY_POLICIES = ("accept-new", "strict")
+DEFAULT_KNOWN_HOSTS = "~/.clabfleet/known_hosts"
+
+
+def _remember_new_keys(path: Path):
+    """paramiko policy that accepts an unknown host key and appends it to ``path``."""
+    import paramiko
+
+    class RememberNewKeys(paramiko.MissingHostKeyPolicy):
+        def missing_host_key(self, client, hostname, key):
+            client.get_host_keys().add(hostname, key.get_name(), key)
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "a") as fh:
+                fh.write(f"{hostname} {key.get_name()} {key.get_base64()}\n")
+            logger.warning("New SSH host key for %s (%s %s) saved to %s", hostname,
+                           key.get_name(), getattr(key, "fingerprint", ""), path)
+
+    return RememberNewKeys()
+
+
 class SSHRunner(Runner):
     """Run commands on a remote host over SSH.
 
@@ -174,8 +200,14 @@ class SSHRunner(Runner):
         password: Optional[str] = None,
         sudo: bool = False,
         name: Optional[str] = None,
+        host_key_policy: str = "accept-new",
+        known_hosts: Optional[str] = None,
     ):
         super().__init__(sudo=sudo)
+        if host_key_policy not in HOST_KEY_POLICIES:
+            raise ValueError(f"host_key_policy must be one of {', '.join(HOST_KEY_POLICIES)}")
+        self.host_key_policy = host_key_policy
+        self.known_hosts = Path(known_hosts or DEFAULT_KNOWN_HOSTS).expanduser()
         self.host = host
         self.username = username
         self.port = port
@@ -195,7 +227,12 @@ class SSHRunner(Runner):
 
             ssh = paramiko.SSHClient()
             ssh.load_system_host_keys()
-            ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+            if self.known_hosts.exists():
+                ssh.load_host_keys(str(self.known_hosts))
+            if self.host_key_policy == "strict":
+                ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
+            else:
+                ssh.set_missing_host_key_policy(_remember_new_keys(self.known_hosts))
             kwargs = {"hostname": self.host, "port": self.port, "timeout": 30}
             if self.username:
                 kwargs["username"] = self.username

@@ -3,20 +3,25 @@
 Security: the GUI can open shells on lab nodes, so it only listens on
 localhost by default and every request must be authenticated. Two modes:
 
-- Single token (no users file): the random token printed at startup is
-  exchanged for a SameSite=Strict cookie on first visit, like Jupyter.
-  Whoever has it is an operator.
-- Named users (``clabfleet user add``): each user's own token is exchanged
-  for a server-side session, and the user's role decides what they may do
-  (see ``_allowed``: anything but a plain read needs an operator unless the
-  handler is marked ``allow_viewer``). Logins, jobs, edits and terminal
-  sessions go to the audit log.
+- Single token (no users file): whoever has the random token printed at
+  startup is an operator.
+- Named users (``clabfleet user add``): each user has their own token, and
+  the user's role decides what they may do (see ``_allowed``: anything but
+  a plain read needs an operator unless the handler is marked
+  ``allow_viewer``). Logins, jobs, edits and terminal sessions go to the
+  audit log.
 
-Websocket and POST requests must also come from the GUI's own origin, so
-other websites open in the browser cannot drive it.
+In both modes the token is only sent in the body of ``POST /login`` (login
+links carry it in the URL fragment, which browsers do not send to the
+server) and is exchanged for a random session id in a SameSite=Strict
+cookie; logging out ends the session. Websocket and POST requests must
+also come from the GUI's own origin, so other websites open in the
+browser cannot drive it.
 """
 
 import asyncio
+import contextlib
+import functools
 import hmac
 import json
 import logging
@@ -25,32 +30,51 @@ import socket
 import ssl
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
-from aiohttp import WSMsgType, web
+from aiohttp import WSCloseCode, WSMsgType, web
+from aiohttp.abc import AbstractAccessLogger
 from yarl import URL
 
 from ..capture import GUI_MAX_BYTES, CaptureError
-from ..nodes import access_modes, terminal_command
+from ..nodes import access_modes, run_docker, terminal_command, terminal_stop_command
 from ..snapshots import SnapshotError
 from .auth import (
-    ACCESS_ATTR, OPERATOR, VIEWER, AuditLog, User, UserStore, allow_viewer, operator_only,
+    ACCESS_ATTR, OPERATOR, VIEWER, AuditLog, User, UserStore, allow_viewer, hash_token,
+    login_link, operator_only,
 )
 from .captures import open_capture, pcap_filename, spec_from_query
 from .editing import EditConflict
+from .sessions import (
+    CAPTURE, MAX_SESSIONS, MAX_USER_SESSIONS, TERMINAL, OpenSession, SessionLimitError,
+    SessionRegistry,
+)
 from .state import Job, JobManager, UnloadableTopology, Workspace
 from .terminals import CaptureSession, LocalTerminal, SSHTerminal
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-COOKIE = "clabfleet_token"            # single-token mode: the token itself
-SESSION_COOKIE = "clabfleet_session"  # named users: a session id
+SESSION_COOKIE = "clabfleet_session"  # plus the instance id; "__Host-" prefix over HTTPS
 SESSION_IDLE = 12 * 3600              # seconds without a request before a session ends
+SESSION_MAX_AGE = 7 * 24 * 3600       # seconds after login a session ends regardless
+SESSIONS_PER_USER = 20                # a further login ends that user's oldest session
+LOGIN_FAILURES = 5                    # failed logins allowed per remote address ...
+LOGIN_WINDOW = 60                     # ... in this many seconds; then 429 until it ends
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+PUBLIC_PATHS = {"/", "/login"}        # the page (it shows the login form) and the login
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
+       "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 LOOPBACK_NAMES = ("127.0.0.1", "::1", "localhost")
+SEND_TIMEOUT = 30       # seconds a browser may take to accept output before it is cut off
+CLOSE_TIMEOUT = 3       # seconds to close a websocket politely before dropping the connection
+REVALIDATE_INTERVAL = 5  # seconds between checks that open sessions' logins are still valid
+SHUTDOWN_TIMEOUT = 5    # seconds open requests get to finish when the GUI stops
 
 # request[USER_KEY]: the User making the request (RequestKey needs aiohttp 3.12+)
 USER_KEY = web.RequestKey("user", User) if hasattr(web, "RequestKey") else "clabfleet.user"
@@ -60,11 +84,22 @@ USER_KEY = web.RequestKey("user", User) if hasattr(web, "RequestKey") else "clab
 class _Session:
     name: str
     token_sha256: str  # the token the session came from; rotating it ends the session
+    created: float
     last_seen: float
 
 
+@dataclass
+class _Failures:
+    window_start: float
+    count: int = 0    # failed logins in this window
+    refused: int = 0  # attempts refused with 429 in this window
+
+
 class Auth:
-    """Who a request comes from, in single-token or named-user mode."""
+    """Who a request comes from, in single-token or named-user mode.
+
+    Both modes hand out the same kind of session: a random id in a cookie,
+    mapped to a user here. The token itself never goes into a cookie."""
 
     def __init__(self, token: Optional[str] = None, users: Optional[UserStore] = None,
                  public_url: Optional[str] = None):
@@ -73,49 +108,101 @@ class Auth:
         self.token = token
         self.users = users
         self.public_url = public_url
+        # Browsers send a host's cookies to all of its ports, so each GUI
+        # instance has its own cookie name
+        self.instance = secrets.token_hex(4)
+        self._operator = None if users else User("", OPERATOR, hash_token(token))
         self._sessions: dict[str, _Session] = {}
+        self._failures: dict[str, _Failures] = {}
 
     @property
     def multi_user(self) -> bool:
         return self.users is not None
 
-    def login(self, token: str) -> Optional[tuple[User, str, str]]:
-        """(user, cookie name, cookie value) for a valid login token."""
-        if not self.multi_user:
-            if token and hmac.compare_digest(token, self.token):
-                return User("", OPERATOR), COOKIE, token
-            return None
-        user = self.users.authenticate(token)
-        if not user:
-            return None
-        self._expire()
-        sid = secrets.token_urlsafe(32)
-        self._sessions[sid] = _Session(user.name, user.token_sha256, time.monotonic())
-        return user, SESSION_COOKIE, sid
+    def cookie_name(self, secure: bool) -> str:
+        name = f"{SESSION_COOKIE}_{self.instance}"
+        # The browser only accepts a __Host- cookie with Secure, Path=/ and
+        # no Domain, so nothing else on the host can set or widen it
+        return f"__Host-{name}" if secure else name
 
-    def identify(self, request: web.Request) -> Optional[User]:
-        if not self.multi_user:
-            candidate = request.cookies.get(COOKIE)
-            if candidate and hmac.compare_digest(candidate, self.token):
-                return User("", OPERATOR)
+    def check_token(self, token) -> Optional[User]:
+        """The user a login token belongs to, or None."""
+        if not isinstance(token, str) or not token:
             return None
-        session = self._sessions.get(request.cookies.get(SESSION_COOKIE, ""))
-        if not session or time.monotonic() - session.last_seen > SESSION_IDLE:
+        try:
+            raw = token.encode()
+        except UnicodeEncodeError:  # a lone surrogate from JSON
+            return None
+        if not self.multi_user:
+            return self._operator if hmac.compare_digest(raw, self.token.encode()) else None
+        return self.users.authenticate(token)
+
+    def start_session(self, user: User) -> str:
+        """A new session id for ``user``. Beyond SESSIONS_PER_USER, the
+        user's oldest sessions end."""
+        self._expire()
+        now = time.monotonic()
+        mine = sorted((s.created, sid) for sid, s in self._sessions.items() if s.name == user.name)
+        for _, sid in mine[:max(0, len(mine) - SESSIONS_PER_USER + 1)]:
+            del self._sessions[sid]
+        sid = secrets.token_urlsafe(32)
+        self._sessions[sid] = _Session(user.name, user.token_sha256, now, now)
+        return sid
+
+    def identify(self, request: web.Request, touch: bool = True) -> Optional[User]:
+        """The request's user, or None. ``touch=False`` checks a long-lived
+        request (an open terminal) without counting it as activity."""
+        session = self._sessions.get(self._session_id(request))
+        now = time.monotonic()
+        if not session or self._expired(session, now):
             return None
         # Re-read the user each time: removed or rotated users are out at once
-        user = self.users.get(session.name)
+        user = self.users.get(session.name) if self.multi_user else self._operator
         if not user or not hmac.compare_digest(user.token_sha256, session.token_sha256):
             return None
-        session.last_seen = time.monotonic()
+        if touch:
+            session.last_seen = now
         return user
 
     def logout(self, request: web.Request) -> None:
-        self._sessions.pop(request.cookies.get(SESSION_COOKIE, ""), None)
+        self._sessions.pop(self._session_id(request), None)
+
+    def _session_id(self, request: web.Request) -> str:
+        return request.cookies.get(self.cookie_name(_cookie_secure(request)), "")
+
+    @staticmethod
+    def _expired(session: _Session, now: float) -> bool:
+        return (now - session.last_seen > SESSION_IDLE
+                or now - session.created > SESSION_MAX_AGE)
 
     def _expire(self) -> None:
-        cutoff = time.monotonic() - SESSION_IDLE
-        for sid in [k for k, v in self._sessions.items() if v.last_seen < cutoff]:
+        now = time.monotonic()
+        for sid in [k for k, v in self._sessions.items() if self._expired(v, now)]:
             del self._sessions[sid]
+
+    # --- failed logins, per remote address ---
+
+    def throttled(self, remote: str) -> int:
+        """0 if ``remote`` may try to log in, else how many of its attempts
+        have been refused in the current window (1 for the first)."""
+        entry = self._window(remote)
+        if entry.count < LOGIN_FAILURES:
+            return 0
+        entry.refused += 1
+        return entry.refused
+
+    def login_failed(self, remote: str) -> None:
+        self._window(remote).count += 1
+
+    def _window(self, remote: str) -> _Failures:
+        now = time.monotonic()
+        if len(self._failures) > 1000:  # forget finished windows
+            self._failures = {k: v for k, v in self._failures.items()
+                              if now - v.window_start < LOGIN_WINDOW}
+        entry = self._failures.get(remote)
+        if not entry or now - entry.window_start >= LOGIN_WINDOW:
+            entry = self._failures[remote] = _Failures(now)
+        return entry
 
 
 WORKSPACE = web.AppKey("workspace", Workspace)
@@ -123,14 +210,18 @@ JOBS = web.AppKey("jobs", JobManager)
 AUTH = web.AppKey("auth", Auth)
 AUDIT = web.AppKey("audit", AuditLog)
 CAPTURES = web.AppKey("captures", set)
+SESSIONS = web.AppKey("sessions", SessionRegistry)
+CAPTURE_POOL = web.AppKey("capture_pool", ThreadPoolExecutor)
 
 
 def create_app(workspace: Workspace, token: Optional[str] = None, *,
                users: Optional[UserStore] = None, audit: Optional[AuditLog] = None,
-               public_url: Optional[str] = None) -> web.Application:
+               public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
+               max_user_sessions: int = MAX_USER_SESSIONS) -> web.Application:
     """The GUI app. Pass ``token`` for single-token mode or ``users`` for
     named users; ``public_url`` is the address browsers use when it differs
-    from what the server sees (e.g. behind a TLS-terminating proxy)."""
+    from what the server sees (e.g. behind a TLS-terminating proxy).
+    ``max_sessions``/``max_user_sessions`` cap open terminal tabs."""
     # Topologies with inline startup configs can be large
     app = web.Application(middlewares=[_auth_middleware], client_max_size=16 * 1024 * 1024)
     app[WORKSPACE] = workspace
@@ -140,7 +231,14 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app[JOBS].on_finished = lambda job: _audit_job_finished(audit_log, job)
     app.on_response_prepare.append(_security_headers)
     app[CAPTURES] = set()  # running packet captures, stopped on shutdown
+    app[SESSIONS] = sessions = SessionRegistry(max_user_sessions, max_sessions)
+    # Captures block a thread each while they run: their own pool, so they
+    # can never starve the default one the rest of the GUI uses
+    app[CAPTURE_POOL] = ThreadPoolExecutor(max_workers=2 * sessions.limits[CAPTURE][1] + 2,
+                                           thread_name_prefix="capture")
+    app.cleanup_ctx.append(_watch_sessions)
     app.router.add_get("/", _index)
+    app.router.add_post("/login", _login)
     app.router.add_post("/logout", _logout)
     app.router.add_get("/api/me", _me)
     app.router.add_get("/api/state", _state)
@@ -159,38 +257,66 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/ws/capture", _capture_live)
     app.router.add_static("/static", STATIC_DIR)
     app.on_shutdown.append(_on_shutdown)
+    app.on_cleanup.append(_on_cleanup)
     return app
 
 
 def run(workspace: Workspace, host: str = "127.0.0.1", port: int = 8650,
         open_browser: bool = True, *, users: Optional[UserStore] = None,
         audit: Optional[AuditLog] = None, ssl_context: Optional[ssl.SSLContext] = None,
-        public_url: Optional[str] = None) -> None:
+        public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
+        max_user_sessions: int = MAX_USER_SESSIONS) -> None:
     token = None if users else secrets.token_urlsafe(24)
-    app = create_app(workspace, token, users=users, audit=audit, public_url=public_url)
+    app = create_app(workspace, token, users=users, audit=audit, public_url=public_url,
+                     max_sessions=max_sessions, max_user_sessions=max_user_sessions)
     base = public_url.rstrip("/") if public_url else _base_url(host, port, ssl_context is not None)
 
     async def _announce(_app):
-        if users:
-            url = f"{base}/"
-            lines = [f"clabfleet GUI running at:\n\n    {url}\n",
-                     f"Users log in with their own link from `clabfleet user add`: "
-                     f"{base}/?token=<token>",
-                     f"Users file: {users.path}"]
-            if not users.users():
-                lines.append("No users yet: add one with `clabfleet user add NAME`.")
-        else:
-            url = f"{base}/?token={token}"
-            lines = [f"clabfleet GUI running at:\n\n    {url}\n"]
-        if audit and audit.path:
-            lines.append(f"Audit log: {audit.path}")
-        lines.append("Press Ctrl+C to stop.")
-        print("\n".join(lines), flush=True)
+        url, text = startup_message(base, token, users, audit)
+        print(text, flush=True)
         if open_browser and not users:  # a named user's token is not ours to use
             asyncio.get_running_loop().run_in_executor(None, webbrowser.open, url)
 
+    async def _sweep(_app):
+        # Capture helpers a crashed GUI left behind; in the background, as
+        # remote hosts may be slow to answer
+        asyncio.get_running_loop().run_in_executor(None, workspace.sweep_capture_helpers)
+
     app.on_startup.append(_announce)
-    web.run_app(app, host=host, port=port, ssl_context=ssl_context, print=None)
+    app.on_startup.append(_sweep)
+    # AccessLogger: request lines without query strings (no tokens in logs)
+    web.run_app(app, host=host, port=port, ssl_context=ssl_context, print=None,
+                access_log_class=AccessLogger, shutdown_timeout=SHUTDOWN_TIMEOUT)
+
+
+def startup_message(base: str, token: Optional[str], users: Optional[UserStore],
+                    audit: Optional[AuditLog]) -> tuple[str, str]:
+    """(URL to open, text to print) when the GUI starts."""
+    if users:
+        url = f"{base}/"
+        lines = [f"clabfleet GUI running at:\n\n    {url}\n",
+                 f"Users log in with their own link from `clabfleet user add`: "
+                 f"{login_link(base, '<token>')}",
+                 f"Users file: {users.path}"]
+        if not users.users():
+            lines.append("No users yet: add one with `clabfleet user add NAME`.")
+    else:
+        url = login_link(base, token)
+        lines = [f"clabfleet GUI running at:\n\n    {url}\n"]
+    if audit and audit.path:
+        lines.append(f"Audit log: {audit.path}")
+    lines.append("Press Ctrl+C to stop.")
+    return url, "\n".join(lines)
+
+
+class AccessLogger(AbstractAccessLogger):
+    """aiohttp's access log without query strings: old ``/?token=`` links
+    and websocket parameters stay out of the log."""
+
+    def log(self, request, response, time):
+        self.logger.info('%s "%s %s HTTP/%d.%d" %s %s %.3fs', request.remote, request.method,
+                         request.rel_url.raw_path, *request.version, response.status,
+                         response.body_length, time)
 
 
 def _base_url(host: str, port: int, tls: bool) -> str:
@@ -204,11 +330,20 @@ def _base_url(host: str, port: int, tls: bool) -> str:
 
 
 async def _on_shutdown(app):
-    # Kill tcpdump in the containers before the runners go away
+    # End terminals and captures (their handlers clean up behind them), and
+    # kill tcpdump in the containers before the runners go away
+    await asyncio.gather(*(_end_session(s, WSCloseCode.GOING_AWAY, "the GUI is stopping")
+                           for s in app[SESSIONS]), return_exceptions=True)
+    loop = asyncio.get_running_loop()
     captures = list(app[CAPTURES])
     if captures:
-        await asyncio.gather(*(asyncio.to_thread(c.stop) for c in captures))
+        await asyncio.gather(*(loop.run_in_executor(app[CAPTURE_POOL], c.stop)
+                               for c in captures))
     app[WORKSPACE].close()
+
+
+async def _on_cleanup(app):
+    app[CAPTURE_POOL].shutdown(wait=False, cancel_futures=True)
 
 
 # ----------------------------------------------------------------------
@@ -267,32 +402,12 @@ def _cookie_secure(request: web.Request) -> bool:
 
 @web.middleware
 async def _auth_middleware(request: web.Request, handler):
-    if request.path.startswith("/static/"):
+    if request.path.startswith("/static/") or request.path in PUBLIC_PATHS:
         return await handler(request)
-    auth: Auth = request.app[AUTH]
 
-    query_token = request.query.get("token")
-    if request.path == "/" and query_token is not None:
-        login = auth.login(query_token)
-        if login:
-            # Swap the URL token for a cookie and drop it from the address bar
-            user, name, value = login
-            resp = web.Response(status=302, headers={"Location": "/"})
-            resp.set_cookie(name, value, httponly=True, samesite="Strict",
-                            secure=_cookie_secure(request) or None)
-            request.app[AUDIT].record("login", user, request.remote)
-            return resp
-        request.app[AUDIT].record("login_failed", None, request.remote, reason="invalid token")
-
-    user = auth.identify(request)
+    user = request.app[AUTH].identify(request)
     if not user:
-        if request.path == "/":
-            how = ("your own login link (from <code>clabfleet user add</code>)"
-                   if auth.multi_user else
-                   "the URL (including <code>?token=</code>) printed by <code>clabfleet gui</code>")
-            return web.Response(status=401, content_type="text/html",
-                                text=f"<p>Open the GUI with {how}.</p>")
-        raise web.HTTPUnauthorized(text="missing or invalid token")
+        raise web.HTTPUnauthorized(text="not logged in")
     request[USER_KEY] = user
 
     if request.method != "GET" or _is_websocket(request):
@@ -305,18 +420,65 @@ async def _auth_middleware(request: web.Request, handler):
 
 
 async def _security_headers(request, response):
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    headers = response.headers
+    headers.setdefault("Content-Security-Policy", CSP)
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("Referrer-Policy", "no-referrer")
+    if _cookie_secure(request):
+        headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    if not request.path.startswith("/static/"):
+        headers.setdefault("Cache-Control", "no-store")
+
+
+async def _login(request):
+    """Swap a token for a session cookie: ``{"token": ..., "switch": bool}``.
+
+    Only from the GUI's own origin and as JSON, which a form on another
+    site cannot send. A session of a different user is only replaced with
+    ``switch``, so a stranger's login link cannot quietly swap accounts."""
+    auth: Auth = request.app[AUTH]
+    remote = request.remote or ""
+    if not _same_origin(request):
+        raise web.HTTPForbidden(text="cross-origin request refused")
+    if request.content_type != "application/json":
+        raise web.HTTPUnsupportedMediaType(text="expected JSON")
+    refused = auth.throttled(remote)
+    if refused:
+        if refused == 1:  # one audit line per address and window
+            request.app[AUDIT].record("login_throttled", None, remote,
+                                      failures=LOGIN_FAILURES, seconds=LOGIN_WINDOW)
+        raise web.HTTPTooManyRequests(text="too many failed logins; try again in a minute",
+                                      headers={"Retry-After": str(LOGIN_WINDOW)})
+    body = await _json_body(request)
+    user = auth.check_token(body.get("token"))
+    if not user:
+        auth.login_failed(remote)
+        request.app[AUDIT].record("login_failed", None, remote, reason="invalid token")
+        raise web.HTTPUnauthorized(text="invalid token")
+
+    current = auth.identify(request)
+    if current and current.name != user.name and body.get("switch") is not True:
+        return web.json_response({"error": "logged in as another user",
+                                  "user": current.name}, status=409)
+    auth.logout(request)  # a login always starts a fresh session
+    secure = _cookie_secure(request)
+    resp = web.json_response({"user": user.name or None, "role": user.role})
+    resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
+                    httponly=True, samesite="Strict", secure=secure or None)
+    request.app[AUDIT].record("login", user, remote)
+    return resp
 
 
 @allow_viewer
 async def _logout(request):
-    request.app[AUTH].logout(request)
+    auth: Auth = request.app[AUTH]
+    auth.logout(request)
     audit(request, "logout")
     resp = web.json_response({"ok": True})
-    for name in (COOKIE, SESSION_COOKIE):
-        resp.del_cookie(name)
+    secure = _cookie_secure(request)
+    resp.del_cookie(auth.cookie_name(secure), path="/", secure=secure or None,
+                    httponly=True, samesite="Strict")
     return resp
 
 
@@ -337,6 +499,12 @@ def _audit_job_finished(log: AuditLog, job: Job) -> None:
 # ----------------------------------------------------------------------
 
 async def _index(request):
+    """The page, for anyone: without a session it shows the login form."""
+    token = request.query.get("token")
+    if token is not None:
+        # Deprecated ?token= link: move the token into the fragment, where
+        # the page picks it up and posts it to /login
+        raise web.HTTPFound(f"/#token={quote(token, safe='')}")
     return web.FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 
@@ -451,6 +619,7 @@ async def _save_positions(request):
     return web.json_response(detail)
 
 
+@operator_only  # configs hold password hashes and keys
 async def _node_diff(request):
     """?node=X&against=previous|startup: the node's latest snapshot diff."""
     ws: Workspace = request.app[WORKSPACE]
@@ -490,13 +659,173 @@ async def _job(request):
     job = request.app[JOBS].jobs.get(request.match_info["id"])
     if not job:
         raise web.HTTPNotFound(text="unknown job")
-    offset = int(request.query.get("offset", "0"))
+    try:
+        offset = max(0, int(request.query.get("offset", "0")))
+    except ValueError:
+        raise web.HTTPBadRequest(text="offset must be a whole number")
     return web.json_response(job.view(offset))
 
 
 # ----------------------------------------------------------------------
-# Terminals
+# Long-lived sessions: terminals, live captures, pcap downloads
 # ----------------------------------------------------------------------
+
+def _open_session(request, kind: str, ws_resp=None) -> OpenSession:
+    """Count a new session against the limits (SessionLimitError if over)."""
+    end = functools.partial(_close_ws, ws_resp) if ws_resp is not None else None
+    return request.app[SESSIONS].open(kind, current_user(request), request, end)
+
+
+def _session_ok(entry: OpenSession) -> bool:
+    """Whether the login a session was opened with still holds: the user
+    exists with the same token, has not logged out, and is still an
+    operator if it was one."""
+    user = entry.request.app[AUTH].identify(entry.request, touch=False)
+    return user is not None and (user.is_operator or not entry.user.is_operator)
+
+
+async def _end_session(entry: OpenSession, code: int, reason: str) -> None:
+    if entry.ending or entry.end is None:
+        return
+    entry.ending = True
+    await entry.end(code, reason)
+
+
+async def _close_ws(ws_resp, code: int, reason: str) -> None:
+    """Close a websocket, dropping the connection if the browser does not answer."""
+    if ws_resp.closed:
+        return
+    try:
+        await asyncio.wait_for(_close_politely(ws_resp, code, reason), CLOSE_TIMEOUT)
+    except (asyncio.TimeoutError, ConnectionError, RuntimeError):
+        pass  # aiohttp drops the connection when a close times out
+
+
+async def _close_politely(ws_resp, code: int, reason: str) -> None:
+    await ws_resp.send_bytes(f"\r\n\x1b[31m[{reason}]\x1b[0m\r\n".encode())
+    await ws_resp.close(code=code, message=reason.encode())
+
+
+async def _revalidate_sessions(app) -> None:
+    ended = []
+    for entry in app[SESSIONS]:
+        if not entry.ending and entry.end is not None and not _session_ok(entry):
+            app[AUDIT].record("session_revoked", entry.user, entry.request.remote,
+                              kind=entry.kind, path=entry.request.path)
+            ended.append(_end_session(entry, WSCloseCode.POLICY_VIOLATION,
+                                      "login no longer valid"))
+    if ended:
+        await asyncio.gather(*ended, return_exceptions=True)
+
+
+async def _watch_sessions(app):
+    """Background task: end sessions whose login was removed, rotated or
+    logged out (incoming messages are checked as they arrive, too)."""
+    async def watch():
+        while True:
+            await asyncio.sleep(REVALIDATE_INTERVAL)
+            try:
+                await _revalidate_sessions(app)
+            except Exception:  # noqa: BLE001 - keep watching
+                logger.exception("Session check failed")
+
+    task = asyncio.create_task(watch())
+    yield
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def _refuse(ws_resp, message: str):
+    """Show an error in the tab and end it."""
+    await ws_resp.send_bytes(f"\r\n\x1b[31m{message}\x1b[0m\r\n".encode())
+    await ws_resp.send_str(json.dumps({"t": "exit", "code": -1}))
+    await ws_resp.close()
+    return ws_resp
+
+
+def _clamp_size(cols, rows) -> tuple[int, int]:
+    """Terminal size within sane bounds; TypeError/ValueError/OverflowError
+    for values that are not numbers."""
+    return max(20, min(int(cols), 500)), max(5, min(int(rows), 200))
+
+
+def _parse_message(raw: str) -> Optional[dict]:
+    """A websocket message from the browser: {"t": "i", "d": text} (input)
+    or {"t": "r", "c": cols, "r": rows} (resize). None for anything else."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("t") == "i" and isinstance(data.get("d"), str):
+        return {"t": "i", "d": data["d"]}
+    if data.get("t") == "r":
+        try:
+            cols, rows = _clamp_size(data.get("c"), data.get("r"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return {"t": "r", "c": cols, "r": rows}
+    return None
+
+
+async def _serve_session(request, ws_resp, session, entry: OpenSession,
+                         read_only: bool = False) -> None:
+    """Shuttle a started session's output and the browser's input until either ends."""
+    async def pump_output():
+        async for chunk in session.output():
+            if ws_resp.closed:
+                return
+            try:
+                # aiohttp waits here while the browser is not reading; the
+                # session stops reading its command meanwhile (backpressure)
+                await asyncio.wait_for(ws_resp.send_bytes(chunk), SEND_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("Dropping a %s session of %s: the browser has not read "
+                               "its output for %ss", entry.kind, entry.user.name or "operator",
+                               SEND_TIMEOUT)
+                if request.transport is not None:
+                    request.transport.abort()
+                return
+            except ConnectionError:
+                return
+        if not ws_resp.closed:
+            await ws_resp.send_str(json.dumps({"t": "exit", "code": session.exit_code}))
+            await ws_resp.close()
+
+    pump = asyncio.create_task(pump_output())
+    try:
+        async for msg in ws_resp:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            if not _session_ok(entry):
+                await _end_session(entry, WSCloseCode.POLICY_VIOLATION,
+                                   "login no longer valid")
+                break
+            data = _parse_message(msg.data)
+            if data is None:
+                continue
+            if data["t"] == "i":
+                if read_only:  # viewers' logs take no input
+                    continue
+                if not session.write(data["d"].encode(errors="replace")):
+                    await ws_resp.send_bytes(
+                        b"\r\n\x1b[31m[input dropped: the node is not reading it]\x1b[0m\r\n")
+            else:
+                session.resize(data["c"], data["r"])
+    finally:
+        session.close()
+        pump.cancel()
+
+
+def _stop_terminal(runner, host_sudo: bool, container: str, tag: str) -> None:
+    """End what a closed CLI/shell tab left running in the container."""
+    res = run_docker(runner, terminal_stop_command(container, tag), host_sudo)
+    if res.exit_code != 0:
+        logger.warning("Could not stop terminal processes in %s: %s", container,
+                       (res.stderr or res.stdout).strip()[-300:])
+
 
 @allow_viewer  # but only for the read-only Logs mode, checked below
 async def _terminal(request):
@@ -506,60 +835,57 @@ async def _terminal(request):
     if read_only and mode != "logs":
         audit(request, "denied", method=request.method, path=request.path, mode=mode)
         raise web.HTTPForbidden(text="Viewers can only follow node logs")
+    try:
+        cols, rows = _clamp_size(q.get("cols", "120"), q.get("rows", "30"))
+    except (TypeError, ValueError, OverflowError):
+        raise web.HTTPBadRequest(text="cols and rows must be whole numbers")
 
     ws_resp = web.WebSocketResponse(heartbeat=30)
     await ws_resp.prepare(request)
+    try:
+        entry = _open_session(request, TERMINAL, ws_resp)
+    except SessionLimitError as exc:
+        audit(request, "denied", method=request.method, path=request.path, mode=mode,
+              reason=str(exc))
+        return await _refuse(ws_resp, str(exc))
+    try:
+        return await _run_terminal(request, ws_resp, entry, mode, cols, rows, read_only)
+    finally:
+        request.app[SESSIONS].close(entry)
 
+
+async def _run_terminal(request, ws_resp, entry, mode, cols, rows, read_only):
+    q = request.query
     workspace: Workspace = request.app[WORKSPACE]
-    cols = max(20, min(int(q.get("cols", "120")), 500))
-    rows = max(5, min(int(q.get("rows", "30")), 200))
-
-    async def fail(message: str):
-        await ws_resp.send_bytes(f"\r\n\x1b[31m{message}\x1b[0m\r\n".encode())
-        await ws_resp.send_str(json.dumps({"t": "exit", "code": -1}))
-        await ws_resp.close()
-        return ws_resp
-
     try:
         node = await asyncio.to_thread(workspace.find_node, q.get("lab", ""), q.get("node", ""))
-        argv = terminal_command(mode, node["kind"], node["container"], node["ipv4"])
         host = workspace.host(node["host"])
+        runner = await asyncio.to_thread(workspace.runner, host)
+        # CLI and shell tabs tag their processes so closing the tab can end
+        # them inside the container (the docker client going away does not)
+        tag = secrets.token_hex(8) if mode in ("cli", "shell") else ""
+        argv = terminal_command(mode, node["kind"], node["container"], node["ipv4"], tag)
+        cleanup = (functools.partial(_stop_terminal, runner, host.sudo, node["container"], tag)
+                   if tag else None)
         if host.is_local:
-            session = LocalTerminal(argv, cols, rows)
+            session = LocalTerminal(argv, cols, rows, cleanup, tty=mode != "logs")
         else:
-            client = await asyncio.to_thread(workspace.runner(host).client)
-            session = SSHTerminal(client, argv, cols, rows)
-        session.start(asyncio.get_running_loop())
+            client = await asyncio.to_thread(runner.client)
+            session = SSHTerminal(client, argv, cols, rows, cleanup)
+        await session.start(asyncio.get_running_loop())
     except KeyError as exc:
-        return await fail(exc.args[0])
+        return await _refuse(ws_resp, exc.args[0])
     except Exception as exc:
-        return await fail(str(exc))
-
-    async def pump_output():
-        async for chunk in session.output():
-            if ws_resp.closed:
-                return
-            await ws_resp.send_bytes(chunk)
-        if not ws_resp.closed:
-            await ws_resp.send_str(json.dumps({"t": "exit", "code": session.exit_code}))
-            await ws_resp.close()
+        return await _refuse(ws_resp, str(exc))
 
     where = {"lab": q.get("lab", ""), "node": q.get("node", ""), "mode": mode, "host": node["host"]}
     audit(request, "terminal_opened", **where)
     opened = time.monotonic()
-    pump = asyncio.create_task(pump_output())
     try:
-        async for msg in ws_resp:
-            if msg.type != WSMsgType.TEXT:
-                continue
-            data = json.loads(msg.data)
-            if data.get("t") == "i" and not read_only:  # viewers' logs take no input
-                session.write(data.get("d", "").encode())
-            elif data.get("t") == "r":
-                session.resize(int(data["c"]), int(data["r"]))
+        await _serve_session(request, ws_resp, session, entry, read_only)
     finally:
         session.close()
-        pump.cancel()
+        await session.wait_closed()
         audit(request, "terminal_closed", **where, seconds=round(time.monotonic() - opened, 1),
               exit_code=session.exit_code)
     return ws_resp
@@ -584,21 +910,30 @@ async def _capture_live(request):
     """
     ws_resp = web.WebSocketResponse(heartbeat=30)
     await ws_resp.prepare(request)
+    try:
+        entry = _open_session(request, CAPTURE, ws_resp)
+    except SessionLimitError as exc:
+        audit(request, "denied", method=request.method, path=request.path, reason=str(exc))
+        return await _refuse(ws_resp, str(exc))
+    try:
+        return await _run_capture_live(request, ws_resp, entry)
+    finally:
+        request.app[SESSIONS].close(entry)
+
+
+async def _run_capture_live(request, ws_resp, entry):
     q = request.query
     loop = asyncio.get_running_loop()
-    session = CaptureSession(loop)
+    pool = request.app[CAPTURE_POOL]
+    session = CaptureSession(loop, executor=pool)
 
     try:
         spec = spec_from_query(q, "text")
-        capture, _ = await asyncio.to_thread(open_capture, request.app[WORKSPACE],
-                                             q.get("topo", ""), spec, session.message)
+        capture, _ = await loop.run_in_executor(pool, open_capture, request.app[WORKSPACE],
+                                                q.get("topo", ""), spec, session.message)
     except Exception as exc:
         known = isinstance(exc, (KeyError, ValueError, CaptureError))
-        text = _capture_error(exc).text if known else str(exc)
-        await ws_resp.send_bytes(f"\r\n\x1b[31m{text}\x1b[0m\r\n".encode())
-        await ws_resp.send_str(json.dumps({"t": "exit", "code": -1}))
-        await ws_resp.close()
-        return ws_resp
+        return await _refuse(ws_resp, _capture_error(exc).text if known else str(exc))
 
     captures = request.app[CAPTURES]
     captures.add(capture)
@@ -610,8 +945,8 @@ async def _capture_live(request):
     audit(request, "capture_started", **where)
     started = time.monotonic()
     try:
-        session.start(loop)
-        await _serve_session(ws_resp, session)
+        await session.start(loop)
+        await _serve_session(request, ws_resp, session, entry)
     finally:
         session.close()
         try:
@@ -621,32 +956,6 @@ async def _capture_live(request):
             audit(request, "capture_finished", **where,
                   seconds=round(time.monotonic() - started, 1))
     return ws_resp
-
-
-async def _serve_session(ws_resp, session) -> None:
-    """Shuttle a started session's output and the browser's input until either ends."""
-    async def pump_output():
-        async for chunk in session.output():
-            if ws_resp.closed:
-                return
-            await ws_resp.send_bytes(chunk)
-        if not ws_resp.closed:
-            await ws_resp.send_str(json.dumps({"t": "exit", "code": session.exit_code}))
-            await ws_resp.close()
-
-    pump = asyncio.create_task(pump_output())
-    try:
-        async for msg in ws_resp:
-            if msg.type != WSMsgType.TEXT:
-                continue
-            data = json.loads(msg.data)
-            if data.get("t") == "i":
-                session.write(data.get("d", "").encode())
-            elif data.get("t") == "r":
-                session.resize(int(data["c"]), int(data["r"]))
-    finally:
-        session.close()
-        pump.cancel()
 
 
 def _capture_where(q, spec, mode: str) -> dict:
@@ -668,14 +977,32 @@ async def _capture_download(request):
     Ends at the capture's count or duration, at GUI_MAX_BYTES, or as soon as
     the browser cancels the download; tcpdump is stopped in every case.
     """
+    try:
+        entry = _open_session(request, CAPTURE)
+    except SessionLimitError as exc:
+        audit(request, "denied", method=request.method, path=request.path, reason=str(exc))
+        raise web.HTTPTooManyRequests(text=str(exc))
+    try:
+        return await _run_capture_download(request, entry)
+    finally:
+        request.app[SESSIONS].close(entry)
+
+
+async def _run_capture_download(request, entry):
     q = request.query
+    loop = asyncio.get_running_loop()
+    pool = request.app[CAPTURE_POOL]
     messages: list[str] = []
     try:
         spec = spec_from_query(q, "pcap")
-        capture, lab = await asyncio.to_thread(open_capture, request.app[WORKSPACE],
-                                               q.get("topo", ""), spec, messages.append)
+        capture, lab = await loop.run_in_executor(pool, open_capture, request.app[WORKSPACE],
+                                                  q.get("topo", ""), spec, messages.append)
     except (KeyError, ValueError, CaptureError) as exc:
         raise _capture_error(exc)
+
+    async def end(code, reason):
+        await loop.run_in_executor(pool, capture.stop, reason)
+    entry.end = end
 
     captures = request.app[CAPTURES]
     captures.add(capture)
@@ -684,7 +1011,7 @@ async def _capture_download(request):
     started = time.monotonic()
     sent = 0
     try:
-        read = asyncio.ensure_future(asyncio.to_thread(capture.read))
+        read = loop.run_in_executor(pool, capture.read)
         # tcpdump fails fast on a bad filter: report that as an error
         # rather than as an empty download
         await asyncio.wait({read}, timeout=3)
@@ -708,20 +1035,22 @@ async def _capture_download(request):
             if not chunk:
                 break
             try:
-                await resp.write(chunk)
-            except ConnectionError:
+                await asyncio.wait_for(resp.write(chunk), SEND_TIMEOUT)
+            except (ConnectionError, asyncio.TimeoutError):
                 break
             sent += len(chunk)
             if sent >= GUI_MAX_BYTES:
                 break
-            read = asyncio.ensure_future(asyncio.to_thread(capture.read))
+            read = loop.run_in_executor(pool, capture.read)
+        stop = loop.run_in_executor(pool, capture.stop)  # before the browser sees the end
+        await asyncio.shield(stop)
         if not _client_gone(request):
             await resp.write_eof()
         return resp
     finally:
-        # Shielded: a cancelled handler must still kill tcpdump
+        # Shielded: a cancelled handler must still kill tcpdump (stop() is idempotent)
         try:
-            await asyncio.shield(asyncio.to_thread(capture.stop))
+            await asyncio.shield(loop.run_in_executor(pool, capture.stop))
         finally:
             captures.discard(capture)
             audit(request, "capture_finished", **where,

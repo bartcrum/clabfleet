@@ -81,6 +81,21 @@ def test_cluster_example_loads():
     assert cluster.mtu == 1450
 
 
+def test_cluster_host_key_policy(tmp_path):
+    from clabfleet.cluster import ClusterConfigError, create_runner
+    path = tmp_path / "cluster.yaml"
+    path.write_text(yaml.safe_dump({
+        "cluster": {"host_key_policy": "strict"},
+        "hosts": [{"name": "a", "host": "10.0.0.1"},
+                  {"name": "b", "host": "10.0.0.2", "host_key_policy": "accept-new"}],
+    }))
+    cluster = load_cluster_config(path)
+    assert [h.host_key_policy for h in cluster.hosts] == ["strict", "accept-new"]
+    assert create_runner(cluster.hosts[0]).host_key_policy == "strict"
+    path.write_text(yaml.safe_dump({"hosts": [{"host": "10.0.0.1", "host_key_policy": "yolo"}]}))
+    with pytest.raises(ClusterConfigError, match="host_key_policy"):
+        load_cluster_config(path)
+
 def test_cli_cluster_dry_run_writes_host_files(tmp_path, monkeypatch, capsys):
     # No SSH in tests: use the inventory limits as-is, and another lab holds VNI 1000
     monkeypatch.setattr(deployer, "probe_host_resources", lambda runner, host: {})

@@ -68,6 +68,31 @@ LOG_TAIL_LINES = 2000  # earlier container log lines are skipped in the Logs tab
 
 SHELL_CMD = ["sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l"]
 
+# Killing the local `docker exec` client leaves the shell it started running
+# in the container. So CLI and shell tabs pass a random tag in this variable,
+# which every process they start inherits, and closing the tab runs
+# TERMINAL_STOP in the container: it hangs up (then kills) the tagged
+# processes and the sessions they lead -- never anything untagged.
+TERMINAL_TAG_ENV = "CLABFLEET_TERMINAL"
+TERMINAL_STOP = (
+    f't="{TERMINAL_TAG_ENV}=$1"; '
+    # sid PID: the session of a process (field 4 after "comm) " in /proc/PID/stat)
+    'sid() { read -r st 2>/dev/null <"/proc/$1/stat" || return 1; set -- ${st##*) }; echo "$4"; }; '
+    'for i in 1 2 3 4 5 6 7 8 9 10; do '
+    'tagged=""; leaders=" "; '
+    'for d in /proc/[0-9]*; do p=${d#/proc/}; '
+    'case "$(tr "\\000" "\\n" 2>/dev/null <"$d/environ")" in *"$t"*) '
+    'tagged="$tagged $p"; [ "$(sid "$p")" = "$p" ] && [ "$p" != 1 ] && leaders="$leaders$p "; '
+    'esac; done; '
+    'pids=$tagged; '
+    'if [ "$leaders" != " " ]; then for d in /proc/[0-9]*; do p=${d#/proc/}; '
+    'case "$leaders" in *" $(sid "$p") "*) pids="$pids $p" ;; esac; done; fi; '
+    '[ -n "$pids" ] || exit 0; '
+    'if [ "$i" -le 5 ]; then kill -HUP $pids 2>/dev/null; else kill -KILL $pids 2>/dev/null; fi; '
+    'sleep 0.2; '
+    'done; exit 0'
+)
+
 
 def known_kinds() -> set[str]:
     """Every kind clabfleet has placement estimates or access rules for."""
@@ -88,14 +113,21 @@ def access_modes(kind: str) -> list[str]:
     return ["shell", "ssh"]
 
 
-def terminal_command(mode: str, kind: str, container: str, ipv4: str) -> list[str]:
-    """argv to run (on the node's host) for a terminal tab: cli, shell, ssh or logs."""
+def terminal_command(mode: str, kind: str, container: str, ipv4: str,
+                     tag: str = "") -> list[str]:
+    """argv to run (on the node's host) for a terminal tab: cli, shell, ssh or logs.
+
+    ``tag`` marks the processes of a CLI or shell tab for ``terminal_stop_command``.
+    """
+    exec_it = ["docker", "exec", "-it"]
+    if tag:
+        exec_it += ["-e", f"{TERMINAL_TAG_ENV}={tag}"]
     if mode == "cli":
         if kind not in KIND_CLI:
             raise ValueError(f"No CLI command known for kind '{kind}'")
-        return ["docker", "exec", "-it", container, *KIND_CLI[kind]]
+        return [*exec_it, container, *KIND_CLI[kind]]
     if mode == "shell":
-        return ["docker", "exec", "-it", container, *SHELL_CMD]
+        return [*exec_it, container, *SHELL_CMD]
     if mode == "ssh":
         if not ipv4:
             raise ValueError("Node has no management IPv4 address")
@@ -109,6 +141,11 @@ def terminal_command(mode: str, kind: str, container: str, ipv4: str) -> list[st
         # Works for stopped containers too, which is when logs matter most
         return ["docker", "logs", "--follow", "--tail", str(LOG_TAIL_LINES), container]
     raise ValueError(f"Unknown terminal mode '{mode}'")
+
+
+def terminal_stop_command(container: str, tag: str) -> list[str]:
+    """argv (on the node's host) that ends what a tagged terminal tab started."""
+    return ["docker", "exec", container, "sh", "-c", TERMINAL_STOP, "clabfleet-stop", tag]
 
 
 def parse_inspect(data: dict, host_name: str) -> list[dict]:

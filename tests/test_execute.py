@@ -244,3 +244,27 @@ def test_cli_exec_output_and_exit_code(topo_file, monkeypatch, capsys):
 
     assert cli.main(["exec", str(topo_file), "x", "--nodes", "nope*"]) == 1
     assert "No node of lab 'lab' matches 'nope*'" in capsys.readouterr().err
+
+
+def test_cli_exec_password_sources(topo_file, monkeypatch, capsys):
+    import clabfleet.cli as cli_mod
+    seen = []
+
+    class Executor:
+        def __init__(self, cluster, ssh_user=None, ssh_password=None, **kw):
+            seen.append(ssh_password)
+
+        def run(self, *args, **kw):
+            return {"results": [], "host_errors": {}}
+    monkeypatch.setattr(cli_mod, "LabExecutor", Executor)
+    monkeypatch.setattr(cli_mod.getpass, "getpass", lambda prompt: "typed-pw")
+    cli.main(["exec", str(topo_file), "--ask-password", "uptime"])
+    cli.main(["exec", str(topo_file), "--password", "argv-pw", "uptime"])
+    cli.main(["exec", str(topo_file), "uptime"])      # executor falls back to the env
+    assert seen == ["typed-pw", "argv-pw", None]
+    with pytest.raises(SystemExit):
+        cli.main(["exec", str(topo_file), "--ask-password", "--password", "x", "u"])
+    capsys.readouterr()
+
+    monkeypatch.setenv("CLAB_NODE_PASSWORD", "env-pw")
+    assert LabExecutor(ClusterConfig(hosts=[HostInfo("localhost")])).ssh_password == "env-pw"

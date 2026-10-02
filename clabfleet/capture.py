@@ -14,9 +14,17 @@ bytes (``tcpdump -U -w -``) or a live text decode (``tcpdump -l -nn``).
 Stopping the local ``docker`` client does not stop the process inside the
 container, so every capture is stopped explicitly: the node's tcpdump is
 killed by PID with ``docker exec <node> kill``, and the helper container is
-removed with ``docker rm -f``. With a duration, the node's tcpdump also runs
-under ``timeout`` when the node has it, as a backstop should clabfleet itself
-die before it can stop the capture.
+removed with ``docker rm -f``. With a duration, tcpdump also runs under
+``timeout`` when the node (or helper image) has it, as a backstop should
+clabfleet itself die before it can stop the capture.
+
+Helper containers log nothing (``--log-driver none``: the capture would
+otherwise be copied into Docker's log on the host), run with modest PID and
+memory limits, and carry a ``clabfleet.capture.expires`` label when they have
+a duration. ``sweep_helpers`` removes helpers left behind past that time,
+which is safe while other GUIs or CLI captures are running: no capture
+outlives its own expiry. Helpers without a duration (CLI captures) are never
+swept.
 """
 
 import logging
@@ -25,6 +33,7 @@ import re
 import shlex
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -32,7 +41,7 @@ from typing import Callable, Optional
 from .cluster import ClusterConfig, HostInfo, create_runner
 from .deployer import hosts_for_lab
 from .livestate import linux_iface_names
-from .nodes import DOCKER_DENIED, InspectError, inspect_all, parse_inspect
+from .nodes import DOCKER_DENIED, InspectError, inspect_all, parse_inspect, run_docker
 from .runner import Runner, SSHRunner
 from .topology import Topology
 
@@ -40,9 +49,16 @@ logger = logging.getLogger(__name__)
 
 FORMATS = ("text", "pcap")
 METHODS = ("auto", "node", "helper")
-# Any image with tcpdump and a default entrypoint works; override with
-# --helper-image or CLAB_CAPTURE_IMAGE
-DEFAULT_HELPER_IMAGE = "nicolaka/netshoot:latest"
+# Any image with tcpdump, sh and a default entrypoint works; override with
+# --helper-image or CLAB_CAPTURE_IMAGE. Pinned by digest, so a changed image
+# upstream is never pulled and run with NET_RAW/NET_ADMIN by surprise.
+DEFAULT_HELPER_IMAGE = (
+    "nicolaka/netshoot@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70"
+)
+HELPER_LABEL = "clabfleet.capture"
+HELPER_EXPIRES_LABEL = "clabfleet.capture.expires"  # unix time the backstop stops it by
+HELPER_LIMITS = ["--log-driver", "none", "--pids-limit", "64", "--memory", "256m"]
+SWEEP_GRACE = 60  # seconds past its expiry before a helper counts as left behind
 MGMT_INTERFACE = "eth0"
 MAX_FILTER_LEN = 1024
 # Linux interface names: at most 15 characters, and never an option
@@ -173,20 +189,25 @@ def tcpdump_args(spec: CaptureSpec) -> list[str]:
 
 
 def capture_command(spec: CaptureSpec, container: str, method: str,
-                    helper_image: str = DEFAULT_HELPER_IMAGE, name: str = "") -> list[str]:
+                    helper_image: str = DEFAULT_HELPER_IMAGE, name: str = "",
+                    now: Optional[float] = None) -> list[str]:
     """argv (on the node's host) that streams the capture to stdout."""
     tcpdump = tcpdump_args(spec)
+    backstop = int(spec.duration + BACKSTOP_GRACE) if spec.duration else 0
+    wrapped = ["sh", "-c", NODE_WRAPPER, "clabfleet-capture", str(backstop), *tcpdump]
     if method == "node":
-        backstop = int(spec.duration + BACKSTOP_GRACE) if spec.duration else 0
-        return ["docker", "exec", container, "sh", "-c", NODE_WRAPPER, "clabfleet-capture",
-                str(backstop), *tcpdump]
+        return ["docker", "exec", container, *wrapped]
     if method == "helper":
         if not name:
             raise ValueError("A helper container needs a name")
-        return ["docker", "run", "--rm", "--name", name, "--label", "clabfleet.capture=1",
+        labels = ["--label", f"{HELPER_LABEL}=1"]
+        if backstop:
+            expires = int((time.time() if now is None else now) + backstop)
+            labels += ["--label", f"{HELPER_EXPIRES_LABEL}={expires}"]
+        return ["docker", "run", "--rm", "--name", name, *labels, *HELPER_LIMITS,
                 "--network", f"container:{container}",
                 "--cap-add", "NET_RAW", "--cap-add", "NET_ADMIN",
-                helper_image, *tcpdump]
+                helper_image, *(wrapped if backstop else tcpdump)]
     raise ValueError(f"Unknown capture method '{method}'")
 
 
@@ -200,6 +221,31 @@ def stop_command(method: str, container: str, name: str = "",
     if method == "helper":
         return ["docker", "rm", "-f", name]
     raise ValueError(f"Unknown capture method '{method}'")
+
+
+def sweep_helpers(runner: Runner, host_sudo: bool = False,
+                  now: Optional[float] = None) -> list[str]:
+    """Remove capture helpers left behind on a host (see the module notes).
+
+    Only helpers past their expiry label by ``SWEEP_GRACE`` go, so captures
+    of other GUIs or of ``clabfleet capture`` are left alone. Returns the
+    names removed.
+    """
+    now = time.time() if now is None else now
+    fmt = '{{.Names}}\t{{.Label "%s"}}' % HELPER_EXPIRES_LABEL
+    res = run_docker(runner, ["docker", "ps", "-a", "--filter", f"label={HELPER_LABEL}=1",
+                              "--format", fmt], host_sudo)
+    if res.exit_code != 0:
+        raise CaptureError(f"docker ps failed on {runner.name}: "
+                           f"{(res.stderr or res.stdout).strip()[-300:]}")
+    stale = []
+    for line in res.stdout.splitlines():
+        name, _, expires = line.partition("\t")
+        if expires.strip().isdigit() and int(expires) + SWEEP_GRACE < now:
+            stale.append(name.strip())
+    if stale:
+        run_docker(runner, ["docker", "rm", "-f", *stale], host_sudo)
+    return stale
 
 
 def sudo_prefix(runner: Runner) -> list[str]:
@@ -493,7 +539,17 @@ class Capture:
                 logger.warning("Could not stop capture on %s: %s", self.container, exc)
         elif self.method == "node":
             logger.debug("No tcpdump PID seen for %s; nothing to kill", self.container)
-        code = self._proc.wait(5)
+        code = self._proc.wait(1 if self.method == "helper" else 5)
+        for _ in range(5 if self.method == "helper" and code is None else 0):
+            # Stopped while `docker run` was still creating the helper, so
+            # the first `docker rm -f` found nothing to remove: try again
+            try:
+                self._docker(argv)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Could not remove helper %s: %s", self.name, exc)
+            code = self._proc.wait(1)
+            if code is not None:
+                break
         if code is None:
             logger.debug("Capture client still running after stop; closing it")
         elif self.exit_code is None:

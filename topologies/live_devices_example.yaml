@@ -11,6 +11,20 @@
 #
 # Run it again later to see what changed in the network (nothing is written
 # until you add --apply).
+#
+# --sanitise is best effort: export-live refuses to write configs that still
+# look like they hold secrets (--allow-residual overrides), but review them
+# before sharing. Without --sanitise the configs hold production secrets;
+# they are written readable by you only.
+
+# Only connect to devices whose address (or every address a name resolves
+# to) is in these networks. Recommended with NetBox/Nautobot: whoever can
+# change a device's primary IP there could otherwise collect the shared
+# device password. --allowed-network CIDR adds to the list.
+#
+# allowed_networks:
+#   - "10.0.0.0/8"
+#   - "2001:db8::/32"
 
 # Shared by every device; a device's own keys win. Instead of a password in
 # the file, name an environment variable with password_env, or set
@@ -19,9 +33,18 @@ defaults:
   username: "admin"
   password_env: "PROD_NET_PASSWORD"
 
+# NAPALM optional_args, per device or in defaults:. For the SSH drivers
+# (ios, iosxr, nxos_ssh) export-live sets system_host_keys: true, so a
+# device in ~/.ssh/known_hosts whose host key changed is refused. Stricter:
+# ssh_strict: true also refuses devices that are not in known_hosts yet
+# (connect once with ssh first). The eos https transport and the junos
+# driver do not verify the device: use allowed_networks and a management
+# network you trust.
 devices:
   - hostname: "core-rtr-01.example.com"
     platform: "ios"           # NAPALM driver
+    optional_args:
+      ssh_strict: true        # only devices already in ~/.ssh/known_hosts
 
   - hostname: "core-rtr-02.example.com"
     platform: "ios"
@@ -75,7 +98,7 @@ images:
 #
 # source:
 #   type: netbox                     # or nautobot
-#   url: "https://netbox.example.com"
+#   url: "https://netbox.example.com"  # the token is only sent here; no redirects
 #   token_env: "NETBOX_TOKEN"        # default NETBOX_TOKEN / NAUTOBOT_TOKEN
 #   filters:                         # passed to /api/dcim/devices/
 #     site: "dc1"                    # Nautobot: location
@@ -83,7 +106,8 @@ images:
 #     tag: "lab-import"
 #   platform_map:                    # platform slug (Nautobot: name) → NAPALM driver
 #     cisco-ios-xe: "ios"
-#   verify_tls: true
+#   verify_tls: true                 # false: no certificate check (warns)
+#   allow_http: false                # true: allow an http:// URL (warns)
 #
 # source:
 #   type: ansible

@@ -140,7 +140,8 @@ def test_gui_runtime_reports_readiness_from_background_probes(tmp_path, monkeypa
     monkeypatch.setattr(ws, "runner", lambda h: host)
 
     def states():
-        return {c["node"]: (c["ready"], c["ready_detail"]) for c in ws.runtime()[0].containers}
+        containers = ws.runtime(max_age=0)[0].containers  # not the cached result
+        return {c["node"]: (c["ready"], c["ready_detail"]) for c in containers}
 
     assert states() == {"sw": (None, "checking"), "pc": (None, "checking")}
     for _ in range(100):

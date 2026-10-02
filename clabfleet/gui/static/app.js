@@ -50,6 +50,7 @@ async function api(path, opts = {}) {
     ...opts,
     headers: opts.body ? { "Content-Type": "application/json" } : undefined,
   });
+  if (res.status === 401) showLogin("Your session has ended. Log in again.");
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
   return res.json();
 }
@@ -1059,7 +1060,7 @@ function renderNodeCard() {
       h("button", { class: "close", title: "Close", onclick: () => selectNode(null) }, "×")),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
     openButtons(lab, node.name, node.modes, running, !!rt),
-    S.selected?.type === "topo" && h("span", { class: "open diff-open" },
+    S.selected?.type === "topo" && canOperate() && h("span", { class: "open diff-open" },
       h("button", {
         class: "btn small ghost",
         title: `Diff ${node.name}'s config in the latest snapshot`,
@@ -1507,8 +1508,64 @@ async function loadMe() {
   const who = $("#whoami");
   who.hidden = !S.me.multi_user;
   who.replaceChildren(h("b", {}, S.me.user || ""), ` · ${S.me.role}`);
-  $("#logout").hidden = !S.me.multi_user;
+  $("#logout").hidden = false;  // ends the session in both modes
   renderRuntimeOverlays();
+}
+
+// Login links carry the token in the URL fragment (#token=...), which the
+// browser does not send to the server. It is posted to /login instead and
+// dropped from the address bar.
+async function postLogin(token, switchUser = false) {
+  const res = await fetch("/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, switch: switchUser }),
+  });
+  if (res.status === 409) {
+    // Logged in as someone else: only switch if the user says so
+    const { user } = await res.json();
+    if (confirm(`You are logged in as ${user}. Log in as the user of this link instead?`)) {
+      await postLogin(token, true);
+    }
+    return;
+  }
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+}
+
+function showLogin(message) {
+  $("#login").hidden = false;
+  const err = $("#login-error");
+  err.textContent = message || "";
+  err.hidden = !message;
+  $("#login-token").focus();
+}
+
+async function boot() {
+  $("#login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    try {
+      await postLogin($("#login-token").value.trim());
+      location.replace("/");
+    } catch (e) {
+      showLogin(e.message);
+    }
+  });
+  const token = new URLSearchParams(location.hash.slice(1)).get("token");
+  if (token !== null) {
+    history.replaceState(null, "", location.pathname + location.search);
+    try {
+      await postLogin(token);
+    } catch (e) {
+      showLogin(e.message);
+      return;
+    }
+  }
+  const res = await fetch("/api/me");
+  if (res.status === 401) {
+    showLogin();
+    return;
+  }
+  setup();
 }
 
 async function logout() {
@@ -1546,4 +1603,4 @@ function setup() {
   setInterval(() => { if (!document.hidden) refreshHosts(); }, 30000);
 }
 
-setup();
+boot();

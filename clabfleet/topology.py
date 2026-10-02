@@ -87,6 +87,11 @@ DEFAULT_RESOURCES = (1.0, 512)
 FILE_PROPERTIES = ("startup-config", "license")
 LIST_FILE_PROPERTIES = ("env-files",)
 
+# Lab and node names become directory and container names on lab hosts
+# (clab-<lab>/<node>, clab-<lab>-<node>), so keep them path-safe: Docker's
+# container-name characters, not starting with '.', '-' or '_'.
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
 
 class TopologyError(Exception):
     """Raised when a topology file is invalid."""
@@ -241,11 +246,26 @@ class Topology:
                     "not copied to remote hosts", rel,
                 )
                 continue
+            if self.links_outside(rel):
+                logger.warning(
+                    "Skipping '%s': it is a symlink to a file outside the topology "
+                    "directory, which is not copied to remote hosts", rel,
+                )
+                continue
             if not (self.base_dir / rel).exists():
                 logger.warning("Referenced file not found: %s", self.base_dir / rel)
                 continue
             result.append(Path(rel))
         return result
+
+    def links_outside(self, rel: PurePosixPath) -> bool:
+        """Whether a relative file resolves (through symlinks) outside base_dir.
+
+        A downloaded lab could otherwise point ``configs/r1.cfg`` at
+        ``~/.ssh/id_rsa`` and have a remote deploy upload it.
+        """
+        base = self.base_dir.resolve()
+        return not (base / rel).resolve().is_relative_to(base)
 
     def to_yaml(self) -> str:
         return dump_yaml(self.data)
@@ -295,8 +315,7 @@ def topology_from_dict(data: dict, base_dir: str | Path = ".") -> Topology:
         raise TopologyError("Topology file must be a YAML mapping")
     if not data.get("name"):
         raise TopologyError("Topology is missing the top-level 'name' field")
-    # The name becomes a directory on lab hosts, so keep it path-safe
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", str(data["name"])):
+    if not NAME_RE.fullmatch(str(data["name"])):
         raise TopologyError(
             f"Invalid lab name '{data['name']}' — use letters, digits, '-', '_' and '.'"
         )
@@ -309,6 +328,11 @@ def topology_from_dict(data: dict, base_dir: str | Path = ".") -> Topology:
     topo = Topology(data=data, base_dir=Path(base_dir))
     groups = section.get("groups") or {}
     for name in topo.nodes:
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+            raise TopologyError(
+                f"Invalid node name '{name}' — use letters, digits, '-', '_' and '.', "
+                "starting with a letter or digit"
+            )
         group = (topo.nodes[name] or {}).get("group")
         if group and group not in groups:
             raise TopologyError(f"Node '{name}' references unknown group '{group}'")

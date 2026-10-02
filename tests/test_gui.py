@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -47,6 +48,58 @@ def test_find_topologies_skips_lab_and_hidden_dirs(tmp_path):
     (other / "three.clab.yml").write_text(TOPO)
     ids = find_topologies([tmp_path / "labs", other])
     assert sorted(ids) == ["labs/one.clab.yml", "other/three.clab.yml"]
+
+
+def test_find_topologies_ignores_symlinks_out_of_the_workspace(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.clab.yml").write_text(TOPO)
+    root = tmp_path / "ws"
+    (root / "labs").mkdir(parents=True)
+    (root / "labs" / "real.clab.yml").write_text(TOPO)
+    (root / "evil.clab.yml").symlink_to(outside / "secret.clab.yml")
+    (root / "alias.clab.yml").symlink_to(root / "labs" / "real.clab.yml")  # inside: fine
+    (root / "linked-dir").symlink_to(outside)  # not walked into
+    assert sorted(find_topologies([root])) == ["alias.clab.yml", "labs/real.clab.yml"]
+
+    # Swapped for a symlink after the scan: refused when it is read
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [root])
+    ws.topologies()
+    (root / "labs" / "real.clab.yml").unlink()
+    (root / "labs" / "real.clab.yml").symlink_to(outside / "secret.clab.yml")
+    with pytest.raises(KeyError, match="outside the workspace"):
+        ws.topology_detail("labs/real.clab.yml")
+
+
+def test_find_node_only_in_workspace_labs(tmp_path, monkeypatch):
+    (tmp_path / "t.clab.yml").write_text(TOPO)
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    containers = [{"lab": lab, "node": "a", "kind": "linux", "container": f"clab-{lab}-a",
+                   "ipv4": "", "host": "localhost"} for lab in ("t", "private")]
+    monkeypatch.setattr(Workspace, "runtime", lambda self: [
+        state.HostState("localhost", ok=True, containers=containers)])
+    assert ws.find_node("t", "a")["container"] == "clab-t-a"
+    with pytest.raises(KeyError, match="not in this workspace"):
+        ws.find_node("private", "a")
+
+    # A viewer cannot follow logs of a lab that is not in the workspace
+    from clabfleet.gui.auth import UserStore
+    users = UserStore(tmp_path / "users.yaml")
+    viewer = users.add("bob", "viewer")
+
+    async def scenario():
+        app = server.create_app(ws, users=users)
+        async with TestClient(TestServer(app)) as client:
+            client.session.cookie_jar.clear()
+            await client.post("/login", json={"token": viewer})
+            sock = await client.ws_connect("/ws/terminal?lab=private&node=a&mode=logs")
+            out = b""
+            async for msg in sock:
+                if msg.type.name == "BINARY":
+                    out += msg.data
+            return out.decode()
+
+    assert "not in this workspace" in asyncio.run(scenario())
 
 
 def test_topology_view_links_and_special_endpoints():
@@ -200,6 +253,23 @@ def test_job_history_keeps_newest(tmp_path):
     assert state.JobHistory(None).load() == []
 
 
+def test_job_history_is_private_and_not_redirected(tmp_path):
+    jobs = tmp_path / "jobs"
+    jobs.mkdir(mode=0o755)
+    jobs.chmod(0o755)
+    target = tmp_path / "victim"
+    target.write_text("untouched")
+    (jobs / ".j1.tmp").symlink_to(target)  # the old fixed temporary name
+    (jobs / "planted.json").symlink_to(target)
+    history = state.JobHistory(jobs)
+    history.save(state.Job("j1", "save", "t", status="ok", lines=["x"]))
+    assert target.read_text() == "untouched"
+    assert stat.S_IMODE(jobs.stat().st_mode) == 0o700
+    assert stat.S_IMODE((jobs / "j1.json").stat().st_mode) == 0o600
+    assert not [p for p in jobs.iterdir() if p.name.endswith(".tmp") and not p.is_symlink()]
+    assert [(j.id, j.lines) for j in history.load()] == [("j1", ["x"])]
+
+
 def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
     ws = _workspace(tmp_path)
     monkeypatch.setattr(Workspace, "runtime", lambda self: [])
@@ -208,11 +278,11 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
         app = server.create_app(ws, "secret-token")
         async with TestClient(TestServer(app)) as client:
             assert (await client.get("/api/state")).status == 401
-            assert (await client.get("/")).status == 401
-            assert (await client.get("/?token=wrong", allow_redirects=False)).status == 401
+            assert (await client.get("/")).status == 200  # the page, with its login form
+            assert (await client.post("/login", json={"token": "wrong"})).status == 401
 
-            resp = await client.get("/?token=secret-token", allow_redirects=False)
-            assert resp.status == 302
+            resp = await client.post("/login", json={"token": "secret-token"})
+            assert resp.status == 200
             assert "SameSite=Strict" in resp.headers["Set-Cookie"]
 
             resp = await client.get("/api/state")
@@ -277,7 +347,7 @@ def test_logs_terminal_over_websocket(tmp_path, monkeypatch):
     async def scenario():
         app = server.create_app(ws, "tok")
         async with TestClient(TestServer(app)) as client:
-            await client.get("/?token=tok", allow_redirects=False)
+            await client.post("/login", json={"token": "tok"})
             sock = await client.ws_connect("/ws/terminal?lab=l&node=r1&mode=logs&cols=80&rows=24")
             output, exit_msg = b"", None
             async for msg in sock:

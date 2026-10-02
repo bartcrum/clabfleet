@@ -14,12 +14,17 @@ be tested with recorded data and compared with an existing topology
   ``images:`` rules from the inventory, then the platform default)
 - maps interface names to the kind's naming (``clabfleet.ifmap``) in links
   and configs
-- optionally sanitises configs (``clabfleet.sanitise``)
+- optionally sanitises configs (``clabfleet.sanitise``), and then refuses
+  to go on if a config still looks like it holds a secret, unless told to
 - optionally adds LLDP neighbours that are not in the inventory as
   placeholder ``linux`` nodes
+
+Configs hold production secrets unless sanitised, so the configs, the
+topology and the report are written readable by their owner only.
 """
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,8 +33,8 @@ from typing import Optional
 import yaml
 
 from . import ifmap
-from .inventory import Rule, first_match
-from .sanitise import SanitiseOptions, sanitise_config
+from .inventory import Rule, first_match, printable
+from .sanitise import SanitiseOptions, residual_secrets, sanitise_config
 from .topology import dump_yaml
 
 logger = logging.getLogger(__name__)
@@ -51,10 +56,34 @@ PLATFORM_KIND_MAP = {
 PLACEHOLDER_IMAGE = "REPLACE-ME/{kind}:latest"
 DEFAULT_NEIGHBOUR_IMAGE = "alpine:3"
 CONFIG_DIR = "configs"
+# NAPALM optional_args set unless the inventory gives them. The SSH-based
+# drivers (Netmiko) then check host keys against ~/.ssh/known_hosts: a known
+# device whose key changed is refused, an unknown one is still accepted
+# (set ssh_strict: true to refuse those too).
+SAFE_OPTIONAL_ARGS = {
+    "ios": {"system_host_keys": True},
+    "iosxr": {"system_host_keys": True},
+    "nxos_ssh": {"system_host_keys": True},
+}
+# Interface names taken as they are (--keep-interface-names)
+KEPT_IFACE_RE = re.compile(r"^[A-Za-z0-9_./:-]{1,64}$")
 
 
 class ExportError(Exception):
     """Raised when an export operation fails."""
+
+
+class ResidualSecretsError(ExportError):
+    """Sanitised configs that still look like they hold secrets."""
+
+    def __init__(self, findings: dict[str, list[tuple[int, str]]]):
+        self.findings = findings
+        lines = [printable(f"  {node}: line {n} ({category})")
+                 for node, found in findings.items() for n, category in found]
+        super().__init__(
+            "sanitised configs still look like they hold secrets (values not shown):\n"
+            + "\n".join(lines) + "\nNothing written. Check those lines in the device "
+            "configs; --allow-residual writes the configs anyway.")
 
 
 @dataclass
@@ -74,6 +103,7 @@ class ExportOptions:
     image_rules: list[Rule] = field(default_factory=list)
     map_interfaces: bool = True
     sanitise: Optional[SanitiseOptions] = None            # None: keep configs as they are
+    allow_residual: bool = False                          # write configs the check flags
     include_neighbours: bool = False
     neighbour_image: str = DEFAULT_NEIGHBOUR_IMAGE
     inline_configs: bool = False                          # embed configs, no files
@@ -106,14 +136,15 @@ def collect_devices(devices: list[dict]) -> list[DeviceData]:
     for dev_def in devices:
         hostname = dev_def["hostname"]
         platform = dev_def["platform"]
-        logger.info("Connecting to %s (%s)", hostname, platform)
+        logger.info("Connecting to %s (%s)", printable(hostname), printable(platform))
         try:
             driver = get_network_driver(platform)
             device = driver(
                 hostname=hostname,
                 username=dev_def["username"],
                 password=dev_def["password"],
-                optional_args=dev_def.get("optional_args", {}),
+                optional_args={**SAFE_OPTIONAL_ARGS.get(platform, {}),
+                               **(dev_def.get("optional_args") or {})},
             )
             device.open()
             try:
@@ -123,7 +154,8 @@ def collect_devices(devices: list[dict]) -> list[DeviceData]:
             finally:
                 device.close()
         except Exception as exc:
-            logger.error("Failed to collect data from %s: %s", hostname, exc)
+            logger.error("Failed to collect data from %s: %s", printable(hostname),
+                         printable(exc))
             continue
         spec = {k: v for k, v in dev_def.items()
                 if k not in ("username", "password", "optional_args")}
@@ -196,9 +228,7 @@ def build_topology(collected: list[DeviceData], options: ExportOptions) -> Impor
         nodes[name] = node
         for alias in (dev.spec["hostname"], dev.spec.get("name"), dev.facts.get("hostname"),
                       dev.facts.get("fqdn")):
-            if alias:
-                aliases.setdefault(str(alias).lower(), name)
-                aliases.setdefault(str(alias).lower().split(".")[0], name)
+            _add_alias(aliases, alias, name)
 
     # LLDP adjacencies, with original interface names
     raw_links: list[tuple[str, str, str, str]] = []
@@ -211,21 +241,30 @@ def build_topology(collected: list[DeviceData], options: ExportOptions) -> Impor
         for local_iface in sorted(lldp, key=ifmap.natural_key):
             if ifmap.is_management(local_iface):
                 logger.info("Skipping LLDP neighbours on management port %s:%s",
-                            node.name, local_iface)
+                            node.name, printable(local_iface))
                 continue
             for neigh in lldp[local_iface] or []:
                 remote = _remote_node(neigh, aliases, nodes, options, placeholders)
-                remote_iface = neigh.get("remote_port") or ""
+                remote_iface = str(neigh.get("remote_port") or "")
                 if remote and not remote_iface and remote in placeholders:
                     remote_iface = f"to-{node.name}-{local_iface}"
                 if not remote or not remote_iface:
                     logger.info("Skipping LLDP neighbour %r on %s:%s (not in inventory)",
-                                neigh.get("remote_system_name"), node.name, local_iface)
+                                neigh.get("remote_system_name"), node.name,
+                                printable(local_iface))
                     continue
                 if remote not in placeholders and ifmap.is_management(remote_iface):
                     logger.info("Skipping management link %s:%s -- %s:%s",
-                                node.name, local_iface, remote, remote_iface)
+                                node.name, printable(local_iface), remote,
+                                printable(remote_iface))
                     continue
+                if not options.map_interfaces:
+                    bad = [i for i in (local_iface, remote_iface) if not KEPT_IFACE_RE.match(i)]
+                    if bad:
+                        warnings.append(
+                            f"link {node.name}:{local_iface} -- {remote}:{remote_iface} left "
+                            f"out: {', '.join(map(repr, bad))} is not a usable interface name")
+                        continue
                 key = frozenset([(node.name, ifmap.canonical(local_iface)),
                                  (remote, ifmap.canonical(remote_iface))])
                 if key in seen:
@@ -268,17 +307,30 @@ def build_topology(collected: list[DeviceData], options: ExportOptions) -> Impor
 
     # Configs
     configs: dict[str, str] = {}
+    residual: dict[str, list[tuple[int, str]]] = {}
     for node in nodes.values():
         if node.device is None:
             continue
         text = _node_config(node, options, warnings)
         if text is None:
             continue
+        if options.sanitise is not None:
+            found = residual_secrets(text, options.sanitise)
+            if found:
+                residual[node.name] = found
+                node.report["sanitised"]["residual"] = [
+                    {"line": n, "category": category} for n, category in found]
         if options.inline_configs:
             node.data["startup-config"] = text
         else:
             configs[node.name] = text
             node.data["startup-config"] = f"{CONFIG_DIR}/{node.name}.cfg"
+
+    if residual and not options.allow_residual:
+        raise ResidualSecretsError(residual)
+    for name, found in residual.items():
+        warnings.append(f"{name}: config may still hold secrets at line(s) "
+                        f"{', '.join(f'{n} ({c})' for n, c in found)} (--allow-residual)")
 
     missing = [n.name for n in nodes.values()
                if str(n.data.get("image", "")).startswith("REPLACE-ME/")]
@@ -286,12 +338,15 @@ def build_topology(collected: list[DeviceData], options: ExportOptions) -> Impor
         warnings.append(f"no image for {', '.join(missing)}: set 'image' on the device or "
                         "add an images: rule to the inventory")
 
+    # Device and LLDP strings end up in warnings: no terminal escapes
+    warnings[:] = [printable(w) for w in warnings]
     topo = {
         "name": options.lab_name,
         "topology": {"nodes": {n.name: n.data for n in nodes.values()}, "links": links},
     }
     report = {
         "lab": options.lab_name,
+        "sanitised": options.sanitise is not None,
         "nodes": {n.name: n.report for n in nodes.values()},
         "warnings": warnings,
     }
@@ -313,7 +368,9 @@ def _device_node(name: str, dev: DeviceData, options: ExportOptions, warnings) -
         "hostname": spec["hostname"],
         "name": name,
     }
-    report: dict = {"source": spec["hostname"], "platform": platform}
+    # A sanitised import does not record the device's management address
+    report: dict = {} if options.sanitise is not None else {"source": spec["hostname"]}
+    report["platform"] = platform
     for key in ("vendor", "model", "version"):
         if attrs[key]:
             report[key] = attrs[key]
@@ -353,22 +410,34 @@ def _device_node(name: str, dev: DeviceData, options: ExportOptions, warnings) -
 def _remote_node(neigh: dict, aliases: dict, nodes: dict, options: ExportOptions,
                  placeholders: list) -> Optional[str]:
     """Node name for an LLDP neighbour; creates a placeholder if allowed."""
-    remote_sys = str(neigh.get("remote_system_name") or "").lower()
-    found = aliases.get(remote_sys) or aliases.get(remote_sys.split(".")[0])
+    remote_sys = str(neigh.get("remote_system_name") or "").strip().lower()
+    # An empty name (or ".example.com") must not match a device by accident
+    found = remote_sys.split(".")[0] and (aliases.get(remote_sys)
+                                          or aliases.get(remote_sys.split(".")[0]))
     if found or not options.include_neighbours:
-        return found
-    ident = neigh.get("remote_system_name") or neigh.get("remote_chassis_id")
+        return found or None
+    ident = remote_sys and neigh.get("remote_system_name") or neigh.get("remote_chassis_id")
     if not ident:
         return None
-    name = _unique(_node_name(str(ident)), nodes)
+    ident = str(ident).strip()
+    name = _unique(_node_name(ident), nodes)
+    report = {"neighbour": True, "kind": "linux", "image": options.neighbour_image}
+    if options.sanitise is None:
+        report = {"source": ident, **report}
     nodes[name] = _Node(name, "linux", {"kind": "linux", "image": options.neighbour_image},
-                        report={"source": str(ident), "neighbour": True,
-                                "kind": "linux", "image": options.neighbour_image})
+                        report=report)
     placeholders.append(name)
-    for alias in (remote_sys, remote_sys.split(".")[0], str(ident).lower()):
-        if alias:
-            aliases.setdefault(alias, name)
+    for alias in (remote_sys, ident):
+        _add_alias(aliases, alias, name)
     return name
+
+
+def _add_alias(aliases: dict, alias, name: str) -> None:
+    """Register a hostname/FQDN (and its short name) for LLDP lookups."""
+    alias = str(alias or "").strip().lower()
+    for key in (alias, alias.split(".")[0]):
+        if key:
+            aliases.setdefault(key, name)
 
 
 def _node_config(node: _Node, options: ExportOptions, warnings: list) -> Optional[str]:
@@ -396,8 +465,12 @@ def _unique(name: str, taken) -> str:
 
 
 def _node_name(name: str) -> str:
-    """Make a device hostname safe for use as a containerlab node name."""
-    return re.sub(r"[^A-Za-z0-9_-]", "-", name.split(".")[0]) or "node"
+    """Make a device hostname safe for use as a containerlab node name.
+
+    Node names start with a letter or digit and hold only letters, digits,
+    ``_`` and ``-``.
+    """
+    return re.sub(r"[^A-Za-z0-9_-]", "-", name.split(".")[0]).lstrip("_-") or "node"
 
 
 # --- Writing ------------------------------------------------------------------
@@ -431,21 +504,31 @@ def pinned_from_report(report: dict) -> dict[str, dict[str, str]]:
             if isinstance(entry, dict)}
 
 
+def write_private(path: Path, text: str) -> None:
+    """Write ``text`` to ``path``, readable and writable by its owner only (0600)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        os.fchmod(fh.fileno(), 0o600)    # an existing file keeps its mode otherwise
+        fh.write(text)
+
+
 def write_configs(result: ImportResult, base_dir: Path, nodes=None) -> None:
+    cfg_dir = base_dir / CONFIG_DIR
     for name, text in result.configs.items():
         if nodes is not None and name not in nodes:
             continue
-        cfg_file = base_dir / CONFIG_DIR / f"{name}.cfg"
-        cfg_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg_file.write_text(text)
+        if not cfg_dir.is_dir():
+            cfg_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        cfg_dir.chmod(0o700)
+        write_private(cfg_dir / f"{name}.cfg", text)
 
 
 def write_report(result: ImportResult, output_file: str | Path) -> Path:
     path = report_path(output_file)
-    path.write_text(
-        "# Written by clabfleet export-live: interface renames (original: endpoint),\n"
-        "# image choice and sanitising per node. Re-syncs reuse the interface map.\n"
-        + dump_yaml(result.report))
+    write_private(path,
+                  "# Written by clabfleet export-live: interface renames (original: "
+                  "endpoint),\n# image choice and sanitising per node. Re-syncs reuse the "
+                  "interface map.\n" + dump_yaml(result.report))
     return path
 
 
@@ -459,6 +542,7 @@ def write_result(result: ImportResult, output_file: str | Path) -> None:
         f"# Imported from live network ({n_nodes} nodes) by clabfleet.\n"
         f"# Interface renames are listed in {report_path(output_path).name}.\n"
     )
-    output_path.write_text(header + dump_yaml(result.topology))
+    # 0600 too: with inline configs, or unsanitised ones, it holds secrets
+    write_private(output_path, header + dump_yaml(result.topology))
     write_report(result, output_path)
     logger.info("Live network topology exported to %s", output_path)

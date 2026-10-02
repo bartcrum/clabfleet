@@ -1,4 +1,5 @@
 import json
+import stat
 import time
 
 import pytest
@@ -320,6 +321,55 @@ def test_startup_config_sources(tmp_path, topo_file):
     assert startup_config(topo, "spine1")[0] == "hostname spine1\n!\n"
 
 
+def test_startup_config_stays_in_the_topology_folder(tmp_path, topo_file):
+    secret = tmp_path.parent / f"{tmp_path.name}-secret"
+    secret.write_text("PRIVATE KEY")
+    (tmp_path / "configs" / "link.cfg").symlink_to(secret)
+    topo = load_topology(topo_file)
+    for value in (str(secret), f"../{secret.name}", "configs/../../" + secret.name,
+                  "configs/link.cfg", "~/.ssh/id_rsa"):
+        topo.nodes["spine1"]["startup-config"] = value
+        assert startup_config(topo, "spine1") == (
+            None, "startup-config is outside the topology directory"), value
+    topo.nodes["spine1"]["startup-config"] = "./configs/../configs/spine1.cfg"
+    assert startup_config(topo, "spine1")[0] == "hostname spine1\n!\n"
+
+
+def test_snapshot_files_are_private(tmp_path, topo_file, monkeypatch):
+    _take(topo_file, monkeypatch, "first")
+    root = tmp_path / "snapshots" / "lab"
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / "first").stat().st_mode) == 0o700
+    for path in (root / "first").iterdir():
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
+
+
+def test_planted_snapshot_json_cannot_read_other_files(tmp_path, topo_file, monkeypatch):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("PRIVATE KEY")
+    _take(topo_file, monkeypatch, "first")
+    folder = tmp_path / "snapshots" / "lab" / "first"
+    (folder / "link.cfg").symlink_to(secret)
+    meta_path = folder / "snapshot.json"
+    meta = json.loads(meta_path.read_text())
+    snap = {"name": "first", "path": str(folder), "nodes": {}}
+    for bad in ("../../../secret.txt", str(secret), "link.cfg", "..", "", None, ["x"]):
+        snap["nodes"]["spine1"] = {"file": bad}
+        assert snapshots.snapshot_config(snap, "spine1") is None, bad
+
+    # Junk where lists and strings are expected does not break listing or diffs
+    meta["nodes"]["spine1"]["kind"] = ["arista_ceos"]
+    meta["nodes"]["junk"] = "not a mapping"
+    meta["skipped"] = ["r1"]
+    meta["taken_at"] = 5
+    meta_path.write_text(json.dumps(meta))
+    (tmp_path / "snapshots" / "lab" / "elsewhere").symlink_to(folder)
+    snap, = list_snapshots(load_topology(topo_file))
+    assert set(snap["nodes"]) == {"spine1", "leaf1"} and snap["skipped"] == {}
+    out = diff_lab(topo_file, against="startup")
+    assert {r["node"] for r in out["nodes"]} >= {"spine1", "leaf1"}
+
+
 # ----------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------
@@ -411,7 +461,7 @@ def test_gui_snapshot_job_and_node_diff(tmp_path, topo_file, monkeypatch):
     async def scenario():
         app = server.create_app(ws, "tok")
         async with TestClient(TestServer(app)) as client:
-            await client.get("/?token=tok", allow_redirects=False)
+            await client.post("/login", json={"token": "tok"})
             resp = await client.get("/api/diff/lab.clab.yml", params={"node": "spine1"})
             assert resp.status == 200
             assert (await resp.json())["node"] == "spine1"
@@ -423,3 +473,19 @@ def test_gui_snapshot_job_and_node_diff(tmp_path, topo_file, monkeypatch):
             assert resp.status == 404
 
     asyncio.run(scenario())
+
+    # Configs hold password hashes: viewers do not get diffs
+    from clabfleet.gui.auth import UserStore
+
+    users = UserStore(tmp_path / "users.yaml")
+    viewer = users.add("bob", "viewer")
+
+    async def as_viewer():
+        app = server.create_app(ws, users=users)
+        async with TestClient(TestServer(app)) as client:
+            client.session.cookie_jar.clear()
+            await client.post("/login", json={"token": viewer})
+            resp = await client.get("/api/diff/lab.clab.yml", params={"node": "spine1"})
+            assert resp.status == 403
+
+    asyncio.run(as_viewer())

@@ -15,6 +15,8 @@ cluster:
   vni_base: 1000                  # each cross-host link gets the next VNI
   dst_port: 14789                 # VXLAN UDP port — must be open between hosts
   mtu: 1450                       # leave room for the 50-byte VXLAN overhead
+  host_key_policy: "accept-new"   # accept-new: remember a host's SSH key on first use
+                                  # strict: only keys already in known_hosts
 
 hosts:
   - name: "clab-1"

@@ -109,7 +109,7 @@ def test_edit_endpoints(tmp_path, monkeypatch):
     async def scenario():
         app = server.create_app(ws, "tok")
         async with TestClient(TestServer(app)) as client:
-            await client.get("/?token=tok", allow_redirects=False)
+            await client.post("/login", json={"token": "tok"})
             detail = await (await client.get("/api/topologies/t.clab.yml")).json()
 
             resp = await client.post("/api/validate/t.clab.yml", json={"yaml": "name: [t\n"})
