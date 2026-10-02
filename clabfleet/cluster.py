@@ -33,7 +33,7 @@ from typing import Optional
 
 import yaml
 
-from .runner import LocalRunner, Runner, SSHRunner
+from .runner import CommandError, LocalRunner, Runner, SSHRunner
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,9 @@ def probe_host_resources(runner: Runner, host_info: HostInfo) -> dict:
 
     Returns the raw facts (cpus, mem_total_mb, mem_available_mb, containerlab
     version) for status display.
+
+    Raises if the host cannot be reached; a reachable host whose commands
+    fail or print something unexpected only logs a warning.
     """
     facts: dict = {}
     try:
@@ -205,7 +208,7 @@ def probe_host_resources(runner: Runner, host_info: HostInfo) -> dict:
             key, _, rest = line.partition(":")
             if key in ("MemTotal", "MemAvailable"):
                 facts[f"{key}_mb"] = int(rest.split()[0]) // 1024
-    except Exception as exc:
+    except (CommandError, ValueError, IndexError) as exc:
         logger.warning("Could not probe resources on %s: %s", host_info.name, exc)
         return facts
 

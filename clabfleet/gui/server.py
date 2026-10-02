@@ -149,6 +149,17 @@ async def _topology(request):
     return web.json_response(detail)
 
 
+async def _json_body(request) -> dict:
+    """The request's JSON object body; 400 for anything else."""
+    try:
+        body = await request.json()
+    except ValueError:
+        raise web.HTTPBadRequest(text="Request body must be JSON")
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="Request body must be a JSON object")
+    return body
+
+
 def _refuse_while_busy(request, topo_id: str) -> None:
     for job in request.app[JOBS].running():
         if job.topology == topo_id:
@@ -157,7 +168,7 @@ def _refuse_while_busy(request, topo_id: str) -> None:
 
 
 async def _validate(request):
-    body = await request.json()
+    body = await _json_body(request)
     ws: Workspace = request.app[WORKSPACE]
     try:
         report = await asyncio.to_thread(ws.validate_yaml, request.match_info["id"],
@@ -169,7 +180,7 @@ async def _validate(request):
 
 async def _save_topology(request):
     topo_id = request.match_info["id"]
-    body = await request.json()
+    body = await _json_body(request)
     _refuse_while_busy(request, topo_id)
     ws: Workspace = request.app[WORKSPACE]
     try:
@@ -186,7 +197,7 @@ async def _save_topology(request):
 
 async def _save_positions(request):
     topo_id = request.match_info["id"]
-    body = await request.json()
+    body = await _json_body(request)
     _refuse_while_busy(request, topo_id)
     ws: Workspace = request.app[WORKSPACE]
     try:
@@ -204,7 +215,7 @@ async def _save_positions(request):
 
 
 async def _start_job(request):
-    body = await request.json()
+    body = await _json_body(request)
     try:
         options = body.get("options") if isinstance(body.get("options"), dict) else None
         job = request.app[JOBS].start(body.get("action", ""), body.get("topology", ""), options)

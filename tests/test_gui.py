@@ -228,6 +228,9 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
             assert resp.status == 403
             resp = await client.post("/api/jobs", json={"action": "nope", "topology": "t.clab.yml"})
             assert resp.status == 400
+            for path in ("/api/jobs", "/api/validate/t.clab.yml"):
+                assert (await client.post(path, data="not json")).status == 400
+                assert (await client.post(path, json=["a", "list"])).status == 400
             resp = await client.get("/api/topologies/t.clab.yml")
             detail = await resp.json()
             assert detail["nodes"][0]["name"] == "a"
