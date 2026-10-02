@@ -667,18 +667,22 @@ def test_gui_users_file_selection(tmp_path, fake_run, monkeypatch, capsys):
     assert cli.main([*base, "--users", str(tmp_path / "missing.yaml")]) == 1
     assert "not found" in capsys.readouterr().err
     assert not (tmp_path / "missing.yaml").exists()
-    # No default file yet: created with admin / admin, who must change it
+    # No default file yet: created with admin and a random password to change
     assert cli.main(base) == 0
     assert fake_run[-1]["users"].path == home
     assert fake_run[-1]["audit"].path == home.parent / "audit.jsonl"
-    assert "admin / admin" in capsys.readouterr().err
-    admin = UserStore(home).check_password("admin", "admin")
+    assert "random password" in capsys.readouterr().err
+    initial = (home.parent / "initial-admin-password").read_text().strip()
+    assert stat.S_IMODE((home.parent / "initial-admin-password").stat().st_mode) == 0o600
+    admin = UserStore(home).check_password("admin", initial)
     assert admin.role == "operator" and admin.must_change
+    assert UserStore(home).check_password("admin", "admin") is None
     # Once it exists it is used as it is
     UserStore(home).add("alice")
     UserStore(home).set_password("admin", "a good new password")
+    assert not (home.parent / "initial-admin-password").exists()
     assert cli.main(base) == 0
-    assert "admin / admin" not in capsys.readouterr().err
+    assert "random password" not in capsys.readouterr().err
     assert set(fake_run[-1]["users"].users()) == {"admin", "alice"}
 
 
@@ -953,7 +957,9 @@ def test_user_cli_passwords(tmp_path, capsys, monkeypatch):
 def test_first_admin_must_set_a_new_password(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "LOGIN_FAILURES", 100)
     users = UserStore(tmp_path / "users.yaml")
-    assert users.bootstrap() and not users.bootstrap()  # only once
+    initial = users.bootstrap()
+    assert len(initial) >= 16 and users.bootstrap() is None  # only once
+    assert users.initial_password() == initial
     audit_path = tmp_path / "audit.jsonl"
     new = "a much better password"
 
@@ -961,6 +967,8 @@ def test_first_admin_must_set_a_new_password(tmp_path, monkeypatch):
         app = server.create_app(_workspace(tmp_path), users=users, audit=AuditLog(audit_path))
         async with TestClient(TestServer(app)) as client:
             resp = await client.post("/login", json={"username": "admin", "password": "admin"})
+            assert resp.status == 401  # no default password
+            resp = await client.post("/login", json={"username": "admin", "password": initial})
             assert resp.status == 200
             me = await (await client.get("/api/me")).json()
             assert me["must_change"] is True and me["has_password"] is True
@@ -973,22 +981,24 @@ def test_first_admin_must_set_a_new_password(tmp_path, monkeypatch):
 
             change = lambda body: client.post("/api/password", json=body)  # noqa: E731
             assert (await change({"current": "wrong", "new": new})).status == 403
-            assert (await change({"current": "admin", "new": "admin"})).status == 400
-            assert (await change({"current": "admin", "new": "short"})).status == 400
-            assert (await change({"current": "admin"})).status == 400
-            resp = await change({"current": "admin", "new": new})
+            assert (await change({"current": initial, "new": initial})).status == 400
+            assert (await change({"current": initial, "new": "short"})).status == 400
+            assert (await change({"current": initial})).status == 400
+            resp = await change({"current": initial, "new": new})
             assert resp.status == 200
             # This browser goes on with a new session; the rest is open now
             assert (await (await client.get("/api/me")).json())["must_change"] is False
             assert (await client.get("/api/state")).status == 200
 
-        assert users.check_password("admin", "admin") is None
+        assert users.check_password("admin", initial) is None
         assert users.check_password("admin", new).must_change is False
+        assert users.initial_password() is None
+        assert not users.initial_password_file.exists()  # gone once changed
 
     asyncio.run(scenario())
     events = [e["event"] for e in _events(audit_path)]
     assert "password_change_failed" in events and "password_changed" in events
-    assert "admin" not in [e["details"].get("new") for e in _events(audit_path)]
+    assert initial not in audit_path.read_text() and new not in audit_path.read_text()
 
 
 def test_password_change_by_other_users(tmp_path):
@@ -1028,9 +1038,9 @@ def test_single_token_mode_has_no_password_to_change(tmp_path):
 
 def test_startup_message_tells_the_first_login(tmp_path):
     users = UserStore(tmp_path / "users.yaml")
-    users.bootstrap()
+    initial = users.bootstrap()
     _, text = server.startup_message("http://localhost:8650", None, users, None)
-    assert "admin / admin" in text
+    assert f"admin / {initial}" in text and "initial-admin-password" in text
     users.set_password("admin", "a good new password")
     _, text = server.startup_message("http://localhost:8650", None, users, None)
-    assert "admin / admin" not in text
+    assert "First login" not in text and initial not in text

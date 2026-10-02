@@ -13,9 +13,11 @@ Each user has a role and logs in with a password, a token, or either:
 - Token: a random string shown once; only its SHA-256 is stored. A plain
   hash is enough because tokens are 256-bit random strings, not passwords.
 
-A new install starts with ``admin`` / ``admin`` (``UserStore.bootstrap``),
-marked ``must_change``: until that user sets a new password, the server
-lets their session do nothing else.
+A new install starts with one user, ``admin``, with a random password
+printed at start-up and kept in ``initial-admin-password`` next to the
+users file until it is changed (``UserStore.bootstrap``). It is marked
+``must_change``: until it sets its own password, the server lets that
+login do nothing else.
 
 Roles:
 
@@ -60,7 +62,8 @@ AUDIT_FILE_NAME = "audit.jsonl"  # default: next to the users file
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 
 MIN_PASSWORD = 12                # characters
-BOOTSTRAP_USER = BOOTSTRAP_PASSWORD = "admin"  # first login of a new install; must be changed
+BOOTSTRAP_USER = "admin"         # the first user of a new install
+INITIAL_PASSWORD_FILE = "initial-admin-password"  # its random password, until changed
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 17, 8, 1   # about 128 MiB and 0.25 s per check
 SCRYPT_MAXMEM = 256 * 1024 * 1024
 PASSWORD_RE = re.compile(r"scrypt\$(\d+)\$(\d+)\$(\d+)\$([A-Za-z0-9+/=]+)\$([A-Za-z0-9+/=]+)")
@@ -290,16 +293,35 @@ class UserStore:
         users[name].password = hash_password(password)
         users[name].must_change = False
         self._write(users)
+        if name == BOOTSTRAP_USER:
+            self.initial_password_file.unlink(missing_ok=True)
 
-    def bootstrap(self) -> bool:
-        """Create the first user, admin / admin, who must set a new password
-        at the first login. Only when there is no users file yet; True if
-        it was created."""
+    @property
+    def initial_password_file(self) -> Path:
+        return self.path.parent / INITIAL_PASSWORD_FILE
+
+    def bootstrap(self) -> Optional[str]:
+        """Create the first user, admin, with a random password it must
+        change at the first login. Only when there is no users file yet;
+        returns the password if it was created."""
         if self.path.exists():
-            return False
+            return None
+        password = secrets.token_urlsafe(12)
+        write_private(self.initial_password_file, password + "\n")
         self._write({BOOTSTRAP_USER: User(BOOTSTRAP_USER, OPERATOR, "", now_iso(),
-                                          hash_password(BOOTSTRAP_PASSWORD), True)})
-        return True
+                                          hash_password(password), True)})
+        return password
+
+    def initial_password(self) -> Optional[str]:
+        """The first admin's random password while it has not been changed."""
+        admin = self.get(BOOTSTRAP_USER)
+        if not admin or not admin.must_change:
+            return None
+        try:
+            check_private(self.initial_password_file, "Initial password file")
+            return self.initial_password_file.read_text().strip() or None
+        except (OSError, ValueError):
+            return None
 
     def rotate(self, name: str) -> str:
         """Give a user a new token; the old one (and its sessions) stop working."""
@@ -317,13 +339,15 @@ class UserStore:
             raise KeyError(f"No user '{name}'")
         del users[name]
         self._write(users)
+        if name == BOOTSTRAP_USER:
+            self.initial_password_file.unlink(missing_ok=True)
 
     def _load_for_update(self) -> dict[str, User]:
         return self._read() if self.path.exists() else {}
 
     def _write(self, users: dict[str, User]) -> None:
         text = ("# clabfleet GUI users; manage with `clabfleet user`.\n"
-                "# Only SHA-256 hashes of the tokens are stored.\n")
+                "# Only hashes are stored: scrypt for passwords, SHA-256 for tokens.\n")
         text += yaml.safe_dump({"users": {n: u.to_dict() for n, u in sorted(users.items())}},
                                sort_keys=False)
         write_private(self.path, text)

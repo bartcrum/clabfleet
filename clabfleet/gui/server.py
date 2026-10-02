@@ -5,8 +5,8 @@ localhost by default and every request must be authenticated. Two modes:
 
 - Single token (``--single-token``): whoever has the random token printed
   at startup is an operator.
-- Named users (the users file; a new install starts with admin / admin,
-  who must set a password first): each user logs in with a password or
+- Named users (the users file; a new install starts with the user admin
+  and a random password printed at start-up, which it must change first): each user logs in with a password or
   their own token, and the user's role decides what they may do (see
   ``_allowed``: anything but a plain read needs an operator unless the
   handler is marked ``allow_viewer``). Logins, jobs, edits and terminal
@@ -46,7 +46,7 @@ from ..capture import GUI_MAX_BYTES, CaptureError
 from ..nodes import access_modes, run_docker, terminal_command, terminal_stop_command
 from ..snapshots import SnapshotError
 from .auth import (
-    ACCESS_ATTR, BOOTSTRAP_PASSWORD, BOOTSTRAP_USER, DEFAULT_USERS_FILE, OPERATOR, VIEWER,
+    ACCESS_ATTR, BOOTSTRAP_USER, DEFAULT_USERS_FILE, OPERATOR, VIEWER,
     AuditLog, SessionFile, User, UserStore, allow_viewer, check_new_password, hash_token,
     login_link, operator_only,
 )
@@ -352,8 +352,12 @@ def startup_message(base: str, token: Optional[str], users: Optional[UserStore],
                  f"Users file: {users.path}"]
         first = users.get(BOOTSTRAP_USER)
         if first and first.must_change:
-            lines.append(f"First login: {BOOTSTRAP_USER} / {BOOTSTRAP_PASSWORD}; "
-                         "it asks for a new password before anything else.")
+            password = users.initial_password()
+            lines.append(
+                f"\nFirst login: {BOOTSTRAP_USER} / "
+                f"{password or '(see ' + str(users.initial_password_file) + ')'}\n"
+                f"(also in {users.initial_password_file} until it is changed). "
+                "It asks for a new password first.\n")
         if not users.users():
             lines.append("No users yet: add one with `clabfleet user add NAME`.")
     else:

@@ -390,8 +390,11 @@ clabfleet gui --cluster topologies/cluster.yaml   # all cluster hosts
 
 It prints its address (`http://localhost:8650/`); log in there. The first
 time, the users file `~/.clabfleet/users.yaml` is created with one user,
-**admin / admin**: the first login asks for a new password (12 characters
-or more) and allows nothing else until it is set. Stop the GUI with
+**admin**, and a random password. The GUI prints it at every start until
+it is changed, and keeps it in `~/.clabfleet/initial-admin-password`
+(mode 0600; deleted once the password is changed). The first login asks
+for a new password (12 characters or more) and allows nothing else until
+it is set. Stop the GUI with
 Ctrl+C. `--single-token` skips users altogether: the GUI prints a random
 token link instead, opens it in your browser, and whoever has the token is
 an operator.
@@ -519,7 +522,7 @@ an operator.
 Security: terminals are shell access, so the GUI listens on `127.0.0.1`
 only and every request needs a login. Requests from other websites are
 refused. Use `--bind` with care, and set the admin password before you
-do: until then anyone who reaches the GUI can log in as admin / admin and
+do: until then anyone who has the initial password can log in as admin and
 choose the password. See [Login and sessions](#login-and-sessions) below.
 
 ### Several users on a shared lab server
@@ -541,7 +544,7 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
 
 - **Users file:** `~/.clabfleet/users.yaml` (mode 0600; another file with
   `--users FILE` on both `gui` and `user`; only the default one is created
-  with admin / admin when missing). Passwords are stored as scrypt hashes
+  with admin and a random password when missing). Passwords are stored as scrypt hashes
   with a random salt, tokens as SHA-256 hashes. `user add` and `user
   passwd` ask for the password twice (`--password-stdin` reads one line
   from stdin, for scripts); `user add --token` and `user rotate` print a

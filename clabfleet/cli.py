@@ -426,8 +426,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_gui.add_argument("--users", metavar="FILE",
                        help="Users file for named logins with roles (default: "
                             "~/.clabfleet/users.yaml; when it does not exist yet, it "
-                            "is created with admin / admin, who must set a new "
-                            "password at the first login)")
+                            "is created with the user admin and a random password, "
+                            "printed at start-up, to be changed at the first login)")
     p_gui.add_argument("--single-token", action="store_true",
                        help="No users: print a random token at start-up and let "
                             "whoever has it in as an operator")
@@ -681,8 +681,8 @@ def _user_store(args: argparse.Namespace, must_exist: bool = True, bootstrap: bo
 
     path = Path(args.users or DEFAULT_USERS_FILE).expanduser()
     if bootstrap and UserStore(path).bootstrap():
-        print(f"Created {path} with the first user: admin / admin "
-              "(a new password is asked for at the first login)", file=sys.stderr)
+        print(f"Created {path} with the first user, admin, and a random password "
+              "(shown below; it must be changed at the first login)", file=sys.stderr)
     if not must_exist and not path.exists():
         return None
     return UserStore(path)
