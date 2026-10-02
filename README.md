@@ -631,6 +631,11 @@ per node, every interface rename, where the image came from and what
 `--sanitise` changed (counts only, never values). Without `-o` the
 topology is printed with the configs inline.
 
+Without `--sanitise` the configs are saved as they are, with the
+network's passwords, keys and SNMP communities, and export-live says so
+on stderr. Either way `configs/` is created readable by you only (0700),
+and the configs, the topology and the report are written 0600.
+
 ### Device sources
 
 | Source | How |
@@ -649,7 +654,13 @@ topology is printed with the configs inline.
   the platform's NAPALM driver field, else a guess from the platform name
   (`ios`, `eos`, `nxos`, `iosxr`, `junos`, ...); devices with no driver are
   skipped with a warning. Use `--token-env VAR` or `source.token_env` for
-  another token variable.
+  another token variable. The token is only sent to the URL you give:
+  it must be `https://` (a plain `http://` URL needs `--allow-http` or
+  `source.allow_http: true`, and warns), redirects are not followed, and
+  pagination links to another host are refused (links to `http://` on the
+  same host, as a NetBox behind a TLS proxy returns, are fetched from your
+  URL). `source.verify_tls: false` turns certificate checks off, with a
+  warning.
 - **Ansible:** YAML or INI static inventories, including `[group:vars]`,
   `[group:children]`, host ranges such as `leaf[01:04]`, and `group_vars/`
   and `host_vars/` next to the file. Variables merge like Ansible's (`all`,
@@ -665,6 +676,20 @@ topology is printed with the configs inline.
   variable named by `password_env` / `username_env`, then
   `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD`. Passwords and
   tokens are never logged or written to the output.
+- **Allowed networks:** the device login usually works on every device,
+  so whoever can edit a device's address (in NetBox, say) could point it
+  at a machine of theirs and collect the password. `allowed_networks:`
+  in the inventory (a list of CIDRs), or `--allowed-network CIDR`
+  (repeatable), leaves out every device whose address, or any address its
+  name resolves to, is outside them, and lists them in a warning.
+- **Device identity:** NAPALM's drivers do not all check who they talk
+  to. For `ios`, `iosxr` and `nxos_ssh` (SSH through Netmiko) export-live
+  sets `system_host_keys: true`, so a device in your `~/.ssh/known_hosts`
+  whose host key changed is refused; add `ssh_strict: true` to
+  `optional_args` to refuse unknown devices too (connect once with `ssh`
+  first). The `eos` https transport and the `junos` NETCONF driver do not
+  verify the device by default: run imports from a management network you
+  trust and use `allowed_networks`. See `topologies/live_devices_example.yaml`.
 
 ### Kinds and images
 
@@ -714,8 +739,10 @@ ports and logical interfaces (loopbacks, VLANs, port-channels, tunnels,
 subinterfaces) are never mapped. Interfaces beyond a kind's port count
 are listed as dropped in the report: their links are left out and their
 IOS-style config stanzas removed. `--keep-interface-names` turns mapping
-off. A port is only ever used by one link: when the LLDP data of the two
-ends disagrees, the second link is left out with a warning.
+off; names must then be 1-64 letters, digits and `_ . / : -`, and links
+with other names (LLDP data comes from the neighbour) are left out with a
+warning. A port is only ever used by one link: when the LLDP data of the
+two ends disagrees, the second link is left out with a warning.
 
 ### Sanitising configs
 
@@ -724,21 +751,50 @@ and Junos (with it, configs of other platforms are not saved at all):
 
 - **Removed:** `enable secret/password`, all `username` lines, `aaa ...`,
   TACACS+/RADIUS servers and keys, `snmp-server community/user/host`,
-  `crypto pki` / `crypto ca` trustpoints and certificate chains,
-  `key config-key`. Junos: `tacplus-server`, `radius-server`,
-  `authentication-order`, SNMP communities and SNMPv3, SSH public keys.
-- **Replaced with `lab-key`:** OSPF/IS-IS/BGP/HSRP/VRRP authentication keys,
-  key-chain `key-string`, NTP authentication keys, ISAKMP/IKE pre-shared
-  keys, line and other `password`/`secret` values, Junos `$9$` secrets.
-  Both ends get the same value, so authenticated adjacencies still form.
+  `snmp mib community-map`, `crypto pki` / `crypto ca` trustpoints and
+  certificate chains, `key config-key`, PEM private keys, banners,
+  comments, `snmp-server location/contact`. Junos: `tacplus-server`,
+  `radius-server`, `authentication-order`, SNMP communities, SNMPv3,
+  location and contact, SSH public keys, local certificates, login
+  messages, comments.
+- **Replaced with `lab-key`:** OSPF/OSPFv3/IS-IS/BGP/HSRP/VRRP/GLBP/NHRP/
+  PIM/BFD authentication keys (hex keys get a hex placeholder of the right
+  length), key-chain `key-string`, NTP authentication keys, ISAKMP, IKEv2
+  and EzVPN pre-shared keys, WPA PSKs, passwords in URLs
+  (`tftp://user:...@host`), `event manager environment` values,
+  `--token`/`--password` options of EOS daemons, line and other
+  `password`/`secret` values, Junos `$9$`/`$8$` secrets and every quoted
+  value of a statement Junos marks `## SECRET-DATA`. Both ends get the
+  same value, so authenticated adjacencies still form. Descriptions and
+  remarks that mention a password, key or community lose their text.
 - **Management:** addresses on management interfaces (`Management*`,
-  `mgmt0`, `fxp0`, `em0`, or any interface in a management VRF) and static
-  routes in the management VRF are removed; `--mgmt-address dhcp` turns the
-  addresses into DHCP instead, `keep` leaves them.
+  `mgmt0`, `fxp0`, `em0`, or any interface in a management VRF), static
+  routes in the management VRF or via the management subnet, and the
+  Junos management routing instance are removed; `--mgmt-address dhcp`
+  turns the addresses into DHCP instead, `keep` leaves them.
 - **Login:** a placeholder user (`--lab-user` / `--lab-password`, default
   `admin`/`admin`) is added after `hostname` so the node stays reachable.
   Junos keeps its users, but every `encrypted-password` becomes the hash of
   `admin@123` (the vrnetlab default).
+- **Report:** a sanitised import report leaves out the devices' addresses
+  and the LLDP names of neighbour placeholders.
+
+Sanitising is best effort: configs keep secrets in more places than any
+list of commands covers. So every sanitised config is then checked for
+anything that still looks like one (a `password`, `key`, `secret`,
+`community`, `key-string` ... followed by something other than the
+placeholder, crypt hashes such as `$1$` or `$9$`, private keys, passwords
+in URLs, `SECRET-DATA` marks, long hex keys). If any config is flagged,
+nothing is written and export-live lists the node, line and kind of
+secret (never the value); fix or check those lines, or add
+`--allow-residual` to write the configs anyway (the report keeps the
+findings). Review the configs before you share them. Node names are the
+devices' hostnames and placeholders are named after their LLDP system
+names: these are not anonymised.
+
+A re-sync with `--apply` or `--overwrite` over a sanitised import must
+sanitise again: without `--sanitise` it is refused, unless you pass
+`--no-sanitise` to write the configs as they are.
 
 ### Neighbours outside the inventory
 
@@ -798,7 +854,7 @@ fetch (such as `! Last configuration change`) are not a config change.
 | `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
 | `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot:latest` | Image with `tcpdump` for capturing on nodes that have none |
 | `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD` | — | `export-live`: device login when the inventory gives none |
-| `NETBOX_TOKEN` / `NAUTOBOT_TOKEN` | — | `export-live`: API token for `--netbox` / `--nautobot` |
+| `NETBOX_TOKEN` / `NAUTOBOT_TOKEN` | — | `export-live`: API token for `--netbox` / `--nautobot` (sent only to that URL, over HTTPS) |
 
 ## Development
 
