@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+import logging
 import os
+import re
 import stat
 import time
+from urllib.parse import unquote
 
 import pytest
 
@@ -87,9 +90,9 @@ def test_user_cli(tmp_path, capsys):
     assert cli.main(["user", "add", "alice", "--users", users,
                      "--url", "https://lab.example.com:8650"]) == 0
     out = capsys.readouterr().out
-    token = out.split("?token=")[1].split()[0]
+    token = out.split("#token=")[1].split()[0]
     assert UserStore(users).authenticate(token).role == "operator"
-    assert "https://lab.example.com:8650/?token=" in out
+    assert "https://lab.example.com:8650/#token=" in out
 
     assert cli.main(["user", "add", "bob", "--role", "viewer", "--users", users]) == 0
     capsys.readouterr()
@@ -144,9 +147,9 @@ class FakeDeployer:
         return {"hosts": {"localhost": {"status": "saved"}}}
 
 
-async def _login(client, token):
+async def _login(client, token, **body):
     client.session.cookie_jar.clear()
-    return await client.get(f"/?token={token}", allow_redirects=False)
+    return await client.post("/login", json={"token": token, **body})
 
 
 async def _drain(sock):
@@ -193,15 +196,15 @@ def test_roles_sessions_and_audit(tmp_path, monkeypatch):
         async with TestClient(TestServer(app)) as client:
             # Not logged in
             assert (await client.get("/api/state")).status == 401
-            assert (await client.get("/")).status == 401
+            assert (await client.get("/")).status == 200  # the login form
             assert (await _login(client, "wrong")).status == 401
             assert (await client.get("/api/me")).status == 401
 
             # Viewer: reads yes, anything else no
             resp = await _login(client, view_token)
-            assert resp.status == 302
+            assert resp.status == 200
             cookie = resp.headers["Set-Cookie"]
-            assert "clabfleet_session=" in cookie and "HttpOnly" in cookie
+            assert "clabfleet_session_" in cookie and "HttpOnly" in cookie
             assert "SameSite=Strict" in cookie and view_token not in cookie
             assert await (await client.get("/api/me")).json() == {
                 "user": "bob", "role": "viewer", "multi_user": True}
@@ -231,7 +234,7 @@ def test_roles_sessions_and_audit(tmp_path, monkeypatch):
 
             # Operator: everything
             resp = await _login(client, op_token)
-            assert resp.status == 302
+            assert resp.status == 200
             assert (await client.post("/api/dummy")).status == 200
             assert (await client.get("/api/dummy-secret")).status == 200
             resp = await client.post("/api/jobs", json={"action": "save", "topology": "t.clab.yml"})
@@ -298,7 +301,7 @@ def test_removed_user_and_no_users(tmp_path, monkeypatch):
     async def scenario():
         app = server.create_app(ws, users=users)
         async with TestClient(TestServer(app)) as client:
-            assert (await _login(client, token)).status == 302
+            assert (await _login(client, token)).status == 200
             assert (await client.get("/api/me")).status == 200
             users.remove("alice")
             os.utime(users.path, ns=(time.time_ns() + 10**9,) * 2)
@@ -314,16 +317,234 @@ def test_single_token_mode_is_one_operator(tmp_path, monkeypatch):
 
     async def scenario():
         app = server.create_app(ws, "tok")
+        other = server.create_app(ws, "tok")
         async with TestClient(TestServer(app)) as client:
             resp = await _login(client, "tok")
-            assert "clabfleet_token=tok" in resp.headers["Set-Cookie"]
+            assert resp.status == 200
+            # The cookie holds a session id, never the token, under a name of
+            # its own so another GUI on the same host does not see it
+            name = f"clabfleet_session_{app[server.AUTH].instance}"
+            assert name != f"clabfleet_session_{other[server.AUTH].instance}"
+            cookie = resp.cookies[name]
+            assert cookie.value != "tok" and len(cookie.value) >= 43
+            assert cookie["httponly"] and cookie["samesite"] == "Strict"
+            assert cookie["path"] == "/" and not cookie["secure"]
             assert await (await client.get("/api/me")).json() == {
                 "user": None, "role": "operator", "multi_user": False}
             resp = await client.get("/api/state")
             assert resp.headers["X-Frame-Options"] == "DENY"
 
+            # Logging out ends the session on the server, not just the cookie
+            assert (await client.post("/logout")).status == 200
+            client.session.cookie_jar.update_cookies({name: cookie.value})
+            assert (await client.get("/api/me")).status == 401
+
     monkeypatch.setattr(Workspace, "runtime", lambda self: [])
     asyncio.run(scenario())
+
+
+def test_old_token_links_move_the_token_into_the_fragment(tmp_path):
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), "tok")
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/?token=a+b/c", allow_redirects=False)
+            assert resp.status == 302
+            location = resp.headers["Location"]
+            assert location.startswith("/#token=") and unquote(location[8:]) == "a b/c"
+            assert "Set-Cookie" not in resp.headers  # no login without the POST
+            assert (await client.get("/api/me")).status == 401
+
+    asyncio.run(scenario())
+
+
+def test_login_post_checks(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "LOGIN_FAILURES", 100)
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), "tok", audit=AuditLog(audit_path))
+        async with TestClient(TestServer(app)) as client:
+            # Login CSRF: other sites cannot post a login, not even as a form
+            resp = await client.post("/login", json={"token": "tok"},
+                                     headers={"Origin": "http://evil.example"})
+            assert resp.status == 403
+            assert (await client.post("/login", data={"token": "tok"})).status == 415
+            assert (await client.post("/login", data="tok",
+                                      headers={"Content-Type": "text/plain"})).status == 415
+            for body in (["tok"], {"token": 1}, {}):
+                assert (await client.post("/login", json=body)).status in (400, 401)
+            # Not ASCII: a plain 401, not a crash in compare_digest
+            for bad in ("tøk", "\ud800", "トークン"):
+                resp = await client.post("/login", data=json.dumps({"token": bad}),
+                                         headers={"Content-Type": "application/json"})
+                assert resp.status in (401, 429), bad
+            assert (await client.get("/login")).status == 405
+            origin = str(client.make_url("/")).rstrip("/")
+            resp = await client.post("/login", json={"token": "tok"}, headers={"Origin": origin})
+            assert resp.status == 200
+
+    asyncio.run(scenario())
+    assert server.Auth("tok").check_token("tøk") is None
+
+
+def test_failed_logins_are_throttled_per_address(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit.jsonl"
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), "tok", audit=AuditLog(audit_path))
+        async with TestClient(TestServer(app)) as client:
+            for _ in range(server.LOGIN_FAILURES):
+                assert (await _login(client, "wrong")).status == 401
+            for _ in range(10):
+                resp = await _login(client, "wrong")
+                assert resp.status == 429
+                assert resp.headers["Retry-After"] == str(server.LOGIN_WINDOW)
+            # The right token waits too, or guessing could go on
+            assert (await _login(client, "tok")).status == 429
+            # Another address is not affected
+            auth = app[server.AUTH]
+            assert auth.throttled("10.0.0.9") == 0
+            clock[0] += server.LOGIN_WINDOW
+            assert (await _login(client, "tok")).status == 200
+
+    asyncio.run(scenario())
+    events = [e["event"] for e in _events(audit_path)]
+    # One line for the whole throttled window, not one per attempt
+    assert events == ["login_failed"] * server.LOGIN_FAILURES + ["login_throttled", "login"]
+    throttled = _events(audit_path)[server.LOGIN_FAILURES]
+    assert throttled["details"] == {"failures": server.LOGIN_FAILURES,
+                                    "seconds": server.LOGIN_WINDOW}
+
+
+def test_session_limits(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice")
+    users.add("bob", "viewer")
+    auth = server.Auth(users=users)
+    app = server.create_app(_workspace(tmp_path), users=users)
+
+    def request(sid):
+        return make_mocked_request("GET", "/api/me", app=app,
+                                   headers={"Cookie": f"{auth.cookie_name(False)}={sid}"})
+
+    # Each further login beyond the cap ends the user's oldest session
+    first = auth.start_session(users.get("alice"))
+    clock[0] += 1
+    sids = [auth.start_session(users.get("alice")) for _ in range(server.SESSIONS_PER_USER - 1)]
+    bobs = auth.start_session(users.get("bob"))
+    assert auth.identify(request(first)).name == "alice"
+    clock[0] += 1
+    sids.append(auth.start_session(users.get("alice")))
+    assert auth.identify(request(first)) is None
+    assert all(auth.identify(request(s)).name == "alice" for s in sids)
+    assert auth.identify(request(bobs)).name == "bob"
+
+    # Busy sessions still end SESSION_MAX_AGE after login
+    for _ in range(server.SESSION_MAX_AGE // 3600 - 1):
+        clock[0] += 3600
+        assert auth.identify(request(bobs)).name == "bob"
+    clock[0] += 3600
+    assert auth.identify(request(bobs)) is None
+    # Idle ones after SESSION_IDLE
+    sid = auth.start_session(users.get("bob"))
+    clock[0] += server.SESSION_IDLE + 1
+    assert auth.identify(request(sid)) is None
+
+
+def test_login_does_not_quietly_switch_users(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    alice, bob = users.add("alice"), users.add("bob", "viewer")
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users)
+        async with TestClient(TestServer(app)) as client:
+            assert (await _login(client, alice)).status == 200
+            # A link with someone else's token: refused unless asked for
+            resp = await client.post("/login", json={"token": bob})
+            assert resp.status == 409 and (await resp.json())["user"] == "alice"
+            assert (await (await client.get("/api/me")).json())["user"] == "alice"
+            # Logging in again as the same user is fine
+            assert (await client.post("/login", json={"token": alice})).status == 200
+            resp = await client.post("/login", json={"token": bob, "switch": True})
+            assert resp.status == 200
+            assert (await (await client.get("/api/me")).json())["user"] == "bob"
+
+    asyncio.run(scenario())
+
+
+def test_https_cookie_and_headers(tmp_path):
+    app = server.create_app(_workspace(tmp_path), "tok", public_url="https://lab.example.com")
+
+    async def scenario():
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/login", json={"token": "tok"})
+            name = f"__Host-clabfleet_session_{app[server.AUTH].instance}"
+            cookie = resp.cookies[name]
+            assert cookie["secure"] and cookie["path"] == "/" and not cookie["domain"]
+            for path in ("/", "/api/me", "/static/app.js"):
+                resp = await client.get(path, headers={"Cookie": f"{name}={cookie.value}"})
+                assert resp.status == 200, path
+                assert resp.headers["Strict-Transport-Security"].startswith("max-age=")
+                csp = resp.headers["Content-Security-Policy"]
+                assert "script-src 'self';" in csp and "frame-ancestors 'none'" in csp
+            assert resp.headers.get("Cache-Control") != "no-store"  # static files may be cached
+            resp = await client.get("/api/me", headers={"Cookie": f"{name}={cookie.value}"})
+            assert resp.headers["Cache-Control"] == "no-store"
+            resp = await client.post("/logout", headers={"Cookie": f"{name}={cookie.value}"})
+            deleted = resp.cookies[name]
+            assert deleted.value == "" and deleted["secure"]  # else the browser ignores it
+
+    asyncio.run(scenario())
+
+
+def test_plain_http_headers(tmp_path):
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), "tok")
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get("/")
+            assert "Strict-Transport-Security" not in resp.headers
+            assert resp.headers["Cache-Control"] == "no-store"
+            assert resp.headers["Content-Security-Policy"] == server.CSP
+
+    asyncio.run(scenario())
+
+
+def test_page_has_nothing_the_csp_blocks():
+    html = (server.STATIC_DIR / "index.html").read_text()
+    assert "<script>" not in html and "<style" not in html
+    assert not re.search(r"\son[a-z]+=", html) and "style=" not in html
+    assert "javascript:" not in html
+
+
+def test_access_log_has_no_tokens(tmp_path, caplog):
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), "secret-tok")
+        test_server = TestServer(app)
+        await test_server.start_server(access_log_class=server.AccessLogger)
+        async with TestClient(test_server) as client:
+            await client.get("/?token=secret-tok", allow_redirects=False)
+            await client.post("/login", json={"token": "secret-tok"})
+            await client.get("/api/me?x=secret-tok")
+
+    with caplog.at_level(logging.INFO, logger="aiohttp.access"):
+        asyncio.run(scenario())
+    lines = [r.getMessage() for r in caplog.records if r.name == "aiohttp.access"]
+    assert len(lines) == 3
+    assert '"GET / HTTP/1.1" 302' in lines[0] and '"POST /login HTTP/1.1" 200' in lines[1]
+    assert not any("secret-tok" in line for line in lines)
+
+
+def test_startup_message_and_links(tmp_path):
+    url, text = server.startup_message("http://localhost:8650", "tok", None, None)
+    assert url == "http://localhost:8650/#token=tok" and url in text and "?token" not in text
+    users = UserStore(tmp_path / "users.yaml")
+    url, text = server.startup_message("https://lab:8650", None, users, AuditLog(None))
+    assert url == "https://lab:8650/" and "https://lab:8650/#token=<token>" in text
+    assert auth.login_link("https://lab:8650/", "t") == "https://lab:8650/#token=t"
 
 
 @pytest.mark.parametrize("origin, public_url, ok", [
@@ -390,3 +611,10 @@ def test_gui_users_file_selection(tmp_path, fake_run, monkeypatch, capsys):
     UserStore(tmp_path / "home" / "users.yaml").add("alice")
     assert cli.main(base) == 0
     assert fake_run[-1]["users"].path == tmp_path / "home" / "users.yaml"
+
+
+def test_run_installs_the_access_logger(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(server.web, "run_app", lambda app, **kw: calls.append(kw))
+    server.run(_workspace(tmp_path), open_browser=False)
+    assert calls[0]["access_log_class"] is server.AccessLogger

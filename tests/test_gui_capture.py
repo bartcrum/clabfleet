@@ -77,7 +77,7 @@ def _fake_open(made, chunks, hold=False):
 async def _client(app):
     client = TestClient(TestServer(app))
     await client.start_server()
-    await client.get("/?token=tok", allow_redirects=False)
+    await client.post("/login", json={"token": "tok"})
     return client
 
 
@@ -130,12 +130,12 @@ def test_captures_are_operator_only_and_audited(ws, tmp_path, monkeypatch):
     async def scenario():
         app = server.create_app(ws, users=users, audit=AuditLog(audit_path))
         async with TestClient(TestServer(app)) as client:
-            await client.get(f"/?token={view_token}", allow_redirects=False)
+            await client.post("/login", json={"token": view_token})
             assert (await client.get(url)).status == 403
             assert (await client.get(url.replace("/api/", "/ws/"))).status == 403
             assert made == []
             await client.post("/logout")
-            await client.get(f"/?token={op_token}", allow_redirects=False)
+            await client.post("/login", json={"token": op_token})
             resp = await client.get(url)
             assert resp.status == 200 and await resp.read() == b"\xd4\xc3\xb2\xa1"
 

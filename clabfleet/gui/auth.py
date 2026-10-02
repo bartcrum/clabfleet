@@ -74,6 +74,13 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def login_link(base: str, token: str) -> str:
+    """A login link. The token goes in the fragment, which browsers do not
+    send to the server, so it stays out of access logs and proxies; the
+    page posts it to /login and drops it from the address bar."""
+    return f"{base.rstrip('/')}/#token={token}"
+
+
 @dataclass
 class User:
     name: str  # "" for the single-token mode's anonymous operator

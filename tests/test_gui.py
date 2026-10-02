@@ -208,11 +208,11 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
         app = server.create_app(ws, "secret-token")
         async with TestClient(TestServer(app)) as client:
             assert (await client.get("/api/state")).status == 401
-            assert (await client.get("/")).status == 401
-            assert (await client.get("/?token=wrong", allow_redirects=False)).status == 401
+            assert (await client.get("/")).status == 200  # the page, with its login form
+            assert (await client.post("/login", json={"token": "wrong"})).status == 401
 
-            resp = await client.get("/?token=secret-token", allow_redirects=False)
-            assert resp.status == 302
+            resp = await client.post("/login", json={"token": "secret-token"})
+            assert resp.status == 200
             assert "SameSite=Strict" in resp.headers["Set-Cookie"]
 
             resp = await client.get("/api/state")
@@ -277,7 +277,7 @@ def test_logs_terminal_over_websocket(tmp_path, monkeypatch):
     async def scenario():
         app = server.create_app(ws, "tok")
         async with TestClient(TestServer(app)) as client:
-            await client.get("/?token=tok", allow_redirects=False)
+            await client.post("/login", json={"token": "tok"})
             sock = await client.ws_connect("/ws/terminal?lab=l&node=r1&mode=logs&cols=80&rows=24")
             output, exit_msg = b"", None
             async for msg in sock:

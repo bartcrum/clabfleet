@@ -411,7 +411,7 @@ def test_gui_snapshot_job_and_node_diff(tmp_path, topo_file, monkeypatch):
     async def scenario():
         app = server.create_app(ws, "tok")
         async with TestClient(TestServer(app)) as client:
-            await client.get("/?token=tok", allow_redirects=False)
+            await client.post("/login", json={"token": "tok"})
             resp = await client.get("/api/diff/lab.clab.yml", params={"node": "spine1"})
             assert resp.status == 200
             assert (await resp.json())["node"] == "spine1"

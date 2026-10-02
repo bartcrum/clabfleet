@@ -3,17 +3,20 @@
 Security: the GUI can open shells on lab nodes, so it only listens on
 localhost by default and every request must be authenticated. Two modes:
 
-- Single token (no users file): the random token printed at startup is
-  exchanged for a SameSite=Strict cookie on first visit, like Jupyter.
-  Whoever has it is an operator.
-- Named users (``clabfleet user add``): each user's own token is exchanged
-  for a server-side session, and the user's role decides what they may do
-  (see ``_allowed``: anything but a plain read needs an operator unless the
-  handler is marked ``allow_viewer``). Logins, jobs, edits and terminal
-  sessions go to the audit log.
+- Single token (no users file): whoever has the random token printed at
+  startup is an operator.
+- Named users (``clabfleet user add``): each user has their own token, and
+  the user's role decides what they may do (see ``_allowed``: anything but
+  a plain read needs an operator unless the handler is marked
+  ``allow_viewer``). Logins, jobs, edits and terminal sessions go to the
+  audit log.
 
-Websocket and POST requests must also come from the GUI's own origin, so
-other websites open in the browser cannot drive it.
+In both modes the token is only sent in the body of ``POST /login`` (login
+links carry it in the URL fragment, which browsers do not send to the
+server) and is exchanged for a random session id in a SameSite=Strict
+cookie; logging out ends the session. Websocket and POST requests must
+also come from the GUI's own origin, so other websites open in the
+browser cannot drive it.
 """
 
 import asyncio
@@ -28,15 +31,18 @@ import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from aiohttp import WSMsgType, web
+from aiohttp.abc import AbstractAccessLogger
 from yarl import URL
 
 from ..capture import GUI_MAX_BYTES, CaptureError
 from ..nodes import access_modes, terminal_command
 from ..snapshots import SnapshotError
 from .auth import (
-    ACCESS_ATTR, OPERATOR, VIEWER, AuditLog, User, UserStore, allow_viewer, operator_only,
+    ACCESS_ATTR, OPERATOR, VIEWER, AuditLog, User, UserStore, allow_viewer, hash_token,
+    login_link, operator_only,
 )
 from .captures import open_capture, pcap_filename, spec_from_query
 from .editing import EditConflict
@@ -46,10 +52,17 @@ from .terminals import CaptureSession, LocalTerminal, SSHTerminal
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-COOKIE = "clabfleet_token"            # single-token mode: the token itself
-SESSION_COOKIE = "clabfleet_session"  # named users: a session id
+SESSION_COOKIE = "clabfleet_session"  # plus the instance id; "__Host-" prefix over HTTPS
 SESSION_IDLE = 12 * 3600              # seconds without a request before a session ends
+SESSION_MAX_AGE = 7 * 24 * 3600       # seconds after login a session ends regardless
+SESSIONS_PER_USER = 20                # a further login ends that user's oldest session
+LOGIN_FAILURES = 5                    # failed logins allowed per remote address ...
+LOGIN_WINDOW = 60                     # ... in this many seconds; then 429 until it ends
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+PUBLIC_PATHS = {"/", "/login"}        # the page (it shows the login form) and the login
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
+       "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 LOOPBACK_NAMES = ("127.0.0.1", "::1", "localhost")
 
 # request[USER_KEY]: the User making the request (RequestKey needs aiohttp 3.12+)
@@ -60,11 +73,22 @@ USER_KEY = web.RequestKey("user", User) if hasattr(web, "RequestKey") else "clab
 class _Session:
     name: str
     token_sha256: str  # the token the session came from; rotating it ends the session
+    created: float
     last_seen: float
 
 
+@dataclass
+class _Failures:
+    window_start: float
+    count: int = 0    # failed logins in this window
+    refused: int = 0  # attempts refused with 429 in this window
+
+
 class Auth:
-    """Who a request comes from, in single-token or named-user mode."""
+    """Who a request comes from, in single-token or named-user mode.
+
+    Both modes hand out the same kind of session: a random id in a cookie,
+    mapped to a user here. The token itself never goes into a cookie."""
 
     def __init__(self, token: Optional[str] = None, users: Optional[UserStore] = None,
                  public_url: Optional[str] = None):
@@ -73,49 +97,98 @@ class Auth:
         self.token = token
         self.users = users
         self.public_url = public_url
+        # Browsers send a host's cookies to all of its ports, so each GUI
+        # instance has its own cookie name
+        self.instance = secrets.token_hex(4)
+        self._operator = None if users else User("", OPERATOR, hash_token(token))
         self._sessions: dict[str, _Session] = {}
+        self._failures: dict[str, _Failures] = {}
 
     @property
     def multi_user(self) -> bool:
         return self.users is not None
 
-    def login(self, token: str) -> Optional[tuple[User, str, str]]:
-        """(user, cookie name, cookie value) for a valid login token."""
+    def cookie_name(self, secure: bool) -> str:
+        name = f"{SESSION_COOKIE}_{self.instance}"
+        # The browser only accepts a __Host- cookie with Secure, Path=/ and
+        # no Domain, so nothing else on the host can set or widen it
+        return f"__Host-{name}" if secure else name
+
+    def check_token(self, token) -> Optional[User]:
+        """The user a login token belongs to, or None."""
+        if not isinstance(token, str) or not token:
+            return None
+        try:
+            raw = token.encode()
+        except UnicodeEncodeError:  # a lone surrogate from JSON
+            return None
         if not self.multi_user:
-            if token and hmac.compare_digest(token, self.token):
-                return User("", OPERATOR), COOKIE, token
-            return None
-        user = self.users.authenticate(token)
-        if not user:
-            return None
+            return self._operator if hmac.compare_digest(raw, self.token.encode()) else None
+        return self.users.authenticate(token)
+
+    def start_session(self, user: User) -> str:
+        """A new session id for ``user``. Beyond SESSIONS_PER_USER, the
+        user's oldest sessions end."""
         self._expire()
+        now = time.monotonic()
+        mine = sorted((s.created, sid) for sid, s in self._sessions.items() if s.name == user.name)
+        for _, sid in mine[:max(0, len(mine) - SESSIONS_PER_USER + 1)]:
+            del self._sessions[sid]
         sid = secrets.token_urlsafe(32)
-        self._sessions[sid] = _Session(user.name, user.token_sha256, time.monotonic())
-        return user, SESSION_COOKIE, sid
+        self._sessions[sid] = _Session(user.name, user.token_sha256, now, now)
+        return sid
 
     def identify(self, request: web.Request) -> Optional[User]:
-        if not self.multi_user:
-            candidate = request.cookies.get(COOKIE)
-            if candidate and hmac.compare_digest(candidate, self.token):
-                return User("", OPERATOR)
-            return None
-        session = self._sessions.get(request.cookies.get(SESSION_COOKIE, ""))
-        if not session or time.monotonic() - session.last_seen > SESSION_IDLE:
+        session = self._sessions.get(self._session_id(request))
+        now = time.monotonic()
+        if not session or self._expired(session, now):
             return None
         # Re-read the user each time: removed or rotated users are out at once
-        user = self.users.get(session.name)
+        user = self.users.get(session.name) if self.multi_user else self._operator
         if not user or not hmac.compare_digest(user.token_sha256, session.token_sha256):
             return None
-        session.last_seen = time.monotonic()
+        session.last_seen = now
         return user
 
     def logout(self, request: web.Request) -> None:
-        self._sessions.pop(request.cookies.get(SESSION_COOKIE, ""), None)
+        self._sessions.pop(self._session_id(request), None)
+
+    def _session_id(self, request: web.Request) -> str:
+        return request.cookies.get(self.cookie_name(_cookie_secure(request)), "")
+
+    @staticmethod
+    def _expired(session: _Session, now: float) -> bool:
+        return (now - session.last_seen > SESSION_IDLE
+                or now - session.created > SESSION_MAX_AGE)
 
     def _expire(self) -> None:
-        cutoff = time.monotonic() - SESSION_IDLE
-        for sid in [k for k, v in self._sessions.items() if v.last_seen < cutoff]:
+        now = time.monotonic()
+        for sid in [k for k, v in self._sessions.items() if self._expired(v, now)]:
             del self._sessions[sid]
+
+    # --- failed logins, per remote address ---
+
+    def throttled(self, remote: str) -> int:
+        """0 if ``remote`` may try to log in, else how many of its attempts
+        have been refused in the current window (1 for the first)."""
+        entry = self._window(remote)
+        if entry.count < LOGIN_FAILURES:
+            return 0
+        entry.refused += 1
+        return entry.refused
+
+    def login_failed(self, remote: str) -> None:
+        self._window(remote).count += 1
+
+    def _window(self, remote: str) -> _Failures:
+        now = time.monotonic()
+        if len(self._failures) > 1000:  # forget finished windows
+            self._failures = {k: v for k, v in self._failures.items()
+                              if now - v.window_start < LOGIN_WINDOW}
+        entry = self._failures.get(remote)
+        if not entry or now - entry.window_start >= LOGIN_WINDOW:
+            entry = self._failures[remote] = _Failures(now)
+        return entry
 
 
 WORKSPACE = web.AppKey("workspace", Workspace)
@@ -141,6 +214,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.on_response_prepare.append(_security_headers)
     app[CAPTURES] = set()  # running packet captures, stopped on shutdown
     app.router.add_get("/", _index)
+    app.router.add_post("/login", _login)
     app.router.add_post("/logout", _logout)
     app.router.add_get("/api/me", _me)
     app.router.add_get("/api/state", _state)
@@ -171,26 +245,45 @@ def run(workspace: Workspace, host: str = "127.0.0.1", port: int = 8650,
     base = public_url.rstrip("/") if public_url else _base_url(host, port, ssl_context is not None)
 
     async def _announce(_app):
-        if users:
-            url = f"{base}/"
-            lines = [f"clabfleet GUI running at:\n\n    {url}\n",
-                     f"Users log in with their own link from `clabfleet user add`: "
-                     f"{base}/?token=<token>",
-                     f"Users file: {users.path}"]
-            if not users.users():
-                lines.append("No users yet: add one with `clabfleet user add NAME`.")
-        else:
-            url = f"{base}/?token={token}"
-            lines = [f"clabfleet GUI running at:\n\n    {url}\n"]
-        if audit and audit.path:
-            lines.append(f"Audit log: {audit.path}")
-        lines.append("Press Ctrl+C to stop.")
-        print("\n".join(lines), flush=True)
+        url, text = startup_message(base, token, users, audit)
+        print(text, flush=True)
         if open_browser and not users:  # a named user's token is not ours to use
             asyncio.get_running_loop().run_in_executor(None, webbrowser.open, url)
 
     app.on_startup.append(_announce)
-    web.run_app(app, host=host, port=port, ssl_context=ssl_context, print=None)
+    # AccessLogger: request lines without query strings (no tokens in logs)
+    web.run_app(app, host=host, port=port, ssl_context=ssl_context, print=None,
+                access_log_class=AccessLogger)
+
+
+def startup_message(base: str, token: Optional[str], users: Optional[UserStore],
+                    audit: Optional[AuditLog]) -> tuple[str, str]:
+    """(URL to open, text to print) when the GUI starts."""
+    if users:
+        url = f"{base}/"
+        lines = [f"clabfleet GUI running at:\n\n    {url}\n",
+                 f"Users log in with their own link from `clabfleet user add`: "
+                 f"{login_link(base, '<token>')}",
+                 f"Users file: {users.path}"]
+        if not users.users():
+            lines.append("No users yet: add one with `clabfleet user add NAME`.")
+    else:
+        url = login_link(base, token)
+        lines = [f"clabfleet GUI running at:\n\n    {url}\n"]
+    if audit and audit.path:
+        lines.append(f"Audit log: {audit.path}")
+    lines.append("Press Ctrl+C to stop.")
+    return url, "\n".join(lines)
+
+
+class AccessLogger(AbstractAccessLogger):
+    """aiohttp's access log without query strings: old ``/?token=`` links
+    and websocket parameters stay out of the log."""
+
+    def log(self, request, response, time):
+        self.logger.info('%s "%s %s HTTP/%d.%d" %s %s %.3fs', request.remote, request.method,
+                         request.rel_url.raw_path, *request.version, response.status,
+                         response.body_length, time)
 
 
 def _base_url(host: str, port: int, tls: bool) -> str:
@@ -267,32 +360,12 @@ def _cookie_secure(request: web.Request) -> bool:
 
 @web.middleware
 async def _auth_middleware(request: web.Request, handler):
-    if request.path.startswith("/static/"):
+    if request.path.startswith("/static/") or request.path in PUBLIC_PATHS:
         return await handler(request)
-    auth: Auth = request.app[AUTH]
 
-    query_token = request.query.get("token")
-    if request.path == "/" and query_token is not None:
-        login = auth.login(query_token)
-        if login:
-            # Swap the URL token for a cookie and drop it from the address bar
-            user, name, value = login
-            resp = web.Response(status=302, headers={"Location": "/"})
-            resp.set_cookie(name, value, httponly=True, samesite="Strict",
-                            secure=_cookie_secure(request) or None)
-            request.app[AUDIT].record("login", user, request.remote)
-            return resp
-        request.app[AUDIT].record("login_failed", None, request.remote, reason="invalid token")
-
-    user = auth.identify(request)
+    user = request.app[AUTH].identify(request)
     if not user:
-        if request.path == "/":
-            how = ("your own login link (from <code>clabfleet user add</code>)"
-                   if auth.multi_user else
-                   "the URL (including <code>?token=</code>) printed by <code>clabfleet gui</code>")
-            return web.Response(status=401, content_type="text/html",
-                                text=f"<p>Open the GUI with {how}.</p>")
-        raise web.HTTPUnauthorized(text="missing or invalid token")
+        raise web.HTTPUnauthorized(text="not logged in")
     request[USER_KEY] = user
 
     if request.method != "GET" or _is_websocket(request):
@@ -305,18 +378,65 @@ async def _auth_middleware(request: web.Request, handler):
 
 
 async def _security_headers(request, response):
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    headers = response.headers
+    headers.setdefault("Content-Security-Policy", CSP)
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("Referrer-Policy", "no-referrer")
+    if _cookie_secure(request):
+        headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    if not request.path.startswith("/static/"):
+        headers.setdefault("Cache-Control", "no-store")
+
+
+async def _login(request):
+    """Swap a token for a session cookie: ``{"token": ..., "switch": bool}``.
+
+    Only from the GUI's own origin and as JSON, which a form on another
+    site cannot send. A session of a different user is only replaced with
+    ``switch``, so a stranger's login link cannot quietly swap accounts."""
+    auth: Auth = request.app[AUTH]
+    remote = request.remote or ""
+    if not _same_origin(request):
+        raise web.HTTPForbidden(text="cross-origin request refused")
+    if request.content_type != "application/json":
+        raise web.HTTPUnsupportedMediaType(text="expected JSON")
+    refused = auth.throttled(remote)
+    if refused:
+        if refused == 1:  # one audit line per address and window
+            request.app[AUDIT].record("login_throttled", None, remote,
+                                      failures=LOGIN_FAILURES, seconds=LOGIN_WINDOW)
+        raise web.HTTPTooManyRequests(text="too many failed logins; try again in a minute",
+                                      headers={"Retry-After": str(LOGIN_WINDOW)})
+    body = await _json_body(request)
+    user = auth.check_token(body.get("token"))
+    if not user:
+        auth.login_failed(remote)
+        request.app[AUDIT].record("login_failed", None, remote, reason="invalid token")
+        raise web.HTTPUnauthorized(text="invalid token")
+
+    current = auth.identify(request)
+    if current and current.name != user.name and body.get("switch") is not True:
+        return web.json_response({"error": "logged in as another user",
+                                  "user": current.name}, status=409)
+    auth.logout(request)  # a login always starts a fresh session
+    secure = _cookie_secure(request)
+    resp = web.json_response({"user": user.name or None, "role": user.role})
+    resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
+                    httponly=True, samesite="Strict", secure=secure or None)
+    request.app[AUDIT].record("login", user, remote)
+    return resp
 
 
 @allow_viewer
 async def _logout(request):
-    request.app[AUTH].logout(request)
+    auth: Auth = request.app[AUTH]
+    auth.logout(request)
     audit(request, "logout")
     resp = web.json_response({"ok": True})
-    for name in (COOKIE, SESSION_COOKIE):
-        resp.del_cookie(name)
+    secure = _cookie_secure(request)
+    resp.del_cookie(auth.cookie_name(secure), path="/", secure=secure or None,
+                    httponly=True, samesite="Strict")
     return resp
 
 
@@ -337,6 +457,12 @@ def _audit_job_finished(log: AuditLog, job: Job) -> None:
 # ----------------------------------------------------------------------
 
 async def _index(request):
+    """The page, for anyone: without a session it shows the login form."""
+    token = request.query.get("token")
+    if token is not None:
+        # Deprecated ?token= link: move the token into the fragment, where
+        # the page picks it up and posts it to /login
+        raise web.HTTPFound(f"/#token={quote(token, safe='')}")
     return web.FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 

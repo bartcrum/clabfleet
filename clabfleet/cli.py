@@ -597,6 +597,8 @@ def _user_store(args: argparse.Namespace, must_exist: bool = True):
 
 
 def _user(args: argparse.Namespace) -> int:
+    from .gui.auth import login_link
+
     store = _user_store(args)
     cmd = args.user_command
     if cmd == "list":
@@ -619,10 +621,10 @@ def _user(args: argparse.Namespace) -> int:
     else:  # rotate
         token = store.rotate(args.name)
         print(f"New token for '{args.name}'; the old one and its sessions no longer work")
-    base = (args.url or f"https://{socket.gethostname()}:8650").rstrip("/")
+    base = args.url or f"https://{socket.gethostname()}:8650"
     print(f"\nToken (shown only once, it is not stored):\n\n    {token}\n")
     print(f"Login link (adjust the address to where the GUI runs):\n\n"
-          f"    {base}/?token={token}\n")
+          f"    {login_link(base, token)}\n")
     return 0
 
 

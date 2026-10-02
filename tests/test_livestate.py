@@ -305,7 +305,7 @@ def test_live_api(tmp_path, monkeypatch):
         app = server.create_app(ws, "tok")
         async with TestClient(TestServer(app)) as client:
             assert (await client.get("/api/live/l.clab.yml")).status == 401
-            await client.get("/?token=tok", allow_redirects=False)
+            await client.post("/login", json={"token": "tok"})
             for _ in range(200):
                 resp = await client.get("/api/live/l.clab.yml")
                 assert resp.status == 200
