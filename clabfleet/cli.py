@@ -17,6 +17,7 @@ Usage:
                       [-c COUNT] [--duration SECONDS] [--snaplen BYTES] [--via auto|node|helper]
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
+    clabfleet routing <topology.clab.yml> [--protocol ospf|bgp|evpn] [--json]
     clabfleet export-live [<inventory>] [-o output.clab.yml] [--netbox URL | --nautobot URL
                           | --ansible FILE] [--filter KEY=VALUE] [--allowed-network CIDR]
                           [--sanitise [--allow-residual] | --no-sanitise]
@@ -76,6 +77,8 @@ from .exporter import (
 )
 from .inventory import load_inventory, printable
 from .resync import apply_diff, diff_topology, was_sanitised
+from .routing import routing_view
+from .routing.report import PROTOCOLS, format_report
 from .sanitise import SanitiseOptions
 from .templates import (
     DEFAULT_KIND,
@@ -296,6 +299,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument("--strict", action="store_true",
                             help="Fail on warnings as well as errors")
 
+    # --- routing ---
+    p_routing = sub.add_parser(
+        "routing", help="Show the OSPF, BGP and EVPN design of a topology's configs",
+        description="Read the nodes' startup configs (no host is contacted) and print "
+                    "the intended OSPF adjacencies, BGP sessions and EVPN overlay, "
+                    "with any inconsistencies found between the nodes.")
+    p_routing.add_argument("topology", help="Topology file")
+    p_routing.add_argument("--protocol", action="append", choices=PROTOCOLS,
+                           help="Only this protocol (repeatable)")
+    p_routing.add_argument("--json", action="store_true", help="Print the full view as JSON")
+
     # --- export-live ---
     p_live = sub.add_parser(
         "export-live", help="Build a topology from live network devices (NAPALM)",
@@ -508,6 +522,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "validate":
         return _validate(args)
+
+    if cmd == "routing":
+        return _routing(args)
 
     if cmd == "new":
         return _new(args)
@@ -861,6 +878,15 @@ def _validate(args: argparse.Namespace) -> int:
         if report.errors or (args.strict and report.warnings):
             failed += 1
     return 1 if failed else 0
+
+
+def _routing(args: argparse.Namespace) -> int:
+    view = routing_view(load_topology(args.topology))
+    if args.json:
+        print(json.dumps(view, indent=2))
+    else:
+        print(format_report(view, args.protocol or PROTOCOLS), end="")
+    return 0
 
 
 def _export_live(args: argparse.Namespace) -> int:

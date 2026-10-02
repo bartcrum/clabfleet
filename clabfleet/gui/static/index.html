@@ -59,6 +59,7 @@
         <nav class="tabs" role="tablist">
           <button class="tab active" data-view="diagram" role="tab">Diagram</button>
           <button class="tab" data-view="nodes" role="tab">Nodes</button>
+          <button class="tab" data-view="routing" role="tab">Routing</button>
           <button class="tab" data-view="yaml" role="tab">YAML</button>
         </nav>
 
@@ -79,6 +80,22 @@
               <thead><tr><th>Node</th><th>Kind</th><th>Image</th><th id="host-col">Host</th><th>State</th><th>Mgmt IPv4</th><th>Open</th></tr></thead>
               <tbody id="node-rows"></tbody>
             </table>
+          </section>
+          <section id="view-routing" class="view" hidden>
+            <svg id="routing" class="diagram routing" aria-label="Routing protocol diagram"></svg>
+            <div class="routing-bar">
+              <div id="routing-protos" class="seg" role="group" aria-label="Protocol"></div>
+              <div id="routing-filters" class="routing-filters"></div>
+            </div>
+            <div class="diagram-tools">
+              <button id="routing-problems-btn" class="btn ghost small" hidden></button>
+              <button id="routing-reload" class="btn ghost small" title="Read the startup configs again">Reload</button>
+              <button id="routing-fit" class="btn ghost small">Fit</button>
+            </div>
+            <ul id="routing-problems" class="routing-problems" hidden></ul>
+            <div id="routing-legend" class="routing-legend" hidden></div>
+            <div id="routing-card" class="node-card routing-card" hidden></div>
+            <div id="routing-empty" class="diagram-error routing-empty" hidden></div>
           </section>
           <section id="view-yaml" class="view yaml-view" hidden>
             <div class="editor-bar operator-only">
@@ -130,5 +147,6 @@
   <script src="/static/vendor/xterm.js"></script>
   <script src="/static/vendor/addon-fit.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/routing.js"></script>
 </body>
 </html>

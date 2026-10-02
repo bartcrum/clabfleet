@@ -24,6 +24,7 @@ from ..deployer import LabDeployer, read_placement_record
 from ..livestate import LiveCache, link_states, probe_ifaces, probe_stats
 from ..nodes import InspectError, access_modes, inspect_all, parse_inspect
 from ..readiness import ReadinessCache, check_ready
+from ..routing import routing_view
 from ..snapshots import Snapshotter, diff_lab
 from ..validate import validate_text
 from .editing import EditConflict, set_positions, text_hash, write_if_unchanged
@@ -258,6 +259,14 @@ class Workspace:
         except Exception as exc:
             detail["error"] = str(exc)
         return detail
+
+    def routing(self, topo_id: str) -> dict:
+        """Intended OSPF / BGP / EVPN views of a topology (from its configs)."""
+        path = self.topology_path(topo_id)
+        try:
+            return routing_view(load_topology(path))
+        except Exception as exc:
+            return {"error": str(exc)}
 
     def node_diff(self, topo_id: str, node: str, against: str) -> dict:
         """One node's config in the latest snapshot against ``previous`` or ``startup``."""

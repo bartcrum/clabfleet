@@ -467,7 +467,8 @@ async function selectTopology(id) {
   $("#empty").hidden = true;
   $("#lab").hidden = false;
   loadEditor();
-  setTabsAvailable(["diagram", "nodes", "yaml"]);
+  window.Routing?.reset();
+  setTabsAvailable(["diagram", "nodes", "routing", "yaml"]);
   renderSidebar();
   renderLabHead();
   renderDiagram(true);
@@ -495,6 +496,7 @@ async function reloadDetail(discardEdits) {
   renderDiagram(false);
   renderNodesTable();
   renderNodeCard();
+  window.Routing?.changed();
 }
 
 function selectOtherLab(lab) {
@@ -554,8 +556,9 @@ function setTabsAvailable(views) {
 
 function showView(view) {
   for (const tab of document.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.view === view);
-  for (const v of ["diagram", "nodes", "yaml"]) $(`#view-${v}`).hidden = v !== view;
+  for (const v of ["diagram", "nodes", "routing", "yaml"]) $(`#view-${v}`).hidden = v !== view;
   if (view === "diagram") renderDiagram(false);
+  if (view === "routing") window.Routing?.show();
 }
 
 function renderRuntimeOverlays() {
@@ -563,6 +566,7 @@ function renderRuntimeOverlays() {
   if (S.selected.type === "topo" && S.detail) {
     renderDiagram(false);
     renderNodeCard();
+    window.Routing?.runtime();
   }
   renderNodesTable();
 }
@@ -1592,7 +1596,7 @@ function setup() {
   setupDiagramInteraction();
   setupEditor();
   setupDock();
-  window.addEventListener("resize", () => renderDiagram(false));
+  window.addEventListener("resize", () => { renderDiagram(false); window.Routing?.resize(); });
 
   loadMe();
   refreshState();
