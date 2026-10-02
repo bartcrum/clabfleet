@@ -10,3 +10,8 @@ clab-*/
 *.placement.json
 .clabfleet/
 snapshots/
+configs/
+!tests/fixtures/**/configs/
+*.import-report.yaml
+users.yaml
+audit.jsonl

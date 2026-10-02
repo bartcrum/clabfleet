@@ -82,6 +82,51 @@ def test_user_store_rereads_changes_and_fails_closed(tmp_path):
         gui_view.validate()
 
 
+def test_user_store_refuses_files_others_can_change(tmp_path, caplog, monkeypatch):
+    conf = tmp_path / "conf"
+    store = UserStore(conf / "users.yaml")
+    token = store.add("alice")
+    assert stat.S_IMODE(conf.stat().st_mode) == 0o700
+    assert [p.name for p in conf.iterdir()] == ["users.yaml"]  # no temporary left over
+
+    store.path.chmod(0o620)
+    assert store.authenticate(token) is None  # fails closed
+    assert "writable by other users" in caplog.text
+    with pytest.raises(ValueError, match="Users file .* writable by other users"):
+        store.validate()
+    with pytest.raises(ValueError, match="writable by other users"):
+        store.add("mallory")
+    store.path.chmod(0o600)
+
+    conf.chmod(0o777)
+    with pytest.raises(ValueError, match="Directory of users file .* writable"):
+        store.validate()
+    conf.chmod(0o700)
+    assert store.validate()["alice"].role == "operator"
+
+    uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: uid + 4242)  # as if someone else owned it
+    with pytest.raises(ValueError, match="not owned by you"):
+        store.validate()
+
+
+def test_user_store_write_ignores_planted_temporary(tmp_path):
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    (tmp_path / ".users.yaml.tmp").symlink_to(victim)  # the old fixed name
+    UserStore(tmp_path / "users.yaml").add("alice")
+    assert victim.read_text() == "untouched"
+    assert stat.S_IMODE((tmp_path / "users.yaml").stat().st_mode) == 0o600
+
+
+def test_audit_log_does_not_follow_symlinks(tmp_path):
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    (tmp_path / "audit.jsonl").symlink_to(victim)
+    AuditLog(tmp_path / "audit.jsonl").record("login", "alice")
+    assert victim.read_text() == "untouched"
+
+
 def test_user_cli(tmp_path, capsys):
     users = str(tmp_path / "users.yaml")
     assert cli.main(["user", "add", "alice", "--users", users,

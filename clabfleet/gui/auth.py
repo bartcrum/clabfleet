@@ -1,7 +1,9 @@
 """Named GUI users, roles and the audit log.
 
 Users live in a YAML file (``~/.clabfleet/users.yaml`` by default, mode
-0600) managed with ``clabfleet user``. Each user has a role and the SHA-256
+0600) managed with ``clabfleet user``. A users file that another user could
+change (group/world-writable, or owned by someone else, or in such a
+directory) is refused: whoever can write it can make themselves an operator. Each user has a role and the SHA-256
 of a random token; the token itself is shown once and never stored. A
 plain hash is enough because tokens are 256-bit random strings, not
 passwords.
@@ -26,6 +28,8 @@ import logging
 import os
 import re
 import secrets
+import stat
+import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -120,6 +124,7 @@ class UserStore:
             return dict(self._users)
 
     def _read(self) -> dict[str, User]:
+        self._check_ownership()
         if self.path.stat().st_mode & 0o077:
             logger.warning("Users file %s is readable by other users; chmod 600 it", self.path)
         data = yaml.safe_load(self.path.read_text()) or {}
@@ -137,6 +142,17 @@ class UserStore:
                 raise ValueError(f"user '{name}': token_sha256 is not a SHA-256 hex digest")
             users[str(name)] = User(str(name), role, digest, str(entry.get("created", "")))
         return users
+
+    def _check_ownership(self) -> None:
+        """Refuse a users file (or its directory) other users could change."""
+        for path, what in ((self.path, "Users file"), (self.path.parent, "Directory of users file")):
+            st = path.stat()
+            if st.st_uid not in (os.getuid(), 0):
+                raise ValueError(f"{what} {path} is not owned by you; refusing to use it")
+            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise ValueError(
+                    f"{what} {path} is writable by other users; refusing to use it "
+                    "(chmod go-w it)")
 
     def validate(self) -> dict[str, User]:
         """The users, raising if the file is unreadable (for start-up checks)."""
@@ -199,12 +215,17 @@ class UserStore:
                 "# Only SHA-256 hashes of the tokens are stored.\n")
         text += yaml.safe_dump({"users": {n: u.to_dict() for n, u in sorted(users.items())}},
                                sort_keys=False)
-        tmp = self.path.with_name(f".{self.path.name}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
-        os.chmod(tmp, 0o600)  # in case it existed with other permissions
-        os.replace(tmp, self.path)
+        # mkstemp: a fresh 0600 file, so nothing planted in the directory
+        # can redirect or pre-open the write
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.",
+                                   suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+            os.replace(tmp, self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
 
 class AuditLog:
@@ -237,7 +258,10 @@ class AuditLog:
         with self._lock:
             try:
                 self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                if self.path.is_symlink():
+                    raise OSError(f"{self.path} is a symlink; not following it")
+                fd = os.open(self.path,
+                             os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
                 with os.fdopen(fd, "a") as fh:
                     fh.write(line + "\n")
             except OSError as exc:

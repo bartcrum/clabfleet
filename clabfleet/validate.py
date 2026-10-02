@@ -99,6 +99,11 @@ def _check_files(topo: Topology, report: ValidationReport) -> None:
             report.warnings.append(
                 f"{where} is outside the topology directory and is not copied to remote hosts"
             )
+        elif topo.links_outside(ref.path):
+            report.warnings.append(
+                f"{where} is a symlink to a file outside the topology directory "
+                "and is not copied to remote hosts"
+            )
         elif not (topo.base_dir / ref.path).exists():
             if ref.prop in REQUIRED_FILE_PROPS:
                 report.errors.append(f"{where} does not exist")

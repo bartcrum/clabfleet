@@ -1059,7 +1059,7 @@ function renderNodeCard() {
       h("button", { class: "close", title: "Close", onclick: () => selectNode(null) }, "×")),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
     openButtons(lab, node.name, node.modes, running, !!rt),
-    S.selected?.type === "topo" && h("span", { class: "open diff-open" },
+    S.selected?.type === "topo" && canOperate() && h("span", { class: "open diff-open" },
       h("button", {
         class: "btn small ghost",
         title: `Diff ${node.name}'s config in the latest snapshot`,
