@@ -442,13 +442,18 @@ function rtRender() {
     const geo = e.arc ? rtArcGeom(p0, p1) : rtEdgeGeom(p0, p1, idx, pairCount[k], e.a > e.b);
     const selected = RT.sel?.type === "edge" && RT.sel.id === e.id;
     const style = e.color != null ? `--c: var(--c${e.color % RT_PALETTE})` : null;
-    g.append(s("path", { class: `${e.cls}${e.color != null ? " colored" : ""}${selected ? " selected" : ""}`, d: geo.d, style }));
+    const ends = `${e.a}|${e.b}`;
+    g.append(s("path", { class: `${e.cls}${e.color != null ? " colored" : ""}${selected ? " selected" : ""}`, d: geo.d, style, "data-ends": ends }));
     g.append(s("path", { class: "link-hit", d: geo.d, "data-edge": e.id }, s("title", {}, e.title)));
     if (e.label) {
-      labels.append(s("text", { class: "rt-label", x: geo.mid[0], y: geo.mid[1] - 4, "text-anchor": "middle" }, e.label));
+      labels.append(s("text", { class: "rt-label", x: geo.mid[0], y: geo.mid[1] - 4, "text-anchor": "middle", "data-ends": ends }, e.label));
     }
     for (const [end, from, alt, text] of [[e.a, p0, false, e.ai], [e.b, p1, true, e.bi]]) {
-      if (text) labels.append(ifaceLabel(from, geo.c, NODE_W, NODE_H, text, alt));
+      if (text) {
+        const label = ifaceLabel(from, geo.c, NODE_W, NODE_H, text, alt);
+        label.dataset.ends = ends;
+        labels.append(label);
+      }
     }
   }
 
@@ -462,12 +467,12 @@ function rtRender() {
     const selected = RT.sel?.type === "node" && RT.sel.id === n.name;
     g.append(s("g", {
       class: `node${info.off ? " off" : ""}${selected ? " selected" : ""}`,
-      transform: `translate(${p[0]},${p[1]})`, "data-id": n.name,
+      transform: `translate(${p[0]},${p[1]})`, "data-id": n.name, "data-f": n.name,
     },
       s("rect", { x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 9 }),
-      s("circle", { class: `status ${stClass}`, cx: -NODE_W / 2 + 13, cy: -7, r: 4.5 }),
+      statusGlyph(stClass, -NODE_W / 2 + 13, -7),
       s("text", { class: "name", x: -NODE_W / 2 + 24, y: -2 }, truncate(n.name, info.badge ? 11 : 14)),
-      s("text", { class: "kind", x: -NODE_W / 2 + 24, y: 13 }, truncate(info.sub, 19)),
+      s("text", { class: "kind", x: -NODE_W / 2 + 24, y: 13 }, truncate(info.sub, 17)),
       info.badge ? s("text", { class: "rt-badge", x: NODE_W / 2 - 8, y: -2, "text-anchor": "end" }, info.badge) : null,
       info.warn ? s("text", { class: "rt-warn", x: NODE_W / 2 - 4, y: -NODE_H / 2 - 4, "text-anchor": "end" }, "⚠") : null,
       s("title", {}, `${n.name} — ${info.sub}`)));
@@ -475,7 +480,7 @@ function rtRender() {
   for (const [id, info] of Object.entries(model.nodes)) {
     if (!info.external || !P[id]) continue;
     const [x, y] = P[id];
-    g.append(s("g", { class: "pseudo rt-ext", transform: `translate(${x},${y})`, "data-id": id },
+    g.append(s("g", { class: "pseudo rt-ext", transform: `translate(${x},${y})`, "data-id": id, "data-f": id },
       s("rect", { x: -PSEUDO_W / 2, y: -PSEUDO_H / 2 - 6, width: PSEUDO_W, height: PSEUDO_H + 12, rx: 6 }),
       s("text", { class: "name", "text-anchor": "middle", y: -2 }, truncate(info.label, 18)),
       s("text", { class: "name", "text-anchor": "middle", y: 12 }, truncate(info.sub, 18)),
@@ -483,6 +488,7 @@ function rtRender() {
   }
   g.append(labels);
   svg.replaceChildren(g);
+  rtRefocus();
 
   rtRenderLegend(rtLiveData() ? [
     { swatch: "line", cls: "live-up", text: "up" },
@@ -814,9 +820,12 @@ function rtFit(P) {
 
 let rtLastClick = { id: null, t: 0 };
 
+let rtRefocus = () => {};
+
 function rtSetup() {
   rtPrefsLoad();
   const svg = $("#routing");
+  rtRefocus = setupFocus(svg, () => (RT.sel?.type === "node" ? RT.sel.id : null));
   let drag = null;
   const applyView = () => $("#rt-viewport")?.setAttribute("transform", `translate(${RT.view.x},${RT.view.y}) scale(${RT.view.k})`);
 

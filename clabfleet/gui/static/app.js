@@ -19,6 +19,22 @@ const S = {
 
 const $ = (sel) => document.querySelector(sel);
 
+// Colour theme: "system" follows prefers-color-scheme; light and dark set
+// data-theme on <html>, which app.css checks before the media query
+const THEMES = { system: "◐ System", light: "☀ Light", dark: "☾ Dark" };
+function savedTheme() {
+  try { return THEMES[localStorage.getItem("clab-theme")] ? localStorage.getItem("clab-theme") : "system"; } catch { return "system"; }
+}
+let currentTheme = savedTheme();
+function applyTheme(theme) {
+  currentTheme = theme;
+  if (theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById("theme");
+  if (btn) btn.textContent = THEMES[theme];
+}
+applyTheme(currentTheme);  // before first render, so the page does not flash
+
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -53,6 +69,34 @@ async function api(path, opts = {}) {
   if (res.status === 401) showLogin("Your session has ended. Log in again.");
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
   return res.json();
+}
+
+// In-app confirmation (replaces window.confirm): states the impact, keeps
+// focus on Cancel, and for big labs asks to type the name. Resolves true
+// only for the confirm button.
+function confirmDialog({ title, body, ok = "OK", danger = false, typeToConfirm = null }) {
+  const dlg = $("#confirm");
+  if (dlg.open) dlg.close("cancel");
+  $("#confirm-title").textContent = title;
+  $("#confirm-body").replaceChildren(...[body].flat().filter(Boolean).map(
+    (x) => (x instanceof Node ? x : h("p", {}, x))));
+  const okBtn = $("#confirm-ok");
+  okBtn.textContent = ok;
+  okBtn.className = `btn ${danger ? "danger-solid" : "primary"}`;
+  const typeRow = $("#confirm-type"), input = $("#confirm-input");
+  typeRow.hidden = !typeToConfirm;
+  input.value = "";
+  okBtn.disabled = !!typeToConfirm;
+  input.oninput = () => { okBtn.disabled = input.value !== typeToConfirm; };
+  input.onkeydown = (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); if (!okBtn.disabled) dlg.close("ok"); }
+  };
+  dlg.returnValue = "";
+  dlg.showModal();
+  (typeToConfirm ? input : $("#confirm-cancel")).focus();
+  return new Promise((resolve) => {
+    dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok"), { once: true });
+  });
 }
 
 let toastTimer;
@@ -121,6 +165,27 @@ function nodeState(rt) {
   if (!rt) return "";
   if (rt.state !== "running") return "partial";
   return rt.ready === false ? "booting" : "running";
+}
+
+// Status glyph for a node box on the canvas: same shapes as the .dot spans
+// (ring, disc with a check, half ring, diamond) so state never relies on
+// colour alone. ``state`` is a nodeState() value or "other".
+function statusGlyph(state, cx, cy) {
+  const r = 5;
+  const cls = state === "partial" ? "other" : state;
+  let shape;
+  if (cls === "running") {
+    shape = [s("circle", { class: "disc", cx, cy, r: r + 0.5 }),
+             s("path", { class: "mark", d: `M${cx - 2.4},${cy + 0.2} l1.7,1.8 l3.2,-3.6` })];
+  } else if (cls === "booting") {
+    shape = [s("circle", { class: "ring", cx, cy, r }),
+             s("path", { class: "half", d: `M${cx},${cy - r} A${r},${r} 0 0 1 ${cx},${cy + r} Z` })];
+  } else if (cls === "other") {
+    shape = [s("path", { class: "diamond", d: `M${cx},${cy - r - 1} l${r + 1},${r + 1} l${-r - 1},${r + 1} l${-r - 1},${-r - 1} Z` })];
+  } else {
+    shape = [s("circle", { class: "ring", cx, cy, r: r - 0.5 })];
+  }
+  return s("g", { class: `status ${cls}` }, ...shape);
 }
 
 function nodeStateText(rt) {
@@ -324,8 +389,12 @@ function yamlDirty() {
 }
 
 // Ask before throwing away unsaved editor changes
-function confirmDiscard() {
-  return !yamlDirty() || confirm(`Discard your unsaved changes to ${S.selected.id}?`);
+async function confirmDiscard() {
+  return !yamlDirty() || confirmDialog({
+    title: "Discard unsaved changes?",
+    body: `Your edits to ${S.selected.id} in the YAML tab have not been saved.`,
+    ok: "Discard changes", danger: true,
+  });
 }
 
 function loadEditor() {
@@ -453,7 +522,7 @@ function setupEditor() {
 
 async function selectTopology(id) {
   if (S.selected?.type === "topo" && S.selected.id === id) { reloadDetail(); return; }
-  if (!confirmDiscard()) return;
+  if (!(await confirmDiscard())) return;
   S.selected = { type: "topo", id };
   S.selectedNode = null;
   try {
@@ -499,8 +568,8 @@ async function reloadDetail(discardEdits) {
   window.Routing?.changed();
 }
 
-function selectOtherLab(lab) {
-  if (!confirmDiscard()) return;
+async function selectOtherLab(lab) {
+  if (!(await confirmDiscard())) return;
   S.selected = { type: "lab", lab };
   S.detail = null;
   S.live = null;
@@ -822,7 +891,38 @@ function ifaceLabel(center, toward, w, hgt, text, alt) {
   return s("text", { class: "iface", x, y, "text-anchor": anchor }, text);
 }
 
+// Focus on hover or selection: the node, its links and its neighbours stay,
+// everything else fades. Nodes carry data-f (their id), links and their
+// labels data-ends ("a|b"); used by the Diagram and Routing tabs.
+function applyFocus(svg, id) {
+  if (!id) { svg.classList.remove("focusing"); return; }
+  const near = new Set([id]);
+  for (const el of svg.querySelectorAll("[data-ends]")) {
+    const [a, b] = el.dataset.ends.split("|");
+    const on = a === id || b === id;
+    el.classList.toggle("hl", on);
+    if (on) { near.add(a); near.add(b); }
+  }
+  for (const el of svg.querySelectorAll("[data-f]")) el.classList.toggle("hl", near.has(el.dataset.f));
+  svg.classList.add("focusing");
+}
+
+// Wires hover focus on ``svg``; ``selected()`` gives the node to focus when
+// nothing is hovered. Returns a function to call after each re-render.
+function setupFocus(svg, selected) {
+  let hover = null;
+  const refresh = () => applyFocus(svg, hover || selected());
+  svg.addEventListener("pointerover", (ev) => {
+    if (ev.buttons) return;  // dragging or panning
+    const f = ev.target.closest("[data-f]")?.dataset.f || null;
+    if (f !== hover) { hover = f; refresh(); }
+  });
+  svg.addEventListener("pointerleave", () => { hover = null; refresh(); });
+  return refresh;
+}
+
 let diagramModel = null;
+let refocusDiagram = () => {};
 
 function renderDiagram(fit) {
   const svg = $("#diagram");
@@ -871,9 +971,10 @@ function renderDiagram(fit) {
     const down = ls?.state === "down";
     const stateText = down ? `\nDOWN: ${downEnds(ls).join(", ")}` : ls?.state === "up" ? "\nup" : "";
     const d = `M${p0[0]},${p0[1]} Q${c[0]},${c[1]} ${p1[0]},${p1[1]}`;
+    const ends = `${l.a.id}|${l.b.id}`;
     g.append(s("path", {
       class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}${down ? " down" : ""}${selectedLink()?.id === l.id ? " selected" : ""}`,
-      d,
+      d, "data-ends": ends,
     }, s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}${stateText}`)));
     // Wide invisible stroke so links are easy to click (packet capture)
     g.append(s("path", { class: "link-hit", d, "data-link": l.id },
@@ -883,6 +984,7 @@ function renderDiagram(fit) {
       const pseudo = end.id.startsWith("~");
       const label = ifaceLabel(from, c, pseudo ? PSEUDO_W : NODE_W, pseudo ? PSEUDO_H : NODE_H, end.iface, alt);
       if (ls?.[side]?.state === "down") label.classList.add("down");
+      label.dataset.ends = ends;
       labels.append(label);
     }
   }
@@ -891,7 +993,7 @@ function renderDiagram(fit) {
   for (const nd of diagramModel.nodes) {
     const [x, y] = P[nd.id];
     if (nd.pseudo) {
-      g.append(s("g", { class: "pseudo", transform: `translate(${x},${y})` },
+      g.append(s("g", { class: "pseudo", transform: `translate(${x},${y})`, "data-f": nd.id },
         s("rect", { x: -PSEUDO_W / 2, y: -PSEUDO_H / 2, width: PSEUDO_W, height: PSEUDO_H, rx: 6 }),
         s("text", { class: "name", "text-anchor": "middle", y: 4 }, truncate(nd.label, 18))));
       continue;
@@ -902,12 +1004,12 @@ function renderDiagram(fit) {
     const usage = res && res.cpu != null ? `${fmtCpu(res.cpu)} · ${fmtBytes(res.mem)}` : "";
     const el = s("g", {
       class: `node${S.selectedNode === nd.id ? " selected" : ""}`,
-      transform: `translate(${x},${y})`, "data-id": nd.id,
+      transform: `translate(${x},${y})`, "data-id": nd.id, "data-f": nd.id,
     },
       s("rect", { x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 9 }),
-      s("circle", { class: `status ${stClass}`, cx: -NODE_W / 2 + 13, cy: -7, r: 4.5 }),
+      statusGlyph(stClass, -NODE_W / 2 + 13, -7),
       s("text", { class: "name", x: -NODE_W / 2 + 24, y: -2 }, truncate(nd.id, 14)),
-      s("text", { class: "kind", x: -NODE_W / 2 + 24, y: 13 }, truncate(nd.node.kind, 17)),
+      s("text", { class: "kind", x: -NODE_W / 2 + 24, y: 13 }, truncate(nd.node.kind, 16)),
       multi && (nodeHost(lab, nd.id) || nd.node.host_pin)
         ? s("text", { class: "hostbadge", x: NODE_W / 2 - 6, y: NODE_H / 2 + 13, "text-anchor": "end" }, `@${nodeHost(lab, nd.id) || nd.node.host_pin}`)
         : null,
@@ -924,6 +1026,7 @@ function renderDiagram(fit) {
 
   g.append(labels);
   svg.replaceChildren(g);
+  refocusDiagram();
   if (fit) fitDiagram();
 }
 
@@ -948,6 +1051,7 @@ function fitDiagram() {
 
 function setupDiagramInteraction() {
   const svg = $("#diagram");
+  refocusDiagram = setupFocus(svg, () => S.selectedNode);
   let drag = null;
 
   svg.addEventListener("pointerdown", (ev) => {
@@ -1249,15 +1353,42 @@ function fmtBytes(n) {
 // Jobs
 // ---------------------------------------------------------------------------
 
-const CONFIRM = {
-  destroy: (lab) => `Destroy lab "${lab}"? All nodes are removed and unsaved configs are lost.`,
-  redeploy: (lab) => `Redeploy lab "${lab}"? Every node is recreated from scratch and unsaved configs are lost.`,
-};
+// Labs with at least this many nodes ask for their name before Destroy / Redeploy
+const TYPE_TO_CONFIRM_NODES = 10;
+
+// What Destroy / Redeploy will do to this lab, for the confirmation dialog
+function actionImpact(action, lab) {
+  const cs = labContainers(lab);
+  const hosts = [...new Set(cs.map((c) => c.host))].sort();
+  const where = hosts.length > 1 ? ` on ${hosts.length} hosts (${hosts.join(", ")})` : hosts.length ? ` on ${hosts[0]}` : "";
+  const n = `${cs.length} node${cs.length === 1 ? "" : "s"}`;
+  const big = cs.length >= TYPE_TO_CONFIRM_NODES ? lab : null;
+  if (action === "destroy") {
+    return {
+      title: `Destroy ${lab}?`, ok: "Destroy lab", danger: true, typeToConfirm: big,
+      body: [
+        `Removes ${n}${where}, and the lab directory clab-${lab}/ with the configs saved there by Save configs.`,
+        "Snapshots and the topology file are kept. Take a Snapshot first to keep the running configs.",
+      ],
+    };
+  }
+  if (action === "redeploy") {
+    return {
+      title: `Redeploy ${lab}?`, ok: "Redeploy lab", danger: true, typeToConfirm: big,
+      body: [
+        `Destroys and recreates ${n}${where} from their startup configs.`,
+        "Changes made on the running nodes since the deploy are lost unless you Save configs or take a Snapshot first.",
+      ],
+    };
+  }
+  return null;
+}
 
 async function runAction(action) {
   if (S.selected?.type !== "topo") return;
   const lab = S.detail.name;
-  if (CONFIRM[action] && !confirm(CONFIRM[action](lab))) return;
+  const impact = actionImpact(action, lab);
+  if (impact && !(await confirmDialog(impact))) return;
   try {
     const options = action === "deploy" || action === "redeploy" ? { rollback: $("#opt-rollback").checked } : {};
     const job = await api("/api/jobs", { method: "POST", body: JSON.stringify({ action, topology: S.selected.id, options }) });
@@ -1528,7 +1659,11 @@ async function postLogin(token, switchUser = false) {
   if (res.status === 409) {
     // Logged in as someone else: only switch if the user says so
     const { user } = await res.json();
-    if (confirm(`You are logged in as ${user}. Log in as the user of this link instead?`)) {
+    if (await confirmDialog({
+      title: "Switch user?",
+      body: `You are logged in as ${user}. Log in as the user of this link instead?`,
+      ok: "Switch user",
+    })) {
       await postLogin(token, true);
     }
     return;
@@ -1587,6 +1722,13 @@ function setup() {
     btn.addEventListener("click", () => runAction(btn.dataset.action));
   }
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
+  applyTheme(currentTheme);
+  $("#theme").addEventListener("click", () => {
+    const order = Object.keys(THEMES);
+    const next = order[(order.indexOf(currentTheme) + 1) % order.length];
+    try { localStorage.setItem("clab-theme", next); } catch { /* private mode */ }
+    applyTheme(next);
+  });
   $("#logout").addEventListener("click", logout);
   const rollback = $("#opt-rollback");
   try { rollback.checked = localStorage.getItem("clab-rollback") === "1"; } catch { /* private mode */ }

@@ -391,6 +391,14 @@ clabfleet gui --cluster topologies/cluster.yaml   # all cluster hosts
 It opens your browser at a `http://localhost:8650/#token=...` link (also
 printed in the terminal). Stop it with Ctrl+C.
 
+- **Look:** the **◐ System / ☀ Light / ☾ Dark** button in the top bar
+  picks the colour theme (remembered per browser). Status is shown by
+  shape as well as colour: a hollow ring is not deployed, a filled disc
+  (with a check on the diagram) running, a half ring booting, a diamond
+  not running, a square an error. Hover or select a node to fade
+  everything but it, its links and its neighbours. Destroy and Redeploy
+  ask in a dialog that says what will be removed; labs of 10 or more
+  nodes ask you to type the lab name.
 - **Sidebar:** every `*.clab.yml` under the current directory (or each
   `--dir`), with live state, plus any other labs running on your hosts
 - **Diagram:** nodes coloured by state (amber while booting), interface names on links, the host
