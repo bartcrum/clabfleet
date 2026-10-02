@@ -263,8 +263,10 @@ class UserStore:
 
     # --- changes (CLI) ---
 
-    def add(self, name: str, role: str = OPERATOR, password: Optional[str] = None) -> Optional[str]:
-        """Create a user with ``password``, or without one with a token,
+    def add(self, name: str, role: str = OPERATOR, password: Optional[str] = None,
+            must_change: bool = False) -> Optional[str]:
+        """Create a user with ``password`` (``must_change``: a temporary one
+        they replace at the first login), or without one with a token,
         which is returned (shown once, not stored)."""
         if not NAME_RE.match(name):
             raise ValueError("User names are 1-32 letters, digits, '.', '_' or '-'")
@@ -274,9 +276,9 @@ class UserStore:
             check_new_password(password)
         users = self._load_for_update()
         if name in users:
-            raise ValueError(f"User '{name}' already exists (use 'clabfleet user passwd')")
+            raise ValueError(f"User '{name}' already exists")
         if password is not None:
-            users[name] = User(name, role, "", now_iso(), hash_password(password))
+            users[name] = User(name, role, "", now_iso(), hash_password(password), must_change)
             token = None
         else:
             token = new_token()
@@ -284,14 +286,15 @@ class UserStore:
         self._write(users)
         return token
 
-    def set_password(self, name: str, password: str) -> None:
-        """Set a user's password; their sessions end."""
+    def set_password(self, name: str, password: str, must_change: bool = False) -> None:
+        """Set a user's password (``must_change``: a temporary one they
+        replace at the next login); their sessions end."""
         check_new_password(password)
         users = self._load_for_update()
         if name not in users:
             raise KeyError(f"No user '{name}'")
         users[name].password = hash_password(password)
-        users[name].must_change = False
+        users[name].must_change = must_change
         self._write(users)
         if name == BOOTSTRAP_USER:
             self.initial_password_file.unlink(missing_ok=True)
@@ -306,7 +309,7 @@ class UserStore:
         returns the password if it was created."""
         if self.path.exists():
             return None
-        password = secrets.token_urlsafe(12)
+        password = temporary_password()
         write_private(self.initial_password_file, password + "\n")
         self._write({BOOTSTRAP_USER: User(BOOTSTRAP_USER, OPERATOR, "", now_iso(),
                                           hash_password(password), True)})
@@ -333,10 +336,26 @@ class UserStore:
         self._write(users)
         return token
 
-    def remove(self, name: str) -> None:
+    def set_role(self, name: str, role: str) -> None:
+        """Change a user's role; it applies to their next request."""
+        if role not in ROLES:
+            raise ValueError(f"Role must be one of {', '.join(ROLES)}")
         users = self._load_for_update()
         if name not in users:
             raise KeyError(f"No user '{name}'")
+        if role != OPERATOR:
+            _keep_an_operator(users, name)
+        users[name].role = role
+        self._write(users)
+
+    def remove(self, name: str, keep_operator: bool = False) -> None:
+        """Remove a user; ``keep_operator`` refuses to remove the last
+        operator (the GUI's check; the CLI may, to start over)."""
+        users = self._load_for_update()
+        if name not in users:
+            raise KeyError(f"No user '{name}'")
+        if keep_operator:
+            _keep_an_operator(users, name)
         del users[name]
         self._write(users)
         if name == BOOTSTRAP_USER:
@@ -351,6 +370,18 @@ class UserStore:
         text += yaml.safe_dump({"users": {n: u.to_dict() for n, u in sorted(users.items())}},
                                sort_keys=False)
         write_private(self.path, text)
+
+
+def temporary_password() -> str:
+    """A random password to hand to someone, who replaces it at the first login."""
+    return secrets.token_urlsafe(12)
+
+
+def _keep_an_operator(users: dict, name: str) -> None:
+    """Refuse a change that leaves no operator (``name`` stops being one)."""
+    others = [u for n, u in users.items() if n != name and u.role == OPERATOR]
+    if users[name].role == OPERATOR and not others:
+        raise ValueError(f"'{name}' is the last operator; make someone else an operator first")
 
 
 def check_private(path: Path, what: str) -> None:

@@ -48,7 +48,7 @@ from ..snapshots import SnapshotError
 from .auth import (
     ACCESS_ATTR, BOOTSTRAP_USER, DEFAULT_USERS_FILE, OPERATOR, VIEWER,
     AuditLog, SessionFile, User, UserStore, allow_viewer, check_new_password, hash_token,
-    login_link, operator_only,
+    login_link, operator_only, temporary_password,
 )
 from .captures import open_capture, pcap_filename, spec_from_query
 from .editing import EditConflict
@@ -288,6 +288,11 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_post("/logout", _logout)
     app.router.add_get("/api/me", _me)
     app.router.add_post("/api/password", _change_password)
+    app.router.add_get("/api/users", _list_users)
+    app.router.add_post("/api/users", _add_user)
+    app.router.add_patch("/api/users/{name}", _update_user)
+    app.router.add_post("/api/users/{name}/reset", _reset_user)
+    app.router.add_delete("/api/users/{name}", _remove_user)
     app.router.add_get("/api/state", _state)
     app.router.add_get("/api/hosts", _hosts)
     app.router.add_get("/api/topologies/{id:.+}", _topology)
@@ -578,7 +583,115 @@ async def _me(request):
     return web.json_response({"user": user.name or None, "role": user.role,
                               "multi_user": request.app[AUTH].multi_user,
                               "has_password": bool(user.password),
-                              "must_change": user.must_change})
+                              "must_change": user.must_change,
+                              "can_manage_users": request.app[AUTH].multi_user
+                              and user.is_operator})
+
+
+# --- user management (operators; named-user mode only) ---
+
+def _user_view(user: User) -> dict:
+    return {"name": user.name, "role": user.role, "password": bool(user.password),
+            "token": bool(user.token_sha256), "must_change": user.must_change,
+            "created": user.created}
+
+
+def _user_store(request) -> UserStore:
+    auth: Auth = request.app[AUTH]
+    if not auth.multi_user:
+        raise web.HTTPNotFound(text="There are no users with --single-token")
+    return auth.users
+
+
+async def _in_thread(fn, *args, **kwargs):
+    """Run a users-file change off the event loop (password hashing is slow)."""
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(fn, *args, **kwargs))
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "No such user")
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+
+
+def _new_login(request, store: UserStore, name: str, login: str, fn) -> dict:
+    """Give ``name`` a temporary password or a token with ``fn``; the secret
+    to hand over, shown once."""
+    if login == "password":
+        password = temporary_password()
+        fn(password)
+        return {"password": password}
+    token = fn(None)
+    auth: Auth = request.app[AUTH]
+    base = (auth.public_url or f"{request.scheme}://{request.host}").rstrip("/")
+    return {"token": token, "link": login_link(base, token)}
+
+
+@operator_only
+async def _list_users(request):
+    users = _user_store(request).users()
+    return web.json_response({"users": [_user_view(u) for _, u in sorted(users.items())],
+                              "you": current_user(request).name})
+
+
+async def _add_user(request):
+    """``{"name", "role", "login": "password"|"token"}``: a temporary
+    password the user replaces at the first login, or a login token."""
+    store = _user_store(request)
+    body = await _json_body(request)
+    name, role, login = body.get("name"), body.get("role", OPERATOR), body.get("login", "password")
+    if not isinstance(name, str) or login not in ("password", "token"):
+        raise web.HTTPBadRequest(text="Expected a name and a login of password or token")
+
+    def add(password):
+        if password:
+            return store.add(name, role, password, must_change=True)
+        return store.add(name, role)
+
+    secret = await _in_thread(_new_login, request, store, name, login, add)
+    audit(request, "user_added", name=name, role=role, login=login)
+    return web.json_response({"user": _user_view(store.get(name)), **secret})
+
+
+async def _update_user(request):
+    """``{"role": ...}`` for another user."""
+    store, name = _user_store(request), request.match_info["name"]
+    if name == current_user(request).name:
+        raise web.HTTPBadRequest(text="You cannot change your own role")
+    role = (await _json_body(request)).get("role")
+    await _in_thread(store.set_role, name, role)
+    audit(request, "user_role_changed", name=name, role=role)
+    return web.json_response({"user": _user_view(store.get(name))})
+
+
+async def _reset_user(request):
+    """``{"login": "password"|"token"}``: a new temporary password or a new
+    token for another user; their sessions end."""
+    store, name = _user_store(request), request.match_info["name"]
+    if name == current_user(request).name:
+        raise web.HTTPBadRequest(text="Use Password in the top bar to change your own")
+    login = (await _json_body(request)).get("login", "password")
+    if login not in ("password", "token"):
+        raise web.HTTPBadRequest(text="login must be password or token")
+    if not store.get(name):
+        raise web.HTTPNotFound(text=f"No user '{name}'")
+
+    def reset(password):
+        return (store.set_password(name, password, must_change=True) if password
+                else store.rotate(name))
+
+    secret = await _in_thread(_new_login, request, store, name, login, reset)
+    audit(request, "user_login_reset", name=name, login=login)
+    return web.json_response({"user": _user_view(store.get(name)), **secret})
+
+
+async def _remove_user(request):
+    store, name = _user_store(request), request.match_info["name"]
+    if name == current_user(request).name:
+        raise web.HTTPBadRequest(text="You cannot remove yourself")
+    await _in_thread(store.remove, name, keep_operator=True)
+    audit(request, "user_removed", name=name)
+    return web.json_response({"removed": name})
 
 
 @allow_viewer

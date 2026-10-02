@@ -16,6 +16,7 @@
     </div>
     <div id="hosts" class="hosts" aria-label="Lab hosts"></div>
     <span id="whoami" class="whoami small" hidden></span>
+    <button id="users" class="btn ghost small" hidden title="Add operators and viewers, change roles, reset logins">Users</button>
     <button id="password" class="btn ghost small" hidden title="Change your password">Password</button>
     <button id="logout" class="btn ghost small" hidden>Log out</button>
     <button id="theme" class="btn ghost small" title="Colour theme: follow the system, light or dark"></button>
@@ -192,6 +193,41 @@
       <p id="pw-error" class="login-error small" role="alert" hidden></p>
     </form>
   </div>
+
+  <!-- Users: operators add, change and remove the GUI's users -->
+  <dialog id="users-dlg" class="confirm users-dlg" aria-labelledby="users-title">
+    <div class="users-body">
+      <div class="users-head">
+        <h2 id="users-title">Users</h2>
+        <button id="users-close" class="close" title="Close" aria-label="Close">×</button>
+      </div>
+      <div id="users-secret" class="users-secret" role="status" hidden></div>
+      <table class="nodes users-table">
+        <thead><tr><th>User</th><th>Role</th><th>Login</th><th></th></tr></thead>
+        <tbody id="users-rows"></tbody>
+      </table>
+      <form id="users-add" class="users-add">
+        <h3>Add a user</h3>
+        <div class="users-add-row">
+          <input id="users-name" class="sans" placeholder="User name" aria-label="User name"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" required
+                 pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,31}" title="1-32 letters, digits, '.', '_' or '-'">
+          <select id="users-role" aria-label="Role">
+            <option value="operator">Operator</option>
+            <option value="viewer" selected>Viewer</option>
+          </select>
+          <select id="users-login" aria-label="Login">
+            <option value="password">Temporary password</option>
+            <option value="token">Login token</option>
+          </select>
+          <button class="btn primary small" type="submit">Add</button>
+        </div>
+        <p class="muted small">Operators can deploy, destroy, edit and open terminals; viewers
+          only look. A temporary password is replaced by the user at their first login.</p>
+        <p id="users-error" class="login-error small" role="alert" hidden></p>
+      </form>
+    </div>
+  </dialog>
 
   <dialog id="confirm" class="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-body">
     <form method="dialog">

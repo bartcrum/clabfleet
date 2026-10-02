@@ -1970,6 +1970,7 @@ async function loadMe() {
   who.replaceChildren(h("b", {}, S.me.user || ""), ` · ${S.me.role}`);
   $("#logout").hidden = false;  // ends the session in both modes
   $("#password").hidden = !S.me.has_password;
+  $("#users").hidden = !S.me.can_manage_users;
   renderRuntimeOverlays();
 }
 
@@ -2078,7 +2079,7 @@ function showPasswordForm(forced) {
   $("#pwchange").hidden = false;
   $("#pw-title").textContent = forced ? "Set a new password" : "Change your password";
   $("#pw-hint").textContent = forced
-    ? "This is the first login with the default password. Choose your own to continue."
+    ? "You logged in with a temporary password. Choose your own to continue."
     : "Your other browsers are logged out when the password changes.";
   $("#pw-cancel").hidden = forced;
   $("#pw-form").dataset.forced = forced ? "1" : "";
@@ -2101,6 +2102,133 @@ async function submitPassword(ev) {
   if ($("#pw-form").dataset.forced) { location.replace("/"); return; }
   $("#pwchange").hidden = true;
   toast("Password changed");
+}
+
+// ---------------------------------------------------------------------------
+// Users (operators, named-user mode)
+// ---------------------------------------------------------------------------
+
+async function openUsers() {
+  $("#users-secret").hidden = true;
+  $("#users-error").hidden = true;
+  const dlg = $("#users-dlg");
+  if (!dlg.open) dlg.showModal();
+  await loadUsers();
+  $("#users-name").focus();
+}
+
+async function loadUsers() {
+  try {
+    const { users, you } = await api("/api/users");
+    renderUsers(users, you);
+  } catch (e) {
+    usersError(e.message);
+  }
+}
+
+function usersError(msg) {
+  const el = $("#users-error");
+  el.textContent = msg;
+  el.hidden = !msg;
+}
+
+const LOGIN_TEXT = (u) => [u.password ? (u.must_change ? "password (to be set)" : "password") : null,
+  u.token ? "token" : null].filter(Boolean).join(" + ");
+
+function renderUsers(users, you) {
+  $("#users-rows").replaceChildren(...users.map((u) => {
+    const me = u.name === you;
+    return h("tr", {},
+      h("td", {}, h("strong", {}, u.name), me ? h("span", { class: "you" }, " (you)") : null),
+      h("td", {}, h("select", {
+        "aria-label": `Role of ${u.name}`, disabled: me,
+        title: me ? "You cannot change your own role" : "",
+        onchange: (ev) => userCall("PATCH", u.name, "", { role: ev.target.value }),
+      }, ["operator", "viewer"].map((r) => h("option", { value: r, selected: u.role === r }, r)))),
+      h("td", { class: "muted" }, LOGIN_TEXT(u)),
+      h("td", {}, me ? null : h("span", { class: "acts" },
+        h("button", {
+          class: "btn small", type: "button",
+          title: u.password ? "Give a new temporary password; their sessions end" : "Give a new login token; their sessions end",
+          onclick: () => resetUser(u),
+        }, u.password ? "Reset password" : "New token"),
+        h("button", {
+          class: "btn small danger", type: "button",
+          onclick: () => removeUser(u),
+        }, "Remove"))));
+  }));
+}
+
+async function userCall(method, name, suffix, body) {
+  usersError("");
+  try {
+    const res = await api(`/api/users/${encodeURIComponent(name)}${suffix}`, {
+      method, body: body ? JSON.stringify(body) : undefined,
+    });
+    await loadUsers();
+    return res;
+  } catch (e) {
+    usersError(e.message);
+    await loadUsers();
+    return null;
+  }
+}
+
+// The new password or token, shown once, to hand to the user
+function showSecret(name, res) {
+  const box = $("#users-secret");
+  const value = res.password || res.link;
+  if (!value) { box.hidden = true; return; }
+  box.replaceChildren(
+    h("span", {}, res.password
+      ? `Temporary password for ${name}. Give it to them; they choose their own at the first login. It is not shown again.`
+      : `Login link for ${name}. Give it to them; it is not shown again.`),
+    h("span", { class: "val" }, h("code", {}, value),
+      h("button", {
+        class: "btn small", type: "button",
+        onclick: async (ev) => {
+          try { await navigator.clipboard.writeText(value); ev.target.textContent = "Copied"; } catch { /* select it by hand */ }
+        },
+      }, "Copy")));
+  box.hidden = false;
+}
+
+async function resetUser(u) {
+  const what = u.password ? "a new temporary password" : "a new login token";
+  if (!(await confirmDialog({
+    title: `Reset ${u.name}'s login?`,
+    body: [`${u.name} gets ${what}; their current one stops working and their sessions end.`],
+    ok: u.password ? "Reset password" : "New token", danger: true,
+  }))) return;
+  const res = await userCall("POST", u.name, "/reset", { login: u.password ? "password" : "token" });
+  if (res) showSecret(u.name, res);
+}
+
+async function removeUser(u) {
+  if (!(await confirmDialog({
+    title: `Remove ${u.name}?`,
+    body: [`${u.name} can no longer log in, and their open sessions and terminals end.`],
+    ok: "Remove user", danger: true,
+  }))) return;
+  $("#users-secret").hidden = true;
+  await userCall("DELETE", u.name, "");
+}
+
+async function addUser(ev) {
+  ev.preventDefault();
+  usersError("");
+  const name = $("#users-name").value.trim();
+  try {
+    const res = await api("/api/users", {
+      method: "POST",
+      body: JSON.stringify({ name, role: $("#users-role").value, login: $("#users-login").value }),
+    });
+    $("#users-name").value = "";
+    showSecret(name, res);
+    await loadUsers();
+  } catch (e) {
+    usersError(e.message);
+  }
 }
 
 async function logout() {
@@ -2129,6 +2257,9 @@ function setup() {
   });
   $("#logout").addEventListener("click", logout);
   $("#password").addEventListener("click", () => showPasswordForm(false));
+  $("#users").addEventListener("click", openUsers);
+  $("#users-close").addEventListener("click", () => $("#users-dlg").close());
+  $("#users-add").addEventListener("submit", addUser);
   const rollback = $("#opt-rollback");
   try { rollback.checked = localStorage.getItem("clab-rollback") === "1"; } catch { /* private mode */ }
   rollback.addEventListener("change", () => {

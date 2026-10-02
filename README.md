@@ -554,6 +554,14 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   other users could change (group/world-writable, owned by someone else,
   or in such a directory) is refused and nobody can log in until it is
   fixed.
+- **Users in the GUI:** operators manage users with **Users** in the top
+  bar: add an operator or viewer with a temporary password (shown once,
+  with a Copy button; the user chooses their own at the first login) or
+  a login token, change roles, reset a password or token (their sessions
+  end), and remove users. Nobody can change their own role or remove
+  themselves, and the last operator cannot be demoted or removed. All of
+  it goes to the audit log (`user_added`, `user_role_changed`,
+  `user_login_reset`, `user_removed`).
 - **Login:** each user logs in at `https://<server>:8650/` with their name
   and password (or opens their token link), once per browser: the login
   lasts up to 30 days and survives GUI restarts. **Password** in the top
@@ -578,7 +586,7 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   Events: `login` (method: password or token), `login_failed` (with the
   user name tried), `login_throttled` (once per address or user name and
   minute after 5 failed logins), `logout`, `password_changed`,
-  `password_change_failed`, `denied`, `job_started`
+  `password_change_failed`, the `user_*` events above, `denied`, `job_started`
   (action, topology, options), `job_finished` (status, seconds),
   `topology_saved`, `positions_saved`, `terminal_opened` and
   `terminal_closed` (lab, node, mode, host, seconds, exit code),
