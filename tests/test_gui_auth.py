@@ -300,7 +300,8 @@ def test_roles_sessions_and_audit(tmp_path, monkeypatch):
                 "positions": {"a": [1, 2]}, "base_hash": new_hash})
             assert resp.status == 200
             sock = await client.ws_connect("/ws/terminal?lab=t&node=a&mode=shell")
-            assert "args: exec -it clab-t-a" in await _drain(sock)
+            assert re.search(r"args: exec -it -e CLABFLEET_TERMINAL=\w+ clab-t-a",
+                             await _drain(sock))
 
             # Rotating a token ends that user's sessions at once
             users.rotate("alice")

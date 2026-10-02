@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 
@@ -121,11 +122,22 @@ def test_capture_commands():
     no_limit = capture_command(CaptureSpec("r1", "eth1"), "c", "node")
     assert no_limit[7] == "0"
 
-    helper = capture_command(spec, "clab-lab-r1", "helper", "img:1", "cap-x")
+    # The helper logs nothing, is limited, says when its backstop stops it,
+    # and runs tcpdump under `timeout` (via the wrapper) like a node does
+    helper = capture_command(spec, "clab-lab-r1", "helper", "img:1", "cap-x", now=1000)
     assert helper == [
         "docker", "run", "--rm", "--name", "cap-x", "--label", "clabfleet.capture=1",
+        "--label", "clabfleet.capture.expires=1040",
+        "--log-driver", "none", "--pids-limit", "64", "--memory", "256m",
         "--network", "container:clab-lab-r1", "--cap-add", "NET_RAW", "--cap-add", "NET_ADMIN",
-        "img:1", *tcpdump_args(spec)]
+        "img:1", "sh", "-c", NODE_WRAPPER, "clabfleet-capture", "40", *tcpdump_args(spec)]
+    # Without a duration (CLI only): no expiry, nothing to sweep, plain tcpdump
+    endless = capture_command(CaptureSpec("r1", "eth1"), "c", "helper", "img:1", "cap-y")
+    assert "clabfleet.capture.expires" not in " ".join(endless)
+    assert "--log-driver" in endless
+    assert endless[endless.index("img:1") + 1] == "tcpdump"
+    # The default helper image is pinned by digest
+    assert re.fullmatch(r"nicolaka/netshoot@sha256:[0-9a-f]{64}", cap.DEFAULT_HELPER_IMAGE)
     with pytest.raises(ValueError):
         capture_command(spec, "c", "helper")  # no container name
     with pytest.raises(ValueError):
@@ -434,3 +446,54 @@ def test_cli_capture_rejects_bad_targets(topo_file, capsys):
     assert "no interface 'eth9'" in capsys.readouterr().err
     assert cli.main(["capture", str(topo_file), "r1:eth1", "--filter=-w x"]) == 1
     assert "must not start with '-'" in capsys.readouterr().err
+
+
+def test_sweep_helpers_removes_only_expired_helpers():
+    class Host(Runner):
+        def __init__(self):
+            super().__init__()
+            self.name = "h1"
+            self.calls = []
+
+        def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
+            self.calls.append(list(args))
+            if args[:2] == ["docker", "ps"]:
+                return CommandResult(0, "old\t1000\nrecent\t1950\nendless\t\nnear\t1990\n", "")
+            return CommandResult(0, "", "")
+
+    host = Host()
+    # now=2015: "old" expired long ago; "recent" 65s ago (past the grace);
+    # "near" 25s ago (within it); "endless" has no expiry (a CLI capture)
+    assert cap.sweep_helpers(host, now=2015) == ["old", "recent"]
+    ps, rm = host.calls
+    assert ps[:5] == ["docker", "ps", "-a", "--filter", "label=clabfleet.capture=1"]
+    assert '{{.Label "clabfleet.capture.expires"}}' in ps[-1]
+    assert rm == ["docker", "rm", "-f", "old", "recent"]
+
+    host.calls.clear()
+    assert cap.sweep_helpers(host, now=1500) == ["old"]
+    assert cap.sweep_helpers(host, now=500) == []
+    assert host.calls[-1][:2] == ["docker", "ps"]  # nothing to remove: no rm
+
+
+def test_helper_stopped_while_starting_is_removed_once_it_exists():
+    class Starting(FakeHost):
+        """The first `docker rm -f` comes before `docker run` created the helper."""
+
+        removals = 0
+
+        def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
+            if args[:3] == ["docker", "rm", "-f"]:
+                self.removals += 1
+                if self.removals == 1:
+                    self.calls.append((list(args), bool(sudo)))
+                    return CommandResult(1, "", "Error: No such container: x")
+            return super().run(args, cwd, check, sudo, on_output)
+
+    host = Starting(has_tcpdump=False)
+    proc = FakeProcess(hold=True)
+    c = Capture(host, "clab-lab-r2", CaptureSpec("r2", "eth1", duration=30),
+                spawner=_spawner(proc, [])).start()
+    c.stop()
+    assert len(host.commands(["docker", "rm"])) == 2
+    assert proc.ended.is_set()
