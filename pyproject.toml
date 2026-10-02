@@ -7,7 +7,7 @@ name = "clabfleet"
 version = "0.2.0"
 description = "Automate containerlab lab deployment across one or many hosts"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
     "paramiko>=3.4",

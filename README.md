@@ -42,7 +42,7 @@ deploys with plain `containerlab deploy`.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - On every lab host: Docker and containerlab
   (`bash -c "$(curl -sL https://get.containerlab.dev)"`)
 - Remote hosts: SSH access (key-based recommended). containerlab needs root,
@@ -931,7 +931,7 @@ fetch (such as `! Last configuration change`) are not a config change.
 
 ## Development
 
-Tests run automatically on every pull request (GitHub Actions, Python 3.10, 3.12 and 3.14).
+Tests run automatically on every pull request (GitHub Actions, Python 3.11, 3.12, 3.13 and 3.14).
 
 ```bash
 pip install -e ".[dev]"
