@@ -89,6 +89,16 @@ from .topology import dump_yaml, load_topology
 from .validate import validate_topology
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{text}' is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="clabfleet",
@@ -386,6 +396,11 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Address browsers use to reach the GUI, if it is not the "
                             "one it listens on (e.g. https://lab.example.com behind a "
                             "TLS proxy)")
+    p_gui.add_argument("--max-sessions", type=_positive_int, default=64, metavar="N",
+                       help="Open terminal tabs (shells, CLIs, logs) allowed in all "
+                            "(default: 64)")
+    p_gui.add_argument("--max-user-sessions", type=_positive_int, default=16, metavar="N",
+                       help="Open terminal tabs allowed per user (default: 16)")
 
     # --- user ---
     p_user = sub.add_parser("user", help="Manage named GUI users and their tokens")
@@ -572,7 +587,8 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
     audit_path = args.audit_log or (users.path.parent / AUDIT_FILE_NAME if users else None)
     run(Workspace(cluster, roots), host=args.bind, port=args.port,
         open_browser=not args.no_browser, users=users, audit=AuditLog(audit_path),
-        ssl_context=ssl_context, public_url=args.public_url)
+        ssl_context=ssl_context, public_url=args.public_url,
+        max_sessions=args.max_sessions, max_user_sessions=args.max_user_sessions)
     return 0
 
 

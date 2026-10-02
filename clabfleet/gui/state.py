@@ -12,11 +12,12 @@ import re
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from ..capture import sweep_helpers
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
 from ..livestate import LiveCache, link_states, probe_ifaces, probe_stats
@@ -41,6 +42,7 @@ SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox"}
 MAX_SCAN_DEPTH = 5
 GUI_PROBE_TIMEOUT = 5  # seconds; the GUI re-probes not-ready nodes anyway
 LIVE_INTERVAL = 5.0  # seconds between live link/CPU refreshes of a lab being viewed
+RUNTIME_TTL = 2.0  # seconds a `containerlab inspect` result is reused for
 
 # ANSI escape sequences (colors, bold) in containerlab output
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -144,6 +146,14 @@ class HostState:
     containers: list[dict] = field(default_factory=list)
 
 
+class _Flight(Future):
+    """One running inspect that concurrent ``runtime()`` callers share."""
+
+    def __init__(self, generation: int):
+        super().__init__()
+        self.generation = generation
+
+
 class Workspace:
     """Hosts + topology roots the GUI manages, with cached runners."""
 
@@ -158,6 +168,9 @@ class Workspace:
         self.live = LiveCache(LIVE_INTERVAL)
         self._live_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="live")
         self._last_runtime: Optional[tuple[float, list[HostState]]] = None
+        self._runtime_lock = threading.Lock()
+        self._runtime_flight: Optional[_Flight] = None  # the inspect running now
+        self._runtime_generation = 0
 
     @property
     def multi_host(self) -> bool:
@@ -275,8 +288,46 @@ class Workspace:
 
     # --- runtime ---
 
-    def runtime(self) -> list[HostState]:
-        """Containers running on each host (one `containerlab inspect` per host)."""
+    def runtime(self, max_age: float = RUNTIME_TTL) -> list[HostState]:
+        """Containers running on each host (one `containerlab inspect` per host).
+
+        Reuses a result younger than ``max_age`` seconds, and callers that
+        arrive while an inspect is running wait for it instead of starting
+        their own, so many browsers polling cost one inspect per host.
+        """
+        with self._runtime_lock:
+            last = self._last_runtime
+            if last and max_age > 0 and time.monotonic() - last[0] < max_age:
+                return last[1]
+            flight = self._runtime_flight
+            leader = flight is None
+            if leader:
+                flight = self._runtime_flight = _Flight(self._runtime_generation)
+        if not leader:
+            return flight.result()
+        try:
+            states = self._inspect_runtime()
+        except BaseException as exc:
+            flight.set_exception(exc)
+            raise
+        finally:
+            with self._runtime_lock:
+                if self._runtime_flight is flight:
+                    self._runtime_flight = None
+        with self._runtime_lock:
+            if flight.generation == self._runtime_generation:  # not invalidated meanwhile
+                self._last_runtime = (time.monotonic(), states)
+        flight.set_result(states)
+        return states
+
+    def invalidate_runtime(self) -> None:
+        """Forget the cached runtime (labs changed): the next caller inspects again."""
+        with self._runtime_lock:
+            self._last_runtime = None
+            self._runtime_flight = None
+            self._runtime_generation += 1
+
+    def _inspect_runtime(self) -> list[HostState]:
         states = []
         live: set[tuple] = set()
         for host in self.cluster.hosts:
@@ -292,7 +343,6 @@ class Workspace:
             self._annotate_ready(host, state.containers, live)
             states.append(state)
         self.readiness.prune(live)
-        self._last_runtime = (time.monotonic(), states)
         return states
 
     def _annotate_ready(self, host: HostInfo, containers: list[dict], live: set) -> None:
@@ -422,6 +472,18 @@ class Workspace:
                 if c["lab"] == lab and c["node"] == node:
                     return c
         raise KeyError(f"Node '{node}' of lab '{lab}' is not running")
+
+    def sweep_capture_helpers(self) -> None:
+        """Remove capture helper containers left behind on any host (start-up)."""
+        for host in self.cluster.hosts:
+            try:
+                removed = sweep_helpers(self.runner(host), host.sudo)
+            except Exception as exc:  # noqa: BLE001 - best effort, tried at every start
+                logger.debug("Capture helper sweep on %s failed: %s", host.name, exc)
+                continue
+            if removed:
+                logger.warning("Removed %d leftover capture helper(s) on %s: %s",
+                               len(removed), host.name, ", ".join(removed))
 
     def host_status(self) -> list[dict]:
         result = []
@@ -666,6 +728,7 @@ class JobManager:
             if times:
                 job.add("» time per host: " + ", ".join(f"{h} {t:g}s" for h, t in times.items()))
             job.add("✓ done" if job.status == "ok" else "✗ failed")
+            self.workspace.invalidate_runtime()  # the lab's containers changed
             self.history.save(job)
             if self.on_finished:
                 try:

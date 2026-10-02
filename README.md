@@ -189,16 +189,24 @@ The interface must be one the node uses in the topology's links, or `eth0`
 `docker exec`. For nodes without one, such as `alpine`, clabfleet starts a
 throwaway helper container that shares the node's network namespace
 (`docker run --net container:<node>`). The helper image is
-`nicolaka/netshoot` by default, pulled on first use; set `--helper-image`
-or `CLAB_CAPTURE_IMAGE` to use another image with `tcpdump`, and `--via
-node|helper` to force either way.
+`nicolaka/netshoot`, pinned by digest, pulled on first use; set
+`--helper-image` or `CLAB_CAPTURE_IMAGE` to use another image with
+`tcpdump` and `sh`, and `--via node|helper` to force either way. The
+helper runs with `--log-driver none` (so captured traffic is not copied
+into Docker's log on the host) and modest limits (`--pids-limit 64
+--memory 256m`).
 
 Stopping the local `docker` client does not stop a process inside a
 container, so clabfleet always stops captures explicitly: it kills the
 node's `tcpdump` by PID, or removes the helper container. With
-`--duration`, the node's `tcpdump` also runs under `timeout` (when the node
-has it), so it ends even if clabfleet is killed outright. Like `exec`,
-captures need Docker access on the host, with the same `sudo` retry.
+`--duration`, `tcpdump` also runs under `timeout` (when the node or helper
+image has it), so it ends even if clabfleet is killed outright. A helper
+with a duration is labelled with the time it will have stopped by
+(`clabfleet.capture.expires`); when the GUI starts, it removes helpers
+more than a minute past that time on every host. That leaves the captures
+of other running GUIs and of `clabfleet capture` alone, and never touches
+helpers without a duration. Like `exec`, captures need Docker access on
+the host, with the same `sudo` retry.
 
 ### Check a topology before deploying
 
@@ -356,6 +364,16 @@ printed in the terminal). Stop it with Ctrl+C.
     kinds such as Cisco IOL. It needs a login on the node: containerlab's
     default configs create `admin`/`admin`, but your own `startup-config`
     must include a user
+
+  Closing a CLI or Shell tab also ends what it started inside the
+  container (the shell, its children and anything else in its session);
+  killing the local `docker exec` alone would leave them running. Open
+  tabs are limited to 16 per user and 64 in all (`--max-user-sessions N`,
+  `--max-sessions N`), and captures (live tabs and downloads together) to
+  4 per user and 8 in all; a tab over the limit says so. A browser that
+  stops reading a tab's output for 30 seconds is disconnected, and the
+  command's output is not read meanwhile, so a stuck tab cannot fill the
+  GUI's memory.
 - **Packet capture:** click a link in the diagram, pick which end to
   capture on, and optionally set a BPF filter, a packet count and a time
   limit (60 seconds by default). **Live** decodes packets in a tab at the
@@ -413,7 +431,9 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   Events: `login`, `login_failed`, `logout`, `denied`, `job_started`
   (action, topology, options), `job_finished` (status, seconds),
   `topology_saved`, `positions_saved`, `terminal_opened` and
-  `terminal_closed` (lab, node, mode, host, seconds, exit code). Jobs also
+  `terminal_closed` (lab, node, mode, host, seconds, exit code),
+  `capture_started`, `capture_finished` and `session_revoked` (an open
+  terminal or capture ended because its login no longer holds). Jobs also
   record who started them, shown in the Activity panel.
 
   ```json
@@ -431,9 +451,9 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
 Security notes: an operator can open shells on every node and, through
 `docker exec`, act as the account the GUI runs as on each lab host, so
 make only trusted people operators. Tokens are bearer secrets: anyone with
-a login link is that user until you rotate it. Terminals that are already
-open stay open when a user is removed or rotated; close their tabs (or
-restart the GUI) to cut them off.
+a login link is that user until you rotate it. Terminals and captures that
+are already open are closed within a few seconds when their user is
+removed, rotated, demoted from operator or logs out.
 
 For the CLI and Shell buttons, your user must be able to run `docker`
 (member of the `docker` group, in a session started after you were added).
@@ -793,7 +813,7 @@ fetch (such as `! Last configuration change`) are not a config change.
 | `CLAB_SSH_KEY` | SSH agent / defaults | SSH private key |
 | `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
 | `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
-| `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot:latest` | Image with `tcpdump` for capturing on nodes that have none |
+| `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot@sha256:…` (pinned) | Image with `tcpdump` for capturing on nodes that have none |
 | `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD` | — | `export-live`: device login when the inventory gives none |
 | `NETBOX_TOKEN` / `NAUTOBOT_TOKEN` | — | `export-live`: API token for `--netbox` / `--nautobot` |
 
@@ -835,6 +855,7 @@ clabfleet/
     auth.py        # Users file, roles, audit log
     state.py       # Topology discovery, running labs, deploy/destroy jobs
     terminals.py   # Local pty, SSH-channel and live capture sessions
+    sessions.py    # Open terminal/capture sessions: limits, revocation
     captures.py    # GUI packet captures: limits, pcap downloads
     editing.py     # Format-preserving saves of topology files
     static/        # Web UI (vanilla JS; xterm.js bundled in vendor/)

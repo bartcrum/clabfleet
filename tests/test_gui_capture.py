@@ -284,3 +284,51 @@ def test_shutdown_stops_running_captures(ws, monkeypatch):
         assert cap.stopped
 
     asyncio.run(scenario())
+
+
+def test_captures_are_limited_and_run_on_their_own_pool(ws, monkeypatch):
+    made = []
+    monkeypatch.setattr(server, "open_capture", _fake_open(made, [b"\xd4\xc3\xb2\xa1"], hold=True))
+    threads = []
+    real_read = FakeCapture.read
+
+    def read(self, size=65536):
+        threads.append(threading.current_thread().name)
+        return real_read(self, size)
+
+    monkeypatch.setattr(FakeCapture, "read", read)
+
+    async def scenario():
+        app = server.create_app(ws, "tok")
+        app[server.SESSIONS].limits[server.CAPTURE] = (1, 8)  # one per user
+        client = await _client(app)
+        try:
+            resp = await client.get("/api/capture?topo=t.clab.yml&node=a&iface=eth1")
+            assert await resp.content.read(4) == b"\xd4\xc3\xb2\xa1"
+            # Blocking reads happen on the capture pool, not the default executor
+            assert threads and all(name.startswith("capture") for name in threads)
+
+            again = await client.get("/api/capture?topo=t.clab.yml&node=a&iface=eth1")
+            assert again.status == 429
+            assert "You already have 1 open packet captures" in await again.text()
+            sock = await client.ws_connect("/ws/capture?topo=t.clab.yml&node=a&iface=eth1")
+            output = b""
+            async for msg in sock:
+                if msg.type.name == "BINARY":
+                    output += msg.data
+            assert b"limit" in output
+            assert len(made) == 1  # neither reached tcpdump
+
+            resp.close()  # the first download ends: room for another
+            for _ in range(50):
+                if not len(app[server.SESSIONS]):
+                    break
+                await asyncio.sleep(0.1)
+            sock = await client.ws_connect("/ws/capture?topo=t.clab.yml&node=a&iface=eth1")
+            await asyncio.wait_for(sock.receive(), 5)
+            assert len(made) == 2
+            await sock.close()
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
