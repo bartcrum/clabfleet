@@ -71,7 +71,7 @@ from .exporter import (
     report_path,
     write_result,
 )
-from .inventory import load_inventory
+from .inventory import load_inventory, printable
 from .resync import apply_diff, diff_topology
 from .sanitise import SanitiseOptions
 from .templates import (
@@ -299,6 +299,12 @@ def _build_parser() -> argparse.ArgumentParser:
                           "(repeatable); for Ansible only group=NAME")
     src.add_argument("--token-env", metavar="VAR",
                      help="Environment variable holding the NetBox/Nautobot token")
+    src.add_argument("--allow-http", action="store_true",
+                     help="Allow a plain http:// NetBox/Nautobot URL (the token is sent "
+                          "unencrypted)")
+    src.add_argument("--allowed-network", action="append", metavar="CIDR", default=[],
+                     help="Only connect to devices whose address is in this network "
+                          "(repeatable; added to allowed_networks: in the inventory)")
     conv = p_live.add_argument_group("conversion")
     conv.add_argument("--keep-interface-names", action="store_true",
                       help="Use the devices' interface names as they are instead of "
@@ -831,9 +837,10 @@ def _export_live(args: argparse.Namespace) -> int:
 
     inventory = load_inventory(args.devices, netbox=args.netbox, nautobot=args.nautobot,
                                ansible=args.ansible, filters=filters,
-                               token_env=args.token_env)
+                               token_env=args.token_env, allow_http=args.allow_http,
+                               allowed_networks=args.allowed_network)
     for msg in inventory.warnings:
-        print(f"warning: {msg}", file=sys.stderr)
+        print(f"warning: {printable(msg)}", file=sys.stderr)
     if not inventory.devices:
         raise ValueError("the inventory has no devices")
 
