@@ -25,6 +25,8 @@ deploys with plain `containerlab deploy`.
   without deploying
 - **Exec** — run a command on all or some nodes of a lab at once, through
   each kind's CLI, SSH or a shell
+- **Lab templates** — generate a spine-leaf, ring or campus lab with
+  addressing and routing configs for cEOS, IOL or plain Linux nodes
 - **Validate** — check topology files (and placement labels against a
   cluster) without touching any host, e.g. in CI
 - **Web GUI** — browse topologies, see live node state on a diagram,
@@ -126,6 +128,47 @@ clabfleet validate topologies/large_campus.clab.yml --cluster topologies/cluster
   matches and cluster hosts without a VXLAN address.
 
 Add `--strict` to fail on warnings as well.
+
+### Generate a lab from a template
+
+```bash
+clabfleet new --list
+clabfleet new spine-leaf --spines 2 --leaves 4 -o labs/fabric.clab.yml
+clabfleet new ring --nodes 5 --kind cisco_iol -o labs/ring.clab.yml
+clabfleet new campus --core 2 --dist 2 --access 6 --kind linux -o labs/campus.clab.yml
+```
+
+`new` writes a complete topology: nodes, links and a startup config for
+every node. Without `-o` it prints the YAML. It will not overwrite an
+existing file unless you add `--force`.
+
+| Template | Options (default) | Routing |
+|----------|-------------------|---------|
+| `spine-leaf` | `--spines` (2), `--leaves` (4), `--asn` (65000) | eBGP: spines share `--asn`, leaf *n* uses `--asn` + *n*, leaves use ECMP over the spines |
+| `ring` | `--nodes` (4, at least 3) | OSPF area 0 |
+| `campus` | `--core` (2), `--dist` (2), `--access` (4) | OSPF area 0. Cores are fully meshed, every distribution node links to every core, and access nodes are split over the distribution nodes in blocks with one uplink each |
+
+Every template takes the same common options:
+
+- `--kind`: `arista_ceos` (default), `cisco_iol` or `linux`. cEOS configs
+  create the `admin`/`admin` login that SSH needs. IOL links start at
+  `Ethernet0/1`, after the management port, and continue `0/2`, `0/3`,
+  `1/0` and so on. `linux` nodes (default image `alpine:3.20`, deploy with
+  `--pull`) get their addresses through `exec` commands but run no
+  routing, so each node reaches only its direct neighbours.
+- `--image` replaces the kind's default image (`--list` shows them).
+  `--name` sets the lab name, which defaults to the template name.
+- `--link-subnet` (default `10.0.0.0/16`): every link gets the next /31
+  from it, and the first node of the link, such as the spine or the core,
+  gets the lower address.
+- `--loopback-subnet` (default `10.255.0.0/16`): each node gets a /32
+  loopback, with one /24 per tier. For example spines are `10.255.0.n` and
+  leaves `10.255.1.n`.
+
+The cEOS and IOL configs use the same syntax as the example topologies,
+and the tests check every template and kind with `validate`. Only `linux`
+labs have been deployed and pinged so far; the cEOS and IOL configs have
+not been booted.
 
 ### Node images
 
@@ -446,6 +489,7 @@ clabfleet/
   execute.py       # Run a command on lab nodes (clabfleet exec)
   nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
   validate.py      # Topology checks (clabfleet validate)
+  templates.py     # Lab templates (clabfleet new)
   linkcheck.py     # Ping and UDP checks between cluster hosts
   readiness.py     # Is a node's CLI/SSH up yet (deploy --wait, GUI)
   cli.py           # CLI entrypoint
