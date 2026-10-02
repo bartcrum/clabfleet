@@ -18,13 +18,21 @@ Credentials are never logged. Per device they come from the device entry,
 then ``defaults:``, then ``<field>_env`` variables named there, then the
 ``CLABFLEET_DEVICE_USERNAME`` / ``CLABFLEET_DEVICE_PASSWORD`` environment
 variables.
+
+The NetBox/Nautobot token only ever goes to the configured URL: HTTPS is
+required (unless ``allow_http``), redirects are refused, and pagination
+links must point at the same host. ``allowed_networks:`` (CIDRs) refuses
+devices whose address lies outside them, so a changed primary IP in NetBox
+cannot send the device password somewhere else.
 """
 
+import ipaddress
 import json
 import logging
 import os
 import re
 import shlex
+import socket
 import ssl
 import string
 import urllib.error
@@ -38,13 +46,33 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-urlopen = urllib.request.urlopen  # replaced in tests
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: urllib would resend the Authorization header to any host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None     # urllib then raises HTTPError with the 3xx code
+
+
+def _open(req, timeout=None, context=None):
+    """``urlopen`` for http(s) only, without redirects (and without file:, ftp:, data:)."""
+    director = urllib.request.OpenerDirector()
+    for handler in (urllib.request.ProxyHandler(), urllib.request.UnknownHandler(),
+                    urllib.request.HTTPHandler(), urllib.request.HTTPSHandler(context=context),
+                    urllib.request.HTTPDefaultErrorHandler(), _NoRedirect(),
+                    urllib.request.HTTPErrorProcessor()):
+        director.add_handler(handler)
+    return director.open(req, timeout=timeout)
+
+
+urlopen = _open  # replaced in tests
 
 ENV_USERNAME = "CLABFLEET_DEVICE_USERNAME"
 ENV_PASSWORD = "CLABFLEET_DEVICE_PASSWORD"
 DEFAULT_TOKEN_ENV = {"netbox": "NETBOX_TOKEN", "nautobot": "NAUTOBOT_TOKEN"}
 PAGE_SIZE = 200
 MAX_PAGES = 1000
+MAX_HOST_RANGE = 4096     # hosts from one Ansible range such as leaf[01:99]
 
 # Fields rules can match on (regex, whole value, case-insensitive)
 RULE_FIELDS = ("kind", "type", "platform", "vendor", "model", "version", "role", "site", "tag",
@@ -145,12 +173,15 @@ def load_inventory(
     filters: Optional[dict] = None,
     token_env: Optional[str] = None,
     env: Optional[dict] = None,
+    allow_http: bool = False,
+    allowed_networks: Optional[list[str]] = None,
 ) -> Inventory:
     """Load devices and rules from a file and/or NetBox, Nautobot or Ansible.
 
     Explicit ``netbox`` / ``nautobot`` / ``ansible`` arguments (the CLI
     flags) override a ``source:`` section in the file; ``filters`` are
-    merged over the file's.
+    merged over the file's. ``allowed_networks`` are added to the file's
+    ``allowed_networks:``; devices outside them are left out with a warning.
     """
     env = os.environ if env is None else env
     data: dict = {}
@@ -168,7 +199,8 @@ def load_inventory(
     source = dict(data.get("source") or {})
     from_cli = bool(netbox or nautobot or ansible)
     if from_cli:
-        source = {k: v for k, v in source.items() if k in ("platform_map", "verify_tls")}
+        source = {k: v for k, v in source.items()
+                  if k in ("platform_map", "verify_tls", "allow_http")}
         if sum(bool(x) for x in (netbox, nautobot, ansible)) > 1:
             raise InventoryError("use only one of --netbox, --nautobot and --ansible")
         if netbox:
@@ -180,6 +212,8 @@ def load_inventory(
     merged_filters = {**(source.get("filters") or {}), **(filters or {})}
     if token_env:
         source["token_env"] = token_env
+    if allow_http:
+        source["allow_http"] = True
 
     stype = source.get("type") or ("file" if not source else None)
     if stype not in ("file", "netbox", "nautobot", "ansible"):
@@ -202,6 +236,10 @@ def load_inventory(
     defaults = data.get("defaults") or {}
     devices = [_with_credentials(d, defaults, env) for d in devices]
     _check_devices(devices)
+    networks = _parse_networks([*_as_list(data.get("allowed_networks")),
+                                *(allowed_networks or [])])
+    if networks:
+        devices = _in_networks(devices, networks, warnings)
     return Inventory(
         devices=devices,
         kind_rules=parse_rules(data.get("kinds"), "kinds", ("kind", "type")),
@@ -281,6 +319,61 @@ def _check_devices(devices: list[dict]) -> None:
             + "\n  ".join(problems))
 
 
+def _as_list(value) -> list:
+    return [] if value is None else [value] if isinstance(value, str) else list(value)
+
+
+def _parse_networks(raw: list) -> list:
+    networks = []
+    for item in raw:
+        try:
+            networks.append(ipaddress.ip_network(str(item).strip(), strict=False))
+        except ValueError:
+            raise InventoryError(f"allowed_networks: not a network: {item!r}") from None
+    return networks
+
+
+def resolve(host: str) -> list[str]:
+    """Every address ``host`` resolves to (replaced in tests)."""
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return []
+    return sorted({info[4][0].split("%", 1)[0] for info in infos})
+
+
+def _in_networks(devices: list[dict], networks: list, warnings: list) -> list[dict]:
+    """Devices whose address (every address a name resolves to) is in ``networks``."""
+    kept, refused = [], []
+    for dev in devices:
+        host = str(dev["hostname"])
+        try:
+            addrs = [ipaddress.ip_address(host)]
+        except ValueError:
+            addrs = [ipaddress.ip_address(a) for a in resolve(host)]
+        if addrs and all(any(a in net for net in networks) for a in addrs):
+            kept.append(dev)
+        else:
+            shown = ", ".join(map(str, addrs)) or "does not resolve"
+            refused.append(f"{dev.get('name') or host} ({host}: {shown})")
+    if refused:
+        warnings.append(printable(
+            f"left out {len(refused)} device(s) outside allowed_networks "
+            f"({', '.join(map(str, networks))}): " + "; ".join(refused)))
+    return kept
+
+
+def printable(text) -> str:
+    """``text`` with control characters escaped, safe to print on a terminal.
+
+    Device names, platforms and LLDP data come from devices or NetBox and
+    could carry escape sequences.
+    """
+    return "".join(c if c.isprintable() else
+                   rf"\x{ord(c):02x}" if ord(c) < 0x100 else rf"\u{ord(c):04x}"
+                   for c in str(text))
+
+
 # --- NetBox / Nautobot ----------------------------------------------------------
 
 def _rest_devices(stype: str, source: dict, filters: dict, env, warnings) -> list[dict]:
@@ -291,7 +384,15 @@ def _rest_devices(stype: str, source: dict, filters: dict, env, warnings) -> lis
     token = env.get(var)
     if not token:
         raise InventoryError(f"set the {stype} API token in the {var} environment variable")
-    client = RestClient(url, token, verify_tls=source.get("verify_tls", True))
+    verify_tls = source.get("verify_tls", True) is not False
+    client = RestClient(url, token, verify_tls=verify_tls,
+                        allow_http=bool(source.get("allow_http")))
+    if client.scheme == "http":
+        warnings.append(f"the {stype} API token is sent unencrypted to {client.base_url} "
+                        "(allow_http): anyone on the path can read it")
+    elif not verify_tls:
+        warnings.append(f"TLS certificate verification is off for {client.base_url} "
+                        "(verify_tls: false): the API token can be intercepted")
     platform_map = source.get("platform_map") or {}
     if stype == "netbox":
         return netbox_devices(client, filters, platform_map, warnings)
@@ -302,8 +403,20 @@ class RestClient:
     """Minimal NetBox/Nautobot REST client: token auth, JSON, pagination."""
 
     def __init__(self, base_url: str, token: str, verify_tls: bool = True,
-                 timeout: float = 30, opener: Optional[Callable] = None):
+                 timeout: float = 30, opener: Optional[Callable] = None,
+                 allow_http: bool = False):
         self.base_url = base_url.rstrip("/")
+        parts = urllib.parse.urlsplit(self.base_url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise InventoryError(f"not an http(s) URL: {printable(_safe_url(base_url))}")
+        if parts.scheme == "http" and not allow_http:
+            raise InventoryError(
+                f"{_safe_url(base_url)} would send the API token unencrypted: use https, "
+                "or set source.allow_http: true (--allow-http) on a trusted network")
+        if parts.username or parts.password:
+            raise InventoryError("put the API token in its environment variable, "
+                                 "not in the URL")
+        self.scheme, self._netloc, self._host = parts.scheme, parts.netloc, parts.hostname
         self._token = token
         self.timeout = timeout
         self._opener = opener
@@ -321,8 +434,26 @@ class RestClient:
             if not isinstance(page, dict) or not isinstance(page.get("results"), list):
                 raise InventoryError(f"unexpected response from {_safe_url(url)}")
             results.extend(page["results"])
-            url = page.get("next")
+            url = self._next_url(page.get("next"))
         raise InventoryError(f"more than {MAX_PAGES} pages from {path}")
+
+    def _next_url(self, nxt) -> Optional[str]:
+        """The next page, always fetched from the base URL's scheme, host and port.
+
+        Behind a TLS-terminating proxy NetBox links to ``http://`` on the
+        same host, so the scheme and port are taken from the base URL; a
+        link to any other host (or a ``file:`` URL) is refused rather than
+        sent the token.
+        """
+        if not nxt:
+            return None
+        parts = urllib.parse.urlsplit(urllib.parse.urljoin(self.base_url + "/", str(nxt)))
+        if parts.scheme not in ("http", "https") or \
+                (parts.hostname or "").lower() != self._host.lower():
+            raise InventoryError(
+                f"refusing pagination link to {printable(_safe_url(str(nxt)))}: not on "
+                f"{self._host} (the API token is only sent to the configured URL)")
+        return urllib.parse.urlunsplit((self.scheme, self._netloc, parts.path, parts.query, ""))
 
     def get_json(self, url: str):
         req = urllib.request.Request(url, headers={
@@ -338,6 +469,9 @@ class RestClient:
                 body = resp.read()
         except urllib.error.HTTPError as exc:
             hint = " (check the API token)" if exc.code in (401, 403) else ""
+            if 300 <= exc.code < 400:
+                hint = (" (redirects are not followed, so the token is not sent elsewhere: "
+                        "use the URL the server redirects to)")
             raise InventoryError(
                 f"HTTP {exc.code} {exc.reason} from {_safe_url(url)}{hint}") from None
         except (urllib.error.URLError, OSError) as exc:
@@ -402,8 +536,9 @@ def netbox_devices(client: RestClient, filters: dict, platform_map: dict,
         slug = _name(platform, "slug", "name")
         driver = platform_map.get(slug) or drivers.get(slug) or _guess_driver(slug)
         if not name or not driver:
-            warnings.append(f"NetBox device {name or dev.get('id')}: no NAPALM driver for "
-                            f"platform {slug!r} (add it to source.platform_map), skipped")
+            warnings.append(printable(
+                f"NetBox device {name or dev.get('id')}: no NAPALM driver for "
+                f"platform {slug!r} (add it to source.platform_map), skipped"))
             continue
         device_type = dev.get("device_type") or {}
         devices.append(_drop_none({
@@ -441,8 +576,9 @@ def nautobot_devices(client: RestClient, filters: dict, platform_map: dict,
                   or (platform.get("napalm_driver") if isinstance(platform, dict) else None)
                   or _guess_driver(_name(platform, "network_driver"), pname))
         if not name or not driver:
-            warnings.append(f"Nautobot device {name or dev.get('id')}: no NAPALM driver for "
-                            f"platform {pname!r} (add it to source.platform_map), skipped")
+            warnings.append(printable(
+                f"Nautobot device {name or dev.get('id')}: no NAPALM driver for "
+                f"platform {pname!r} (add it to source.platform_map), skipped"))
             continue
         device_type = dev.get("device_type") or {}
         location = dev.get("location") or dev.get("site")
@@ -547,8 +683,8 @@ def _ansible_host(host: str, hv: dict, groups: list, warnings: list) -> Optional
         nos = str(hv.get("ansible_network_os") or "")
         platform = ANSIBLE_NETWORK_OS.get(nos) or ANSIBLE_NETWORK_OS.get(nos.split(".")[-1])
     if not platform:
-        warnings.append(f"Ansible host {host}: no ansible_network_os NAPALM knows "
-                        f"({hv.get('ansible_network_os')!r}), skipped")
+        warnings.append(printable(f"Ansible host {host}: no ansible_network_os NAPALM knows "
+                                  f"({hv.get('ansible_network_os')!r}), skipped"))
         return None
     dev = {
         "hostname": str(hv.get("ansible_host") or host),
@@ -560,8 +696,8 @@ def _ansible_host(host: str, hv: dict, groups: list, warnings: list) -> Optional
     password = next((hv[k] for k in ("ansible_password", "ansible_ssh_pass",
                                      "ansible_httpapi_pass") if hv.get(k) is not None), None)
     if isinstance(password, _Vaulted):
-        warnings.append(f"Ansible host {host}: vault-encrypted password not supported; "
-                        f"set {ENV_PASSWORD} instead")
+        warnings.append(printable(f"Ansible host {host}: vault-encrypted password not "
+                                  f"supported; set {ENV_PASSWORD} instead"))
         password = None
     if user:
         dev["username"] = str(user)
@@ -660,16 +796,25 @@ def _expand_range(pattern: str) -> list[str]:
     if not m:
         return [pattern]
     start, end = m.group(1), m.group(2)
+    letters = string.ascii_lowercase
     if start.isdigit() and end.isdigit():
+        if int(end) - int(start) >= MAX_HOST_RANGE:
+            raise InventoryError(f"host range {pattern!r} is too large "
+                                 f"(at most {MAX_HOST_RANGE} hosts)")
         width = len(start) if start.startswith("0") else 0
         items = [str(i).zfill(width) for i in range(int(start), int(end) + 1)]
-    elif len(start) == 1 and len(end) == 1:
-        letters = string.ascii_lowercase
+    elif len(start) == 1 and len(end) == 1 and start in letters and end in letters:
         items = list(letters[letters.index(start):letters.index(end) + 1])
     else:
-        return [pattern]
+        raise InventoryError(f"bad host range {pattern!r} (use [01:10] or [a:f])")
     head, tail = pattern[:m.start()], pattern[m.end():]
-    return [h for item in items for h in _expand_range(f"{head}{item}{tail}")]
+    hosts: list[str] = []
+    for item in items:
+        hosts += _expand_range(f"{head}{item}{tail}")
+        if len(hosts) > MAX_HOST_RANGE:
+            raise InventoryError(f"host range {pattern!r} is too large "
+                                 f"(at most {MAX_HOST_RANGE} hosts)")
+    return hosts
 
 
 def _load_vars_dirs(base: Path, groups: dict[str, _Group]) -> dict[str, dict]:

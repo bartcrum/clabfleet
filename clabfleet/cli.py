@@ -18,7 +18,8 @@ Usage:
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
     clabfleet export-live [<inventory>] [-o output.clab.yml] [--netbox URL | --nautobot URL
-                          | --ansible FILE] [--filter KEY=VALUE] [--sanitise]
+                          | --ansible FILE] [--filter KEY=VALUE] [--allowed-network CIDR]
+                          [--sanitise [--allow-residual] | --no-sanitise]
                           [--include-neighbours] [--apply [--prune] | --overwrite] [--json]
     clabfleet new <template> [--spines N ...] [--kind KIND] [--image IMAGE] [-o FILE] [--force]
     clabfleet new --list
@@ -31,6 +32,7 @@ or a remote server over SSH with --host.
 """
 
 import argparse
+import getpass
 import ipaddress
 import json
 import logging
@@ -72,8 +74,8 @@ from .exporter import (
     report_path,
     write_result,
 )
-from .inventory import load_inventory
-from .resync import apply_diff, diff_topology
+from .inventory import load_inventory, printable
+from .resync import apply_diff, diff_topology, was_sanitised
 from .sanitise import SanitiseOptions
 from .templates import (
     DEFAULT_KIND,
@@ -229,8 +231,13 @@ def _build_parser() -> argparse.ArgumentParser:
                              "exec, SSH for VM-based kinds such as IOL, else a shell")
     p_exec.add_argument("--user", dest="node_user",
                         help="SSH username on the nodes (default: per kind, usually admin)")
-    p_exec.add_argument("--password", dest="node_password",
-                        help="SSH password on the nodes (default: CLAB_NODE_PASSWORD or admin)")
+    pw = p_exec.add_mutually_exclusive_group()
+    pw.add_argument("--password", dest="node_password",
+                    help="SSH password on the nodes (default: CLAB_NODE_PASSWORD or admin). "
+                         "Visible to other users in ps and kept in shell history: prefer "
+                         "CLAB_NODE_PASSWORD or --ask-password")
+    pw.add_argument("--ask-password", action="store_true",
+                    help="Prompt for the nodes' SSH password")
     p_exec.add_argument("--parallel", type=int, default=8,
                         help="Nodes to run on at once (default: 8)")
     p_exec.add_argument("--timeout", type=float, default=60,
@@ -305,6 +312,12 @@ def _build_parser() -> argparse.ArgumentParser:
                           "(repeatable); for Ansible only group=NAME")
     src.add_argument("--token-env", metavar="VAR",
                      help="Environment variable holding the NetBox/Nautobot token")
+    src.add_argument("--allow-http", action="store_true",
+                     help="Allow a plain http:// NetBox/Nautobot URL (the token is sent "
+                          "unencrypted)")
+    src.add_argument("--allowed-network", action="append", metavar="CIDR", default=[],
+                     help="Only connect to devices whose address is in this network "
+                          "(repeatable; added to allowed_networks: in the inventory)")
     conv = p_live.add_argument_group("conversion")
     conv.add_argument("--keep-interface-names", action="store_true",
                       help="Use the devices' interface names as they are instead of "
@@ -316,7 +329,13 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Image for neighbour placeholders (default: alpine:3)")
     conv.add_argument("--sanitise", "--sanitize", action="store_true",
                       help="Remove or replace secrets, AAA/SNMP config and management "
-                           "addresses in the saved configs")
+                           "addresses in the saved configs (best effort: review them "
+                           "before sharing)")
+    conv.add_argument("--no-sanitise", "--no-sanitize", action="store_true",
+                      help="Save configs as they are, even over a sanitised import")
+    conv.add_argument("--allow-residual", action="store_true",
+                      help="With --sanitise: write configs even if they still look like "
+                           "they hold secrets")
     conv.add_argument("--mgmt-address", choices=["remove", "dhcp", "keep"], default="remove",
                       help="With --sanitise: what to do with management interface "
                            "addresses (default: remove)")
@@ -636,7 +655,10 @@ def _user(args: argparse.Namespace) -> int:
 
 
 def _exec(args: argparse.Namespace, cluster: ClusterConfig) -> int:
-    executor = LabExecutor(cluster, ssh_user=args.node_user, ssh_password=args.node_password,
+    password = args.node_password
+    if args.ask_password:
+        password = getpass.getpass("SSH password for the nodes: ")
+    executor = LabExecutor(cluster, ssh_user=args.node_user, ssh_password=password,
                            parallel=args.parallel, timeout=args.timeout)
     out = executor.run(args.topology, " ".join(args.cmd), nodes=_node_patterns(args),
                        mode=args.mode)
@@ -830,6 +852,13 @@ def _export_live(args: argparse.Namespace) -> int:
         raise ValueError("give an inventory file or --netbox, --nautobot or --ansible")
     if args.prune and not args.apply:
         raise ValueError("--prune only works with --apply")
+    if args.sanitise and args.no_sanitise:
+        raise ValueError("use --sanitise or --no-sanitise, not both")
+    output = Path(args.output) if args.output else None
+    if output is not None and output.exists() and (args.apply or args.overwrite) \
+            and not (args.sanitise or args.no_sanitise) and was_sanitised(load_report(output)):
+        raise ValueError(f"the last import into {output} was sanitised: add --sanitise "
+                         "(or --no-sanitise to write the configs as they are)")
     filters: dict = {}
     for item in args.filter:
         key, sep, value = item.partition("=")
@@ -840,13 +869,13 @@ def _export_live(args: argparse.Namespace) -> int:
 
     inventory = load_inventory(args.devices, netbox=args.netbox, nautobot=args.nautobot,
                                ansible=args.ansible, filters=filters,
-                               token_env=args.token_env)
+                               token_env=args.token_env, allow_http=args.allow_http,
+                               allowed_networks=args.allowed_network)
     for msg in inventory.warnings:
-        print(f"warning: {msg}", file=sys.stderr)
+        print(f"warning: {printable(msg)}", file=sys.stderr)
     if not inventory.devices:
         raise ValueError("the inventory has no devices")
 
-    output = Path(args.output) if args.output else None
     resync = output is not None and output.exists() and not args.overwrite
     if (args.apply or args.json) and not resync:
         raise ValueError("--apply and --json are for re-syncing an existing --output file")
@@ -857,6 +886,7 @@ def _export_live(args: argparse.Namespace) -> int:
         map_interfaces=not args.keep_interface_names,
         sanitise=SanitiseOptions(mgmt=args.mgmt_address, user=args.lab_user,
                                  password=args.lab_password) if args.sanitise else None,
+        allow_residual=args.allow_residual,
         include_neighbours=args.include_neighbours,
         neighbour_image=args.neighbour_image,
         inline_configs=output is None,
@@ -871,7 +901,11 @@ def _export_live(args: argparse.Namespace) -> int:
         raise ValueError("no device could be reached")
     result = build_topology(collected, options)
     for msg in result.warnings:
-        print(f"warning: {msg}", file=sys.stderr)
+        print(f"warning: {printable(msg)}", file=sys.stderr)
+    if not args.sanitise and (not resync or args.apply):
+        print("WARNING: --sanitise not given: the configs are saved as they are, with the "
+              "network's passwords, keys and SNMP communities. Files are written readable "
+              "by you only; do not share or commit them.", file=sys.stderr)
 
     if output is None:
         print(dump_yaml(result.topology))
