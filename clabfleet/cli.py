@@ -17,7 +17,9 @@ Usage:
                       [-c COUNT] [--duration SECONDS] [--snaplen BYTES] [--via auto|node|helper]
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
-    clabfleet export-live <devices.yaml> [-o output.clab.yml]
+    clabfleet export-live [<inventory>] [-o output.clab.yml] [--netbox URL | --nautobot URL
+                          | --ansible FILE] [--filter KEY=VALUE] [--sanitise]
+                          [--include-neighbours] [--apply [--prune] | --overwrite] [--json]
     clabfleet new <template> [--spines N ...] [--kind KIND] [--image IMAGE] [-o FILE] [--force]
     clabfleet new --list
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
@@ -60,7 +62,18 @@ from .deployer import LabDeployer
 from .execute import LabExecutor
 from .linkcheck import all_pairs, check_links, describe, failures
 from .nodes import inspect_all, running_usage
-from .exporter import export_from_live_network
+from .exporter import (
+    ExportOptions,
+    build_topology,
+    collect_devices,
+    load_report,
+    pinned_from_report,
+    report_path,
+    write_result,
+)
+from .inventory import load_inventory
+from .resync import apply_diff, diff_topology
+from .sanitise import SanitiseOptions
 from .templates import (
     DEFAULT_KIND,
     DEFAULT_LINK_SUBNET,
@@ -261,13 +274,60 @@ def _build_parser() -> argparse.ArgumentParser:
                             help="Fail on warnings as well as errors")
 
     # --- export-live ---
-    p_live = sub.add_parser("export-live",
-                            help="Build a topology from live network devices (NAPALM)")
-    p_live.add_argument("devices", help="YAML file with device connection info")
+    p_live = sub.add_parser(
+        "export-live", help="Build a topology from live network devices (NAPALM)",
+        description="Connect to real devices with NAPALM and build a containerlab "
+                    "topology from their configs and LLDP neighbours. If the output "
+                    "file exists, report what changed instead of overwriting it.")
+    p_live.add_argument("devices", nargs="?", metavar="inventory",
+                        help="Device inventory: clabfleet YAML (devices:, defaults:, "
+                             "source:, kinds:, images:) or an Ansible inventory (YAML/INI)")
     p_live.add_argument("-o", "--output", help="Output topology file "
-                        "(configs are written to configs/ next to it)")
+                        "(configs are written to configs/ next to it, plus an "
+                        "<name>.import-report.yaml)")
     p_live.add_argument("--lab-name", default="imported-topology",
                         help="Name for the generated lab")
+    src = p_live.add_argument_group("device sources (instead of or with the inventory file)")
+    src.add_argument("--netbox", metavar="URL",
+                     help="Take devices from NetBox (token in NETBOX_TOKEN)")
+    src.add_argument("--nautobot", metavar="URL",
+                     help="Take devices from Nautobot (token in NAUTOBOT_TOKEN)")
+    src.add_argument("--ansible", metavar="INVENTORY",
+                     help="Take devices from an Ansible inventory file (YAML or INI)")
+    src.add_argument("--filter", action="append", metavar="KEY=VALUE", default=[],
+                     help="NetBox/Nautobot query filter, e.g. site=dc1, role=leaf, tag=lab "
+                          "(repeatable); for Ansible only group=NAME")
+    src.add_argument("--token-env", metavar="VAR",
+                     help="Environment variable holding the NetBox/Nautobot token")
+    conv = p_live.add_argument_group("conversion")
+    conv.add_argument("--keep-interface-names", action="store_true",
+                      help="Use the devices' interface names as they are instead of "
+                           "mapping them to each kind's naming")
+    conv.add_argument("--include-neighbours", action="store_true",
+                      help="Add LLDP neighbours that are not in the inventory as "
+                           "placeholder linux nodes")
+    conv.add_argument("--neighbour-image", default="alpine:3", metavar="IMAGE",
+                      help="Image for neighbour placeholders (default: alpine:3)")
+    conv.add_argument("--sanitise", "--sanitize", action="store_true",
+                      help="Remove or replace secrets, AAA/SNMP config and management "
+                           "addresses in the saved configs")
+    conv.add_argument("--mgmt-address", choices=["remove", "dhcp", "keep"], default="remove",
+                      help="With --sanitise: what to do with management interface "
+                           "addresses (default: remove)")
+    conv.add_argument("--lab-user", default="admin",
+                      help="With --sanitise: placeholder login added to configs "
+                           "(default: admin)")
+    conv.add_argument("--lab-password", default="admin",
+                      help="With --sanitise: its password (default: admin)")
+    sync = p_live.add_argument_group("re-sync (when the output file exists)")
+    sync.add_argument("--apply", action="store_true",
+                      help="Apply the reported changes to the existing topology "
+                           "(hand edits are kept)")
+    sync.add_argument("--prune", action="store_true",
+                      help="With --apply: also delete nodes and links that are gone")
+    sync.add_argument("--overwrite", action="store_true",
+                      help="Replace the existing topology with a fresh import")
+    sync.add_argument("--json", action="store_true", help="Print the change report as JSON")
 
     # --- new ---
     p_new = sub.add_parser("new", help="Generate a topology from a lab template",
@@ -403,16 +463,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     cmd = args.command
 
     if cmd == "export-live":
-        with open(Path(args.devices)) as fh:
-            devices = yaml.safe_load(fh)
-        if not isinstance(devices, list):
-            devices = devices.get("devices", [])
-        topo = export_from_live_network(
-            devices, output_file=args.output, lab_name=args.lab_name,
-        )
-        if not args.output:
-            print(dump_yaml(topo))
-        return 0
+        return _export_live(args)
 
     if cmd == "validate":
         return _validate(args)
@@ -763,6 +814,89 @@ def _validate(args: argparse.Namespace) -> int:
         if report.errors or (args.strict and report.warnings):
             failed += 1
     return 1 if failed else 0
+
+
+def _export_live(args: argparse.Namespace) -> int:
+    if not (args.devices or args.netbox or args.nautobot or args.ansible):
+        raise ValueError("give an inventory file or --netbox, --nautobot or --ansible")
+    if args.prune and not args.apply:
+        raise ValueError("--prune only works with --apply")
+    filters: dict = {}
+    for item in args.filter:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"--filter wants KEY=VALUE, got {item!r}")
+        filters.setdefault(key, []).append(value)
+    filters = {k: v[0] if len(v) == 1 else v for k, v in filters.items()}
+
+    inventory = load_inventory(args.devices, netbox=args.netbox, nautobot=args.nautobot,
+                               ansible=args.ansible, filters=filters,
+                               token_env=args.token_env)
+    for msg in inventory.warnings:
+        print(f"warning: {msg}", file=sys.stderr)
+    if not inventory.devices:
+        raise ValueError("the inventory has no devices")
+
+    output = Path(args.output) if args.output else None
+    resync = output is not None and output.exists() and not args.overwrite
+    if (args.apply or args.json) and not resync:
+        raise ValueError("--apply and --json are for re-syncing an existing --output file")
+    options = ExportOptions(
+        lab_name=args.lab_name,
+        kind_rules=inventory.kind_rules,
+        image_rules=inventory.image_rules,
+        map_interfaces=not args.keep_interface_names,
+        sanitise=SanitiseOptions(mgmt=args.mgmt_address, user=args.lab_user,
+                                 password=args.lab_password) if args.sanitise else None,
+        include_neighbours=args.include_neighbours,
+        neighbour_image=args.neighbour_image,
+        inline_configs=output is None,
+        pinned_interfaces=pinned_from_report(load_report(output)) if output else {},
+    )
+    if resync:
+        options.lab_name = (yaml.safe_load(output.read_text()) or {}).get("name") \
+            or args.lab_name
+
+    collected = collect_devices(inventory.devices)
+    if not collected:
+        raise ValueError("no device could be reached")
+    result = build_topology(collected, options)
+    for msg in result.warnings:
+        print(f"warning: {msg}", file=sys.stderr)
+
+    if output is None:
+        print(dump_yaml(result.topology))
+        return 0
+    if not resync:
+        write_result(result, output)
+        topo = result.topology["topology"]
+        print(f"Wrote {output} ({len(topo['nodes'])} nodes, {len(topo['links'])} links); "
+              f"report in {report_path(output)}")
+        return 0
+
+    diff = diff_topology(output, result)
+    if args.json:
+        print(json.dumps({"topology": str(output), "applied": args.apply and not diff.empty,
+                          **diff.as_dict()}, indent=2))
+    else:
+        print(f"Changes since the last import of {output}:")
+        print(diff.as_text())
+    if diff.empty:
+        return 0
+    if not args.apply:
+        if not args.json:
+            print("\nNothing written. Re-run with --apply to update the topology "
+                  "(add --prune to delete what is gone), or --overwrite to replace it.")
+        return 0
+    actions = apply_diff(output, result, diff, prune=args.prune)
+    if not args.json:
+        print()
+        for action in actions:
+            print(f"  {action}")
+        skipped = len(diff.removed_nodes) + len(diff.removed_links)
+        if skipped and not args.prune:
+            print(f"  ({skipped} removed nodes/links kept; use --prune to delete them)")
+    return 0
 
 
 def _check_links(cluster: ClusterConfig) -> int:

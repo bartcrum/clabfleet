@@ -242,23 +242,36 @@ actions, and TLS.
 
 ### 3.7 Live network import improvements
 
+**Done.** All six items below. Tested against recorded NAPALM data and
+fake NetBox/Nautobot APIs only; no real devices were involved.
+
 The exporter in `clabfleet/exporter.py` produces a topology that usually
 needs hand edits before it deploys.
 
-- **Interface name mapping — M.** Per-kind rewrite tables (for example
+- **Interface name mapping — M.** **Done.** `clabfleet/ifmap.py`: per-kind
+  naming for IOL, cEOS, N9Kv, SR Linux, XRd, XRv9k, vJunos/vSRX, C8000v,
+  SR OS and linux; 1:1 where the port exists, else the next free port in a
+  deterministic order, within port limits. Links and configs both, with a
+  per-node report. Per-kind rewrite tables (for example
   `GigabitEthernet0/0/1` → `Ethernet0/1` for IOL) applied to both links
   and the saved configs.
-- **Config sanitising — M.** `--sanitise` strips or replaces password
-  hashes, SNMP communities, AAA servers and management addresses.
-- **Image mapping — S.** Map platform and version to a real image via the
-  inventory file instead of emitting `REPLACE-ME/<kind>:latest`.
-- **Incremental re-sync — M.** Diff the new LLDP graph against the
-  existing topology and report added, removed and changed nodes and links
-  instead of overwriting.
-- **Neighbour-only devices — S.** Optionally add LLDP neighbours that are
-  not in the inventory as placeholder `linux` nodes.
-- **Other inventory sources — M.** Accept a NetBox/Nautobot query or an
-  Ansible inventory as the device list.
+- **Config sanitising — M.** **Done.** `clabfleet/sanitise.py`, IOS-like
+  dialects and Junos; adds an admin/admin login, reports counts only.
+  `--sanitise` strips or replaces password hashes, SNMP communities, AAA
+  servers and management addresses.
+- **Image mapping — S.** **Done.** `images:` (and `kinds:`) rules in the
+  inventory. Map platform and version to a real image via the inventory
+  file instead of emitting `REPLACE-ME/<kind>:latest`.
+- **Incremental re-sync — M.** **Done.** `clabfleet/resync.py`: report only
+  by default, `--apply` edits in place keeping hand edits, `--prune` to
+  delete. Diff the new LLDP graph against the existing topology and report
+  added, removed and changed nodes and links instead of overwriting.
+- **Neighbour-only devices — S.** **Done.** `--include-neighbours`.
+  Optionally add LLDP neighbours that are not in the inventory as
+  placeholder `linux` nodes.
+- **Other inventory sources — M.** **Done.** `clabfleet/inventory.py`:
+  NetBox and Nautobot REST (stdlib only) and Ansible YAML/INI inventories.
+  Accept a NetBox/Nautobot query or an Ansible inventory as the device list.
 
 ## Not planned
 

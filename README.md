@@ -17,8 +17,11 @@ deploys with plain `containerlab deploy`.
   and removes itself
 - **Placement strategies** — bin-pack, spread, or resource-based
 - **Host pinning & tag affinity** — via ordinary node `labels`
-- **Import from live network** — connects to real devices via NAPALM, pulls
-  running configs and LLDP neighbours, writes a matching containerlab topology
+- **Import from live network** — connects to real devices via NAPALM (device
+  list from YAML, NetBox, Nautobot or Ansible), pulls running configs and LLDP
+  neighbours, and writes a matching containerlab topology: interface names
+  mapped per kind, images from rules, optional config sanitising, and
+  re-syncs that report changes instead of overwriting
 - **Image pre-flight** — fail before anything is created when a node's
   image is missing on its host, or pull it with `--pull`
 - **Dry-run** — see the placement plan and the per-host topology files
@@ -611,17 +614,165 @@ The chosen range is shown as `vni_range` in the deploy output.
 ```bash
 pip install -e ".[napalm]"
 
+export PROD_NET_PASSWORD=...          # read via password_env in the inventory
 clabfleet export-live topologies/live_devices_example.yaml \
-    -o imported/prod_mirror.clab.yml --lab-name prod-mirror
+    -o imported/prod_mirror.clab.yml --lab-name prod-mirror --sanitise
 
+clabfleet validate imported/prod_mirror.clab.yml
 clabfleet --sudo deploy imported/prod_mirror.clab.yml
 ```
 
-Each device becomes a node (kind from the NAPALM platform unless you set
-`kind`) with its running config saved to `configs/<node>.cfg`. Each LLDP
-adjacency between two inventoried devices becomes a link. Check that the
-interface names match what each containerlab kind accepts before deploying.
-See `topologies/live_devices_example.yaml` for the inventory format.
+Each device becomes a node with its running config saved to
+`configs/<node>.cfg`. Each LLDP adjacency between two inventoried devices
+becomes a link. Next to the topology, `<name>.import-report.yaml` lists,
+per node, every interface rename, where the image came from and what
+`--sanitise` changed (counts only, never values). Without `-o` the
+topology is printed with the configs inline.
+
+### Device sources
+
+| Source | How |
+|--------|-----|
+| clabfleet YAML | `export-live inventory.yaml` with a `devices:` list; see `topologies/live_devices_example.yaml` |
+| NetBox | `--netbox URL` (token in `NETBOX_TOKEN`), or `source: {type: netbox, url: ...}` in the YAML |
+| Nautobot | `--nautobot URL` (token in `NAUTOBOT_TOKEN`), or `source: {type: nautobot, ...}` |
+| Ansible | `export-live hosts.ini` (or `hosts.yml`), `--ansible FILE`, or `source: {type: ansible, path: ...}` |
+
+- **NetBox / Nautobot:** `--filter KEY=VALUE` (repeatable; the same key
+  twice means either value) is passed to `/api/dcim/devices/`, e.g.
+  `--filter site=dc1 --filter role=leaf --filter tag=lab-import`
+  (Nautobot: `location=`). All pages are fetched. Each device is reached on
+  its primary IP (else its name). The NAPALM driver comes from
+  `source.platform_map` (platform slug, or name on Nautobot → driver), else
+  the platform's NAPALM driver field, else a guess from the platform name
+  (`ios`, `eos`, `nxos`, `iosxr`, `junos`, ...); devices with no driver are
+  skipped with a warning. Use `--token-env VAR` or `source.token_env` for
+  another token variable.
+- **Ansible:** YAML or INI static inventories, including `[group:vars]`,
+  `[group:children]`, host ranges such as `leaf[01:04]`, and `group_vars/`
+  and `host_vars/` next to the file. Variables merge like Ansible's (`all`,
+  then parent groups, then child groups, then the host). Uses
+  `ansible_host`, `ansible_user`, `ansible_password` (or `ansible_ssh_pass`),
+  `ansible_port`, `ansible_become_password` (NAPALM's enable secret) and
+  `ansible_network_os` (`cisco.ios.ios` → `ios`, `arista.eos.eos` → `eos`,
+  `cisco.nxos.nxos` → `nxos_ssh`, ...; `napalm_platform` overrides it).
+  Optional `clab_kind`, `clab_type` and `clab_image` host variables set the
+  node directly. `--filter group=NAME` keeps one group. Vault-encrypted
+  values are not decrypted.
+- **Credentials:** the device entry, then `defaults:` in the YAML, then the
+  variable named by `password_env` / `username_env`, then
+  `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD`. Passwords and
+  tokens are never logged or written to the output.
+
+### Kinds and images
+
+A node's kind is the device's `kind`, else the first matching `kinds:`
+rule in the inventory, else the platform default (`ios` → `cisco_iol`,
+`eos` → `arista_ceos`, `nxos` → `cisco_n9kv`, `junos` →
+`juniper_vjunosrouter`, ...). Its image is the device's `image`, else the
+first matching `images:` rule, else `REPLACE-ME/<kind>:latest` with a
+warning. Rules match regexes against the whole value, ignoring case, on
+`platform`, `vendor`, `model`, `version` (from the device's NAPALM facts),
+`role`, `site`, `tag` (NetBox/Nautobot), `group` (Ansible), `hostname`, `name`, and
+for images also `kind` and `type`:
+
+```yaml
+kinds:
+  - {platform: ios, model: "C9[23]00.*", kind: cisco_iol, type: L2}
+images:
+  - {kind: cisco_iol, version: '17\.12\..*', image: "vrnetlab/cisco_iol:17.12.01"}
+  - {kind: arista_ceos, image: "ceos:4.32.0F"}
+```
+
+### Interface names
+
+Interface names are mapped to the names each kind accepts, in the links
+and in the saved configs (`interface` stanzas and references such as
+`passive-interface` or `source-interface`; descriptions are left alone).
+Abbreviations are expanded first (`Gi0/1`, `Te1/1`, `Et49/1`, ...), so
+both ends of an adjacency agree.
+
+| Kind | Topology name | Config name | 1:1 when the device has |
+|------|---------------|-------------|-------------------------|
+| `cisco_iol` | `Ethernet0/1` … `Ethernet15/3` (63 ports; `0/0` is management) | same | an Ethernet port whose last two numbers fit, e.g. `Gi0/0/2` → `Ethernet0/2` |
+| `arista_ceos` | `eth1`, `eth49_1` | `Ethernet1`, `Ethernet49/1` | `EthernetN`, `EthernetN/M` |
+| `cisco_n9kv` | `eth5` | `Ethernet1/5` | `Ethernet1/N` |
+| `nokia_srlinux` | `e1-3` | `ethernet-1/3` | `ethernet-1/N` |
+| `cisco_xrd` | `Gi0-0-0-2` | `GigabitEthernet0/0/0/2` | any `…0/0/0/N` port |
+| `cisco_xrv9k` | `eth3` | `GigabitEthernet0/0/0/2` | any `…0/0/0/N` port |
+| `juniper_vjunos*`, `juniper_vsrx` | `eth4` | `ge-0/0/3` (vJunosEvolved `et-`) | `ge-`/`xe-`/`et-0/0/N` (vJunos router/switch: 10 ports) |
+| `cisco_c8000v`, `cisco_csr1000v` | `eth2` | `GigabitEthernet3` | `GigabitEthernetN` |
+| `nokia_sros` | `eth4` | `1/1/4` | `1/1/N` |
+| `linux` and others | `eth1`, `eth2`, … | not rewritten | `EthernetN` |
+
+Other interfaces get the lowest free port: link interfaces first, then
+the other physical interfaces in the config, each in natural order, so the
+result does not depend on the order devices report them in. Management
+ports and logical interfaces (loopbacks, VLANs, port-channels, tunnels,
+subinterfaces) are never mapped. Interfaces beyond a kind's port count
+are listed as dropped in the report: their links are left out and their
+IOS-style config stanzas removed. `--keep-interface-names` turns mapping
+off. A port is only ever used by one link: when the LLDP data of the two
+ends disagrees, the second link is left out with a warning.
+
+### Sanitising configs
+
+`--sanitise` cleans every saved config, for IOS/IOS-XE, IOS-XR, NX-OS, EOS
+and Junos (with it, configs of other platforms are not saved at all):
+
+- **Removed:** `enable secret/password`, all `username` lines, `aaa ...`,
+  TACACS+/RADIUS servers and keys, `snmp-server community/user/host`,
+  `crypto pki` / `crypto ca` trustpoints and certificate chains,
+  `key config-key`. Junos: `tacplus-server`, `radius-server`,
+  `authentication-order`, SNMP communities and SNMPv3, SSH public keys.
+- **Replaced with `lab-key`:** OSPF/IS-IS/BGP/HSRP/VRRP authentication keys,
+  key-chain `key-string`, NTP authentication keys, ISAKMP/IKE pre-shared
+  keys, line and other `password`/`secret` values, Junos `$9$` secrets.
+  Both ends get the same value, so authenticated adjacencies still form.
+- **Management:** addresses on management interfaces (`Management*`,
+  `mgmt0`, `fxp0`, `em0`, or any interface in a management VRF) and static
+  routes in the management VRF are removed; `--mgmt-address dhcp` turns the
+  addresses into DHCP instead, `keep` leaves them.
+- **Login:** a placeholder user (`--lab-user` / `--lab-password`, default
+  `admin`/`admin`) is added after `hostname` so the node stays reachable.
+  Junos keeps its users, but every `encrypted-password` becomes the hash of
+  `admin@123` (the vrnetlab default).
+
+### Neighbours outside the inventory
+
+`--include-neighbours` adds LLDP neighbours that are not in the inventory
+(servers, devices you cannot log in to, ...) as `linux` nodes
+(`--neighbour-image`, default `alpine:3`), named after their LLDP system
+name or chassis ID, with their links. The report marks them
+`neighbour: true`.
+
+### Re-sync
+
+Running `export-live` again with the same `-o` file does not overwrite
+it. It reports what changed since the last import:
+
+```
+Changes since the last import of imported/prod_mirror.clab.yml:
+- node server-01
+~ node core-rtr-02: startup config changed
++ link core-rtr-02:Ethernet0/3 -- dist-sw-02:eth51_1
+~ link dist-sw-01:eth49_1 -- dist-sw-02:eth50_1 -> dist-sw-01:eth48_1 -- dist-sw-02:eth50_1
+
+Nothing written. Re-run with --apply to update the topology (add --prune to delete what is gone), or --overwrite to replace it.
+```
+
+`--json` prints the same as JSON. `--apply` edits the file in place:
+comments, order, GUI positions and other labels, and nodes and links you
+added by hand all stay. New nodes and links are added, moved links get
+their new interfaces, and changed nodes get their new kind/type/image (an
+image you set by hand is never replaced by a placeholder) and config. A
+node whose `startup-config` you pointed at another file keeps it; the new
+config goes to `configs/<node>.cfg` for you to compare. Removed nodes and
+links are only deleted with `--prune`, and only nodes an import created
+count as removed. Interface assignments from the last report are reused,
+so a new port does not renumber the others. Lines that change on every
+fetch (such as `! Last configuration change`) are not a config change.
+`--overwrite` replaces the file with a fresh import.
 
 ## Example topologies
 
@@ -643,6 +794,8 @@ See `topologies/live_devices_example.yaml` for the inventory format.
 | `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
 | `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
 | `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot:latest` | Image with `tcpdump` for capturing on nodes that have none |
+| `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD` | — | `export-live`: device login when the inventory gives none |
+| `NETBOX_TOKEN` / `NAUTOBOT_TOKEN` | — | `export-live`: API token for `--netbox` / `--nautobot` |
 
 ## Development
 
@@ -664,6 +817,10 @@ clabfleet/
   deployer.py      # Deploy/destroy/save/inspect; split topology per host
   runner.py        # Run commands locally or over SSH
   exporter.py      # Build a topology from live devices (NAPALM)
+  inventory.py     # Device lists: YAML, NetBox, Nautobot, Ansible; kind/image rules
+  ifmap.py         # Map device interface names to each kind's naming
+  sanitise.py      # Strip secrets and management addressing from configs
+  resync.py        # Diff and apply a re-import against an existing topology
   execute.py       # Run a command on lab nodes (clabfleet exec)
   snapshots.py     # Config snapshots and diffs (clabfleet snapshot/diff)
   capture.py       # tcpdump on node interfaces (clabfleet capture, GUI)
