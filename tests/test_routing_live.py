@@ -116,7 +116,8 @@ def test_ios_durations():
 
 def test_wanted_topics_follow_the_configs():
     evpn = routing_view(load_topology(TOPOLOGIES / "evpn_fabric.clab.yml"))
-    assert wanted_topics(evpn, "Leaf-1") == ["bgp", "evpn", "vxlan"]
+    # Leaf-1 has an L3 VNI: its VRF routes name the VTEPs behind it
+    assert wanted_topics(evpn, "Leaf-1") == ["bgp", "evpn", "vxlan", "vrf_vteps"]
     assert wanted_topics(evpn, "Spine-1") == ["bgp", "evpn"]
     assert wanted_topics(evpn, "Host-1") == []
     tri = routing_view(load_topology(TOPOLOGIES / "three_router_triangle.clab.yml"))
@@ -264,6 +265,34 @@ def test_overlay_vxlan_tunnels():
     assert tunnels[("Leaf-1", "Leaf-2")]["state"] == "down"
     assert "has not learned" in tunnels[("Leaf-1", "Leaf-2")]["detail"]
     assert tunnels[("Leaf-3", "Leaf-4")]["state"] == "down"   # Leaf-3 read, has not learned Leaf-4
+
+
+def test_eos_vrf_routes_name_the_l3_vni_vteps():
+    # Recorded from Leaf-1 of topologies/spine_leaf.clab.yml (cEOS 4.35):
+    # Leaf-2 and Leaf-4 share only the L3 VNI with it, so `show vxlan vtep`
+    # does not list them, but routes in VRF TENANT go "via VTEP" to them
+    text = (FIXTURES / "eos_leaf1_vrf_routes.json").read_text()
+    st = parse_outputs("eos", {"vrf_vteps": text}, NOW)
+    assert st.collected == ["vrf_vteps"] and st.vrf_vteps == {"10.255.2.2": True, "10.255.2.4": True}
+    assert "show ip route vrf all | json" in eos_script(["vrf_vteps"])
+
+    view = routing_view(load_topology(TOPOLOGIES / "spine_leaf.clab.yml"))
+    states = {"Leaf-1": NodeState("eos", ["vxlan", "vrf_vteps"], vxlan={"10.255.2.3": True},
+                                  vrf_vteps=st.vrf_vteps),
+              "Leaf-2": NodeState("eos", ["vxlan", "vrf_vteps"], vxlan={"10.255.2.4": True},
+                                  vrf_vteps={"10.255.2.1": True})}
+    ov = overlay(view, states, {f"Leaf-{i}": True for i in range(1, 5)}, NOW)
+    tunnels = {(t["a"]["node"], t["b"]["node"]): ov["vxlan"][t["id"]] for t in view["evpn"]["tunnels"]}
+    assert tunnels[("Leaf-1", "Leaf-2")]["state"] == "up"      # L3 VNI only
+    assert tunnels[("Leaf-1", "Leaf-3")]["a"]["state"] == "up"  # L2 VNI: from show vxlan vtep
+
+
+def test_ios_skips_eos_only_topics():
+    runner = FakeRunner()
+    asked = []
+    st = collect_node("ios", ["vxlan", "vrf_vteps"], {"container": "c"}, runner, False,
+                      lambda cmd: (asked.append(cmd), (0, IOS_NVE))[1], NOW)
+    assert asked == ["show nve peers"] and "vrf_vteps" not in st.errors
 
 
 # --- CLI and GUI -------------------------------------------------------------------
