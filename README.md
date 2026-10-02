@@ -293,6 +293,14 @@ The topology and every file it references (startup configs, licenses,
 bind-mount sources, env files) are copied to `~/clabfleet/<lab>/` on the
 host, and containerlab runs there. `destroy` removes that directory.
 
+The first connection to a host remembers its SSH host key in
+`~/.clabfleet/known_hosts` (keys in `~/.ssh/known_hosts` count too), and
+later connections refuse a host whose key has changed, like OpenSSH's
+`StrictHostKeyChecking accept-new`. With `--host-key-policy strict` (or
+`host_key_policy: strict` per host or under `cluster:` in a cluster file)
+only already-known keys are accepted; add them with `ssh-keyscan` or one
+manual `ssh` first.
+
 ## Web GUI
 
 ```bash
@@ -792,6 +800,7 @@ fetch (such as `! Last configuration change`) are not a config change.
 | `CLAB_SSH_USER` | your SSH config | SSH username |
 | `CLAB_SSH_KEY` | SSH agent / defaults | SSH private key |
 | `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
+| `CLAB_HOST_KEY_POLICY` | `accept-new` | SSH host key checking for `--host`: `accept-new` or `strict` |
 | `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
 | `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot:latest` | Image with `tcpdump` for capturing on nodes that have none |
 | `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD` | — | `export-live`: device login when the inventory gives none |
