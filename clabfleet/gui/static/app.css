@@ -303,3 +303,95 @@ table.nodes td .open { display: flex; gap: 6px; }
   .sidebar { width: 200px; }
   .node-card { width: auto; right: 14px; }
 }
+
+/* ---------- routing view ---------- */
+:root {
+  /* categorical colours for OSPF areas, BGP ASes and VNIs */
+  --c0: #60a5fa; --c1: #34d399; --c2: #fbbf24; --c3: #f472b6;
+  --c4: #a78bfa; --c5: #22d3ee; --c6: #fb923c; --c7: #a3e635;
+  --evpn: #a78bfa;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --c0: #2563eb; --c1: #059669; --c2: #b45309; --c3: #db2777;
+    --c4: #7c3aed; --c5: #0e7490; --c6: #c2410c; --c7: #4d7c0f;
+    --evpn: #7c3aed;
+  }
+}
+.routing-bar {
+  position: absolute; top: 10px; left: 12px; right: 260px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; pointer-events: none;
+}
+.routing-bar > * { pointer-events: auto; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel-2); }
+.seg-btn { border: 0; background: none; padding: 3px 12px; font-size: 12px; cursor: pointer; color: var(--muted); }
+.seg-btn + .seg-btn { border-left: 1px solid var(--line); }
+.seg-btn.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--text); font-weight: 600; }
+.seg-btn:disabled { opacity: .4; cursor: not-allowed; }
+.seg-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.routing-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.routing-filters select {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 12px; max-width: 260px;
+}
+.routing-filters .opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); cursor: pointer; }
+#routing-problems-btn.warn { color: var(--warn); }
+
+.diagram .rt-underlay { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 3; }
+.diagram .rt-edge { stroke: var(--link); stroke-width: 2; fill: none; }
+.diagram .rt-edge.colored { stroke: var(--c); }
+.diagram .rt-edge.fam-evpn { stroke: var(--evpn); }
+.diagram .rt-edge.ibgp { stroke-dasharray: 7 4; }
+.diagram .rt-edge.tunnel { stroke: var(--accent); stroke-width: 1.6; stroke-dasharray: 2 4; stroke-linecap: round; }
+.diagram .rt-edge.tunnel.colored { stroke: var(--c); }
+.diagram .rt-edge.warn { stroke: var(--warn); }
+.diagram .rt-edge.one-sided { stroke: var(--danger); stroke-dasharray: 4 4; }
+.diagram .rt-edge.shut { opacity: .4; }
+.diagram .rt-edge.selected { stroke-width: 3.5; }
+.diagram .rt-label { font: 10px var(--mono); fill: var(--muted); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+.diagram .rt-group .tint { opacity: .11; }
+.diagram .rt-group path { fill: var(--c); stroke: var(--c); stroke-width: 18; stroke-linejoin: round; }
+.diagram .rt-group text { font-size: 11px; font-weight: 600; fill: var(--c); }
+.diagram .node.off { opacity: .45; }
+.diagram .node .rt-badge { font: 600 9.5px var(--mono); fill: var(--blue); }
+.diagram .node .rt-warn { font-size: 13px; fill: var(--warn); }
+.diagram .rt-ext { cursor: pointer; }
+
+.routing-legend {
+  position: absolute; left: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px 14px;
+  max-width: calc(100% - 330px); padding: 6px 10px; font-size: 11.5px; color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.routing-legend .item { display: inline-flex; align-items: center; gap: 6px; }
+.routing-legend .sw { width: 22px; height: 0; border-top: 2px solid var(--link); }
+.routing-legend .sw.colored { border-top-color: var(--c); }
+.routing-legend .sw.fam-evpn { border-top-color: var(--evpn); }
+.routing-legend .sw.ibgp { border-top-style: dashed; }
+.routing-legend .sw.tunnel { border-top: 2px dotted var(--accent); }
+.routing-legend .sw.one-sided { border-top: 2px dashed var(--danger); }
+.routing-legend .sw.warn { border-top-color: var(--warn); }
+.routing-legend .sw-text { color: var(--text); font-size: 10.5px; }
+
+.routing-problems {
+  position: absolute; left: 12px; top: 46px; width: min(520px, calc(100% - 330px)); max-height: 40%;
+  overflow: auto; margin: 0; padding: 8px 12px 8px 28px; font-size: 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(0 0 0 / .25);
+}
+.routing-problems li { cursor: pointer; padding: 2px 0; }
+.routing-problems li:hover { text-decoration: underline; }
+.routing-problems .warn { color: var(--warn); }
+.routing-problems .info { color: var(--muted); }
+.routing-empty { color: var(--muted); top: 50px; }
+.routing-empty p { margin: 0 0 6px; }
+.routing-card { width: 320px; }
+.rt-table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin: 0 0 10px; }
+.rt-table th { text-align: left; font-weight: 600; color: var(--muted); padding: 2px 6px 3px 0; border-bottom: 1px solid var(--line); }
+.rt-table td { padding: 3px 6px 3px 0; font-family: var(--mono); border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); }
+.rt-card-problems { margin: 0; padding-left: 18px; font-size: 12px; color: var(--warn); }
+
+@media (max-width: 760px) {
+  .routing-bar { right: 12px; top: 44px; }
+  .routing-legend { max-width: calc(100% - 24px); }
+  .routing-problems { width: calc(100% - 24px); top: 80px; }
+}

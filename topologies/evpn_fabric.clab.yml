@@ -1,0 +1,549 @@
+# EVPN / VXLAN fabric
+# 2 spines + 4 leaves on Arista cEOS, with 4 Linux hosts.
+#
+# Underlay: eBGP on the point-to-point links (spines AS 65000, each leaf
+# its own AS). Overlay: BGP EVPN between loopbacks (leaf Loopback0 to
+# spine Loopback0), spines as EVPN route servers. Each leaf is a VTEP
+# sourcing VXLAN from Loopback1.
+#
+#   VLAN 10 -> VNI 10010 on Leaf-1 and Leaf-3   (Host-1, Host-3: 10.10.10.0/24)
+#   VLAN 20 -> VNI 10020 on Leaf-2 and Leaf-4   (Host-2, Host-4: 10.20.20.0/24)
+#   VRF TENANT -> L3 VNI 50001 on every leaf    (symmetric IRB, anycast gateway .1)
+#
+# cEOS images are not public: download cEOS-lab from arista.com and import it:
+#   docker import cEOS64-lab-4.35.6M.tar.xz ceos:4.35.6M
+#
+# Deploy:
+#   clabfleet deploy topologies/evpn_fabric.clab.yml --pull
+#
+# The Routing tab of `clabfleet gui` shows the underlay, the EVPN sessions
+# and the VXLAN tunnels per VNI; `clabfleet routing` prints the same.
+
+name: evpn-fabric
+
+topology:
+  kinds:
+    arista_ceos:
+      image: ceos:4.35.6M
+    linux:
+      image: alpine:3.20
+
+  nodes:
+    # -- Spines (EVPN route servers) --
+    Spine-1:
+      kind: arista_ceos
+      startup-config: |
+        hostname Spine-1
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        ip routing
+        !
+        interface Loopback0
+           ip address 10.255.0.1/32
+        !
+        interface Ethernet1
+           description to-Leaf-1
+           no switchport
+           ip address 10.0.1.0/31
+        !
+        interface Ethernet2
+           description to-Leaf-2
+           no switchport
+           ip address 10.0.1.2/31
+        !
+        interface Ethernet3
+           description to-Leaf-3
+           no switchport
+           ip address 10.0.1.4/31
+        !
+        interface Ethernet4
+           description to-Leaf-4
+           no switchport
+           ip address 10.0.1.6/31
+        !
+        router bgp 65000
+           router-id 10.255.0.1
+           no bgp default ipv4-unicast
+           neighbor UNDERLAY peer group
+           neighbor EVPN peer group
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN next-hop-unchanged
+           neighbor EVPN send-community extended
+           neighbor 10.0.1.1 peer group UNDERLAY
+           neighbor 10.0.1.1 remote-as 65101
+           neighbor 10.0.1.3 peer group UNDERLAY
+           neighbor 10.0.1.3 remote-as 65102
+           neighbor 10.0.1.5 peer group UNDERLAY
+           neighbor 10.0.1.5 remote-as 65103
+           neighbor 10.0.1.7 peer group UNDERLAY
+           neighbor 10.0.1.7 remote-as 65104
+           neighbor 10.255.1.1 peer group EVPN
+           neighbor 10.255.1.1 remote-as 65101
+           neighbor 10.255.1.2 peer group EVPN
+           neighbor 10.255.1.2 remote-as 65102
+           neighbor 10.255.1.3 peer group EVPN
+           neighbor 10.255.1.3 remote-as 65103
+           neighbor 10.255.1.4 peer group EVPN
+           neighbor 10.255.1.4 remote-as 65104
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              neighbor UNDERLAY activate
+              network 10.255.0.1/32
+
+    Spine-2:
+      kind: arista_ceos
+      startup-config: |
+        hostname Spine-2
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        ip routing
+        !
+        interface Loopback0
+           ip address 10.255.0.2/32
+        !
+        interface Ethernet1
+           description to-Leaf-1
+           no switchport
+           ip address 10.0.2.0/31
+        !
+        interface Ethernet2
+           description to-Leaf-2
+           no switchport
+           ip address 10.0.2.2/31
+        !
+        interface Ethernet3
+           description to-Leaf-3
+           no switchport
+           ip address 10.0.2.4/31
+        !
+        interface Ethernet4
+           description to-Leaf-4
+           no switchport
+           ip address 10.0.2.6/31
+        !
+        router bgp 65000
+           router-id 10.255.0.2
+           no bgp default ipv4-unicast
+           neighbor UNDERLAY peer group
+           neighbor EVPN peer group
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN next-hop-unchanged
+           neighbor EVPN send-community extended
+           neighbor 10.0.2.1 peer group UNDERLAY
+           neighbor 10.0.2.1 remote-as 65101
+           neighbor 10.0.2.3 peer group UNDERLAY
+           neighbor 10.0.2.3 remote-as 65102
+           neighbor 10.0.2.5 peer group UNDERLAY
+           neighbor 10.0.2.5 remote-as 65103
+           neighbor 10.0.2.7 peer group UNDERLAY
+           neighbor 10.0.2.7 remote-as 65104
+           neighbor 10.255.1.1 peer group EVPN
+           neighbor 10.255.1.1 remote-as 65101
+           neighbor 10.255.1.2 peer group EVPN
+           neighbor 10.255.1.2 remote-as 65102
+           neighbor 10.255.1.3 peer group EVPN
+           neighbor 10.255.1.3 remote-as 65103
+           neighbor 10.255.1.4 peer group EVPN
+           neighbor 10.255.1.4 remote-as 65104
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              neighbor UNDERLAY activate
+              network 10.255.0.2/32
+
+    # -- Leaves (VTEPs) --
+    Leaf-1:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-1
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        vlan 10
+           name Tenant-10
+        !
+        vrf instance TENANT
+        !
+        ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
+        !
+        interface Loopback0
+           description router-id / EVPN peering
+           ip address 10.255.1.1/32
+        !
+        interface Loopback1
+           description VTEP source
+           ip address 10.255.2.1/32
+        !
+        interface Ethernet1
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.1/31
+        !
+        interface Ethernet2
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.1/31
+        !
+        interface Ethernet3
+           description to-Host-1
+           switchport access vlan 10
+        !
+        interface Vlan10
+           vrf TENANT
+           ip address virtual 10.10.10.1/24
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan udp-port 4789
+           vxlan vlan 10 vni 10010
+           vxlan vrf TENANT vni 50001
+        !
+        router bgp 65101
+           router-id 10.255.1.1
+           no bgp default ipv4-unicast
+           maximum-paths 2
+           neighbor UNDERLAY peer group
+           neighbor UNDERLAY remote-as 65000
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN send-community extended
+           neighbor 10.0.1.0 peer group UNDERLAY
+           neighbor 10.0.2.0 peer group UNDERLAY
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 10
+              rd 10.255.1.1:10010
+              route-target both 10:10010
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              neighbor UNDERLAY activate
+              network 10.255.1.1/32
+              network 10.255.2.1/32
+           !
+           vrf TENANT
+              rd 10.255.1.1:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
+
+    Leaf-2:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-2
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        vlan 20
+           name Tenant-20
+        !
+        vrf instance TENANT
+        !
+        ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
+        !
+        interface Loopback0
+           description router-id / EVPN peering
+           ip address 10.255.1.2/32
+        !
+        interface Loopback1
+           description VTEP source
+           ip address 10.255.2.2/32
+        !
+        interface Ethernet1
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.3/31
+        !
+        interface Ethernet2
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.3/31
+        !
+        interface Ethernet3
+           description to-Host-2
+           switchport access vlan 20
+        !
+        interface Vlan20
+           vrf TENANT
+           ip address virtual 10.20.20.1/24
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan udp-port 4789
+           vxlan vlan 20 vni 10020
+           vxlan vrf TENANT vni 50001
+        !
+        router bgp 65102
+           router-id 10.255.1.2
+           no bgp default ipv4-unicast
+           maximum-paths 2
+           neighbor UNDERLAY peer group
+           neighbor UNDERLAY remote-as 65000
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN send-community extended
+           neighbor 10.0.1.2 peer group UNDERLAY
+           neighbor 10.0.2.2 peer group UNDERLAY
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 20
+              rd 10.255.1.2:10020
+              route-target both 20:10020
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              neighbor UNDERLAY activate
+              network 10.255.1.2/32
+              network 10.255.2.2/32
+           !
+           vrf TENANT
+              rd 10.255.1.2:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
+
+    Leaf-3:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-3
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        vlan 10
+           name Tenant-10
+        !
+        vrf instance TENANT
+        !
+        ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
+        !
+        interface Loopback0
+           description router-id / EVPN peering
+           ip address 10.255.1.3/32
+        !
+        interface Loopback1
+           description VTEP source
+           ip address 10.255.2.3/32
+        !
+        interface Ethernet1
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.5/31
+        !
+        interface Ethernet2
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.5/31
+        !
+        interface Ethernet3
+           description to-Host-3
+           switchport access vlan 10
+        !
+        interface Vlan10
+           vrf TENANT
+           ip address virtual 10.10.10.1/24
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan udp-port 4789
+           vxlan vlan 10 vni 10010
+           vxlan vrf TENANT vni 50001
+        !
+        router bgp 65103
+           router-id 10.255.1.3
+           no bgp default ipv4-unicast
+           maximum-paths 2
+           neighbor UNDERLAY peer group
+           neighbor UNDERLAY remote-as 65000
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN send-community extended
+           neighbor 10.0.1.4 peer group UNDERLAY
+           neighbor 10.0.2.4 peer group UNDERLAY
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 10
+              rd 10.255.1.3:10010
+              route-target both 10:10010
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              neighbor UNDERLAY activate
+              network 10.255.1.3/32
+              network 10.255.2.3/32
+           !
+           vrf TENANT
+              rd 10.255.1.3:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
+
+    Leaf-4:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-4
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        vlan 20
+           name Tenant-20
+        !
+        vrf instance TENANT
+        !
+        ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
+        !
+        interface Loopback0
+           description router-id / EVPN peering
+           ip address 10.255.1.4/32
+        !
+        interface Loopback1
+           description VTEP source
+           ip address 10.255.2.4/32
+        !
+        interface Ethernet1
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.7/31
+        !
+        interface Ethernet2
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.7/31
+        !
+        interface Ethernet3
+           description to-Host-4
+           switchport access vlan 20
+        !
+        interface Vlan20
+           vrf TENANT
+           ip address virtual 10.20.20.1/24
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan udp-port 4789
+           vxlan vlan 20 vni 10020
+           vxlan vrf TENANT vni 50001
+        !
+        router bgp 65104
+           router-id 10.255.1.4
+           no bgp default ipv4-unicast
+           maximum-paths 2
+           neighbor UNDERLAY peer group
+           neighbor UNDERLAY remote-as 65000
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN send-community extended
+           neighbor 10.0.1.6 peer group UNDERLAY
+           neighbor 10.0.2.6 peer group UNDERLAY
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 20
+              rd 10.255.1.4:10020
+              route-target both 20:10020
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              neighbor UNDERLAY activate
+              network 10.255.1.4/32
+              network 10.255.2.4/32
+           !
+           vrf TENANT
+              rd 10.255.1.4:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
+
+    # -- Hosts --
+    Host-1:
+      kind: linux
+      exec:
+        - ip addr add 10.10.10.11/24 dev eth1
+        - ip route replace default via 10.10.10.1
+
+    Host-2:
+      kind: linux
+      exec:
+        - ip addr add 10.20.20.12/24 dev eth1
+        - ip route replace default via 10.20.20.1
+
+    Host-3:
+      kind: linux
+      exec:
+        - ip addr add 10.10.10.13/24 dev eth1
+        - ip route replace default via 10.10.10.1
+
+    Host-4:
+      kind: linux
+      exec:
+        - ip addr add 10.20.20.14/24 dev eth1
+        - ip route replace default via 10.20.20.1
+
+  links:
+    - endpoints: ["Spine-1:eth1", "Leaf-1:eth1"]
+    - endpoints: ["Spine-1:eth2", "Leaf-2:eth1"]
+    - endpoints: ["Spine-1:eth3", "Leaf-3:eth1"]
+    - endpoints: ["Spine-1:eth4", "Leaf-4:eth1"]
+    - endpoints: ["Spine-2:eth1", "Leaf-1:eth2"]
+    - endpoints: ["Spine-2:eth2", "Leaf-2:eth2"]
+    - endpoints: ["Spine-2:eth3", "Leaf-3:eth2"]
+    - endpoints: ["Spine-2:eth4", "Leaf-4:eth2"]
+    - endpoints: ["Leaf-1:eth3", "Host-1:eth1"]
+    - endpoints: ["Leaf-2:eth3", "Host-2:eth1"]
+    - endpoints: ["Leaf-3:eth3", "Host-3:eth1"]
+    - endpoints: ["Leaf-4:eth3", "Host-4:eth1"]

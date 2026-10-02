@@ -273,6 +273,45 @@ needs hand edits before it deploys.
   NetBox and Nautobot REST (stdlib only) and Ansible YAML/INI inventories.
   Accept a NetBox/Nautobot query or an Ansible inventory as the device list.
 
+## Phase 4 — routing protocols
+
+### 4.1 Logical routing view (intended) — M
+
+The diagram shows cabling only; the OSPF areas, BGP sessions and EVPN
+overlay a lab is built to run are only visible by reading every
+startup-config. Add a **Routing** tab that parses the configs (no
+deployed lab needed) and draws one view per protocol on the diagram's
+node positions:
+
+- **OSPF**: adjacencies on the links that carry them, coloured by area,
+  with costs; ABRs marked; router-ids configured or derived.
+- **BGP**: routers grouped by AS, sessions as eBGP / iBGP edges with
+  their address families; peers outside the lab as external nodes.
+- **EVPN**: BGP EVPN sessions (control plane), VTEPs with their source
+  address, and VXLAN tunnels between VTEPs sharing a VNI (data plane),
+  filterable by VNI. L2 VNIs (VLAN) and L3 VNIs (VRF) with RD/RT.
+- Problems found on the way: one-sided BGP sessions, `remote-as`
+  mismatches, loopback peering without `update-source`, OSPF area
+  mismatches on a link, VNIs configured on a single VTEP.
+
+IOS-style configs first (Cisco IOS/IOS-XE/NX-OS, Arista EOS). Also
+`clabfleet routing <topology> [--protocol] [--json]`.
+
+New `clabfleet/routing/` package, `clabfleet/gui/static/routing.js`.
+
+### 4.2 Live protocol state — M
+
+Overlay the running state on the intended view: OSPF neighbour state,
+BGP session state, uptime and prefix counts, EVPN routes per VNI, and
+sessions that are up but not intended. cEOS first (`| json` output), then
+IOL (text parsing) over the `exec` machinery, cached and refreshed in the
+background like the live link state.
+
+### 4.3 More dialects and checks — L
+
+IS-IS; SR Linux and Junos config parsers; an OSPF view from the LSDB
+including DR pseudo-nodes; routing problems reported by `validate`.
+
 ## Not planned
 
 - Replacing containerlab's own VXLAN handling with a custom overlay.

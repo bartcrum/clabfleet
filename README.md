@@ -36,6 +36,9 @@ deploys with plain `containerlab deploy`.
   you can pipe into Wireshark, from the CLI or by clicking a link in the GUI
 - **Validate** — check topology files (and placement labels against a
   cluster) without touching any host, e.g. in CI
+- **Routing view** — the OSPF areas and adjacencies, BGP sessions and EVPN
+  overlay (VTEPs, VNIs, VXLAN tunnels) a lab is built to run, read from its
+  startup configs, with inconsistencies between nodes flagged
 - **Web GUI** — browse topologies, see live node state on a diagram,
   deploy/destroy with live output, and open CLI/shell/SSH terminals to nodes
   in the browser
@@ -233,6 +236,44 @@ clabfleet validate topologies/large_campus.clab.yml --cluster topologies/cluster
 
 Add `--strict` to fail on warnings as well.
 
+### Show the routing design
+
+```bash
+clabfleet routing topologies/evpn_fabric.clab.yml
+clabfleet routing topologies/large_campus.clab.yml --protocol ospf
+clabfleet routing topologies/spine_leaf.clab.yml --json
+```
+
+`routing` reads the nodes' startup configs (inline or files next to the
+topology) and prints the intended protocol design, without contacting a
+host:
+
+- **OSPF:** router-ids (configured, or derived the way IOS and EOS do),
+  areas, ABRs, and an adjacency for every pair of OSPF interfaces in one
+  subnet, with costs. Areas come from `network` statements (wildcard or
+  prefix, the most specific wins) or from `ip ospf area` on the interface.
+- **BGP:** each neighbour statement matched to the node that owns the
+  address and paired with the other side's statement, so a session shows
+  as eBGP or iBGP, with its address families (IPv4, EVPN), peer groups,
+  and whether it runs over a cable or between loopbacks. Peers outside
+  the lab are listed as external.
+- **EVPN:** VTEPs and their source address, L2 VNIs (VLAN) and L3 VNIs
+  (VRF) with their RD and route targets, the BGP sessions that carry the
+  EVPN address family, and a VXLAN tunnel between every two VTEPs that
+  share a VNI.
+- **Problems:** a session configured on one side only, a `remote-as` that
+  is not the peer's AS, loopback peering without `update-source` or
+  `ebgp-multihop`, address families that differ between the two sides,
+  OSPF area or network type mismatches, a cable whose ends are not in one
+  subnet or run OSPF on one end only, duplicate addresses (anycast
+  gateways excepted), VTEPs without an EVPN session, VNIs on a single VTEP
+  and route targets that do not match.
+
+Configs in IOS style are read: Cisco IOS, IOS-XE and NX-OS, and Arista
+EOS. Other formats (Junos, SR Linux) are listed as not read. This is what
+the configs say, not what the routers do: live protocol state is on the
+[roadmap](ROADMAP.md).
+
 ### Generate a lab from a template
 
 ```bash
@@ -350,6 +391,17 @@ printed in the terminal). Stop it with Ctrl+C.
   the state is that of the container's link to the VM, so a port shut
   inside the VM still shows as up. Links whose state cannot be read keep
   their normal colour.
+- **Routing:** the `clabfleet routing` view as a diagram, on the same
+  node positions as the Diagram tab. Pick OSPF, BGP or EVPN at the top.
+  OSPF colours adjacencies by area (and shades each area when there are
+  several); BGP shades each AS and draws IPv4 and EVPN sessions, dashed for
+  iBGP and red for sessions configured on one side only; EVPN shows the
+  EVPN sessions (control plane) and the VXLAN tunnels between VTEPs (data
+  plane), either or both, for all VNIs or one. Click a node for its
+  router-id, interfaces, sessions or VNIs, or an edge for both ends.
+  Problems found in the configs are listed under the button at the top
+  right; click one to select its node. Nodes without the protocol are
+  dimmed. **Cabling** shows the physical links faintly behind.
 - **YAML editor:** edit the topology file in the YAML tab. Problems are
   listed as you type, using the same checks as `clabfleet validate`.
   Save with the button or Ctrl+S. Text that is not a loadable topology
@@ -911,6 +963,7 @@ fetch (such as `! Last configuration change`) are not a config change.
 | `topologies/three_router_triangle.clab.yml` | 3x Cisco IOL routers in a full mesh with OSPF |
 | `topologies/spine_leaf.clab.yml` | 2-spine 4-leaf fabric with BGP (Arista cEOS) |
 | `topologies/large_campus.clab.yml` | 8-node IOL/IOL-L2 campus with placement labels for multi-host |
+| `topologies/evpn_fabric.clab.yml` | 2-spine 4-leaf EVPN/VXLAN fabric (Arista cEOS): eBGP underlay, EVPN overlay, L2 and L3 VNIs, 4 Linux hosts |
 | `topologies/cluster.yaml` | 3-host cluster inventory |
 | `topologies/live_devices_example.yaml` | Device inventory for live network export |
 
@@ -961,6 +1014,7 @@ clabfleet/
   templates.py     # Lab templates (clabfleet new)
   linkcheck.py     # Ping and UDP checks between cluster hosts
   readiness.py     # Is a node's CLI/SSH up yet (deploy --wait, GUI)
+  routing/         # OSPF/BGP/EVPN views from startup configs (clabfleet routing, GUI)
   cli.py           # CLI entrypoint
   gui/
     server.py      # aiohttp app: API, auth middleware, terminal websockets
