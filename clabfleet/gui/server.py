@@ -306,6 +306,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_put("/api/graph/{id:.+}", _save_graph)
     app.router.add_post("/api/topologies", _create_topology)
     app.router.add_get("/api/builder", _builder_info)
+    app.router.add_post("/api/builder/configs", _builder_configs)
     app.router.add_get("/api/diff/{id:.+}", _node_diff)
     app.router.add_get("/api/jobs", _jobs)
     app.router.add_post("/api/jobs", _start_job)
@@ -930,6 +931,30 @@ async def _builder_info(request):
                                           for p in t.params]}
                       for t in TEMPLATES.values()},
     })
+
+
+async def _builder_configs(request):
+    """Configs for a drawn graph (nothing is written): ``{"nodes": {name:
+    kind}, "links": [[a, a_port, b, b_port]], "routing", "link_subnet",
+    "loopback_subnet", "asn"}``."""
+    from ..templates import (DEFAULT_ASN, DEFAULT_LINK_SUBNET, DEFAULT_LOOPBACK_SUBNET,
+                             TemplateError, generate_configs)
+
+    body = await _json_body(request)
+    nodes, links = body.get("nodes"), body.get("links")
+    if not isinstance(nodes, dict) or not isinstance(links, list):
+        raise web.HTTPBadRequest(text="Expected nodes and links")
+    try:
+        configs, skipped = generate_configs(
+            {str(k): str(v) for k, v in nodes.items()},
+            [tuple(str(x) for x in link) for link in links if isinstance(link, list) and len(link) == 4],
+            str(body.get("routing", "ospf")),
+            str(body.get("link_subnet") or DEFAULT_LINK_SUBNET),
+            str(body.get("loopback_subnet") or DEFAULT_LOOPBACK_SUBNET),
+            int(body.get("asn") or DEFAULT_ASN))
+    except (TemplateError, ValueError, KeyError) as exc:
+        raise web.HTTPBadRequest(text=str(exc.args[0]) if exc.args else str(exc))
+    return web.json_response({"configs": configs, "skipped": skipped})
 
 
 async def _save_positions(request):

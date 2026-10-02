@@ -691,3 +691,5 @@ body.building #view-diagram .diagram-tools { top: 56px; }
   background: var(--bg); border: 1px solid var(--line); border-radius: 6px; white-space: pre;
 }
 #preview-summary.bad { color: var(--danger); }
+.gen-warn { color: var(--warn); }
+.gen-warn[hidden], .newlab label[hidden] { display: none; }

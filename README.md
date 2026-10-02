@@ -428,7 +428,13 @@ an operator.
   changes only what differs in the file, so existing configs, comments and
   links of other forms (host, macvlan, ...) stay; a renamed node's
   `hostname` line follows, and a new node of a kind with no image in the
-  file gets the kind's default image.
+  file gets the kind's default image. **Generate configs…** addresses the
+  drawing (a /31 per link, a /32 loopback per node, from pools you can
+  change) and writes startup-configs: OSPF area 0, or eBGP with one AS per
+  router, for cEOS and IOL; Linux hosts get their addresses and a default
+  route through the router they are cabled to, which announces their
+  subnet. It says first which existing configs it replaces; nothing is
+  written until Save.
 - **Inspector:** clicking a node (on the Diagram, the Nodes table or the
   Routing tab) or a link opens its details in a panel on the right, which
   narrows the canvas instead of covering it. Drag its left edge to resize

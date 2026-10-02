@@ -16,6 +16,12 @@ Addressing is the same for every template and kind:
 Adding a template means writing one build function and a ``Template``
 entry; adding a kind means one ``KindSpec`` with an interface namer and a
 renderer.
+
+``generate_configs`` does the same for a graph drawn in the GUI builder:
+any mix of kinds, on the ports drawn. Routers (cEOS, IOL) run the routing
+protocol with each other; Linux hosts get addresses and a default route
+through the router they are cabled to, and that router announces the
+host's subnet.
 """
 
 import ipaddress
@@ -50,9 +56,10 @@ class PlanNode:
     name: str
     tier: int
     loopback: ipaddress.IPv4Address
-    asn: Optional[int] = None               # set for BGP templates
+    asn: Optional[int] = None               # set for BGP routers
     max_paths: int = 1                      # BGP ECMP paths (leaves)
     interfaces: list[Interface] = field(default_factory=list)
+    kind: str = ""                          # set by generate_configs (mixed kinds)
 
 
 @dataclass
@@ -72,7 +79,7 @@ class _Builder:
                                 f"subnet {loopback_subnet}")
         self._per_tier: dict[int, int] = {}
 
-    def node(self, name: str, tier: int, asn: Optional[int] = None) -> PlanNode:
+    def node(self, name: str, tier: int, asn: Optional[int] = None, kind: str = "") -> PlanNode:
         n = self._per_tier.get(tier, 0) + 1
         if n > MAX_NODES_PER_TIER:
             raise TemplateError(f"At most {MAX_NODES_PER_TIER} nodes per tier")
@@ -81,20 +88,22 @@ class _Builder:
         if loopback not in self._loopbacks or loopback == self._loopbacks.broadcast_address:
             raise TemplateError(f"Loopback subnet {self._loopbacks} is too small "
                                 f"for {tier + 1} tiers of nodes (use a /22 or larger)")
-        node = PlanNode(name, tier, loopback, asn)
+        node = PlanNode(name, tier, loopback, asn, kind=kind)
         self.plan.nodes[name] = node
         return node
 
-    def link(self, a: str, b: str) -> None:
+    def link(self, a: str, b: str, a_index: Optional[int] = None,
+             b_index: Optional[int] = None) -> None:
+        """Link two nodes on their next ports, or on the ports given."""
         try:
             subnet = next(self._links)
         except StopIteration:
             raise TemplateError("Link subnet is too small for this many links") from None
         low, high = subnet[0], subnet[1]
         ends = []
-        for name, mine, theirs, peer in ((a, low, high, b), (b, high, low, a)):
+        for name, mine, theirs, peer, given in ((a, low, high, b, a_index), (b, high, low, a, b_index)):
             node = self.plan.nodes[name]
-            index = len(node.interfaces) + 1
+            index = given or len(node.interfaces) + 1
             node.interfaces.append(Interface(
                 index, peer, ipaddress.IPv4Interface(f"{mine}/31"), theirs))
             ends.append(index)
@@ -216,10 +225,11 @@ def _render_ceos(node: PlanNode, plan: Plan) -> dict:
         lines += [f"router bgp {node.asn}", f" router-id {node.loopback}"]
         if node.max_paths > 1:
             lines.append(f" maximum-paths {node.max_paths}")
-        for i in node.interfaces:
+        for i in _router_ports(node, plan):
             lines += [f" neighbor {i.peer_address} remote-as {plan.nodes[i.peer].asn}",
                       f" neighbor {i.peer_address} description {i.peer}"]
         lines.append(f" network {node.loopback}/32")
+        lines += [f" network {i.address.network}" for i in _host_ports(node, plan)]
     else:
         lines += ["router ospf 1", f" router-id {node.loopback}",
                   f" network {node.loopback}/32 area 0.0.0.0"]
@@ -240,10 +250,12 @@ def _render_iol(node: PlanNode, plan: Plan) -> dict:
         lines += [f"router bgp {node.asn}", f" bgp router-id {node.loopback}"]
         if node.max_paths > 1:
             lines.append(f" maximum-paths {node.max_paths}")
-        for i in node.interfaces:
+        for i in _router_ports(node, plan):
             lines += [f" neighbor {i.peer_address} remote-as {plan.nodes[i.peer].asn}",
                       f" neighbor {i.peer_address} description {i.peer}"]
         lines.append(f" network {node.loopback} mask 255.255.255.255")
+        lines += [f" network {i.address.network.network_address} mask {i.address.netmask}"
+                  for i in _host_ports(node, plan)]
     else:
         lines += ["router ospf 1", f" router-id {node.loopback}",
                   f" network {node.loopback} 0.0.0.0 area 0"]
@@ -254,10 +266,29 @@ def _render_iol(node: PlanNode, plan: Plan) -> dict:
 
 
 def _render_linux(node: PlanNode, plan: Plan) -> dict:
-    # No routing daemon: nodes get their addresses and reach direct neighbours
+    # No routing daemon: nodes get their addresses and reach direct neighbours,
+    # and everything else through the first router they are cabled to
     cmds = [f"ip addr add {node.loopback}/32 dev lo"]
     cmds += [f"ip addr add {i.address} dev {_linux_if(i.index)[1]}" for i in node.interfaces]
+    # (templates have no hosts next to routers: only drawn graphs, with kinds set)
+    gateway = next(iter(_router_ports(node, plan)), None) if node.kind else None
+    if gateway:
+        cmds.append(f"ip route replace default via {gateway.peer_address}")
     return {"exec": cmds}
+
+
+def _is_router(node: PlanNode) -> bool:
+    return node.asn is not None or node.kind in ROUTER_KINDS
+
+
+def _router_ports(node: PlanNode, plan: Plan) -> list[Interface]:
+    """Ports facing a router (all of them in a template: there are no hosts)."""
+    return [i for i in node.interfaces if not plan.nodes[i.peer].kind or _is_router(plan.nodes[i.peer])]
+
+
+def _host_ports(node: PlanNode, plan: Plan) -> list[Interface]:
+    """Ports facing a Linux host (only in drawn graphs)."""
+    return [i for i in node.interfaces if plan.nodes[i.peer].kind and not _is_router(plan.nodes[i.peer])]
 
 
 @dataclass
@@ -284,6 +315,65 @@ KINDS: dict[str, KindSpec] = {
     ),
 }
 DEFAULT_KIND = "arista_ceos"
+ROUTER_KINDS = {"arista_ceos", "cisco_iol"}
+
+
+def port_index(kind: str, iface: str) -> Optional[int]:
+    """The data port number of a link endpoint name (inverse of the namers)."""
+    import re
+
+    if kind == "cisco_iol":
+        m = re.fullmatch(r"Ethernet(\d+)/(\d+)", iface)
+        return int(m[1]) * 4 + int(m[2]) if m else None
+    m = re.fullmatch(r"eth(\d+)", iface)
+    return int(m[1]) if m else None
+
+
+def generate_configs(
+    nodes: dict[str, str],
+    links: list[tuple[str, str, str, str]],
+    routing: str = "ospf",
+    link_subnet: str = DEFAULT_LINK_SUBNET,
+    loopback_subnet: str = DEFAULT_LOOPBACK_SUBNET,
+    asn: int = DEFAULT_ASN,
+) -> tuple[dict[str, dict], list[str]]:
+    """Configs for a drawn graph: ``nodes`` maps name to kind, ``links`` are
+    (a, a_port, b, b_port). Every router gets its own ASN from ``asn`` up
+    (eBGP) or OSPF area 0. Returns ({node: startup-config or exec}, nodes of
+    kinds it cannot configure, which are left out with their links)."""
+    if routing not in ("ospf", "bgp"):
+        raise TemplateError("Routing must be ospf or bgp")
+    if not 1 <= int(asn) <= 4294967294 - len(nodes):
+        raise TemplateError("ASN out of range")
+    skipped = sorted(n for n, k in nodes.items() if k not in KINDS)
+    b = _Builder(routing, link_subnet, loopback_subnet)
+    next_asn = int(asn)
+    for name, kind in nodes.items():  # in drawing order: R1 gets the first loopback
+        if name in skipped:
+            continue
+        router = kind in ROUTER_KINDS
+        b.node(name, 0 if router else 1, next_asn if router and routing == "bgp" else None, kind)
+        if router and routing == "bgp":
+            next_asn += 1
+    used: dict[str, set[int]] = {}
+    for a, a_port, z, z_port in links:
+        if a in skipped or z in skipped:
+            continue
+        idx = []
+        for name, port in ((a, a_port), (z, z_port)):
+            i = port_index(nodes[name], port)
+            if not i:
+                raise TemplateError(f"{name}: {port} is not a {nodes[name]} data port "
+                                    f"(like {KINDS[nodes[name]].interface(1)[0]})")
+            if i in used.setdefault(name, set()):
+                raise TemplateError(f"{name}: {port} is used by two links")
+            used[name].add(i)
+            idx.append(i)
+        b.link(a, z, idx[0], idx[1])
+    plan = b.plan
+    for node in plan.nodes.values():
+        node.interfaces.sort(key=lambda i: i.index)
+    return ({n.name: KINDS[n.kind].render(n, plan) for n in plan.nodes.values()}, skipped)
 
 
 # --- Generation ---

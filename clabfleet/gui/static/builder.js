@@ -72,7 +72,8 @@ function draftNode(name) {
 
 function startDraft() {
   B.draft = {
-    nodes: S.detail.nodes.map((n) => ({ name: n.name, kind: n.kind, image: n.image, imageSet: false, from: n.name })),
+    nodes: S.detail.nodes.map((n) => ({ name: n.name, kind: n.kind, image: n.image, imageSet: false,
+                                        from: n.name, hadConfig: !!n.config })),
     links: S.detail.links.filter((l) => l.a.node && l.b.node && l.type === "veth")
       .map((l) => ({ id: `b${++B.linkSeq}`, a: { ...l.a }, b: { ...l.b } })),
   };
@@ -292,6 +293,8 @@ function renderInspector() {
       h("div", { class: "bform" },
         field("Name", nameIn), field("Kind", kindSel), field("Image", imgIn)),
       node.from ? null : h("p", { class: "muted small" }, "New: not in the file until you save."),
+      h("p", { class: "muted small" }, node.config ? "Config: generated, written when you save."
+        : node.hadConfig ? "Config: the one in the file." : "Config: none (the kind's defaults)."),
       ports.length ? h("h4", {}, "Links") : null,
       ports.length ? h("table", { class: "rt-table" }, h("tbody", {}, ports.map(([me, other, l]) =>
         h("tr", { class: "go", onclick: () => { S.selectedNode = null; selectLink(l.id); } },
@@ -460,6 +463,48 @@ async function preview() {
   }
 }
 
+// --- generated configs -----------------------------------------------------------------
+
+function openGenerate() {
+  const kinds = B.info.kinds;
+  const replaced = B.draft.nodes.filter((n) => kinds[n.kind] && (n.hadConfig || n.config)).map((n) => n.name);
+  const skipped = B.draft.nodes.filter((n) => !kinds[n.kind]).map((n) => `${n.name} (${n.kind})`);
+  const warn = $("#gen-warn");
+  warn.textContent = [
+    replaced.length ? `Replaces the configs of ${replaced.join(", ")}.` : "",
+    skipped.length ? `Leaves out ${skipped.join(", ")}: no config generator for that kind.` : "",
+  ].filter(Boolean).join(" ");
+  warn.hidden = !warn.textContent;
+  $("#gen-error").hidden = true;
+  $("#gen-asn-row").hidden = $("#gen-routing").value !== "bgp";
+  $("#gen-dlg").showModal();
+}
+
+async function generate(ev) {
+  ev.preventDefault();
+  if (ev.submitter?.value === "cancel") { $("#gen-dlg").close(); return; }
+  try {
+    const { configs, skipped } = await api("/api/builder/configs", {
+      method: "POST",
+      body: JSON.stringify({
+        nodes: Object.fromEntries(B.draft.nodes.map((n) => [n.name, n.kind])),
+        links: B.draft.links.map((l) => [l.a.node, l.a.iface, l.b.node, l.b.iface]),
+        routing: $("#gen-routing").value, link_subnet: $("#gen-links").value.trim(),
+        loopback_subnet: $("#gen-loops").value.trim(), asn: Number($("#gen-asn").value),
+      }),
+    });
+    for (const n of B.draft.nodes) if (configs[n.name]) n.config = configs[n.name];
+    $("#gen-dlg").close();
+    changed();
+    const n = Object.keys(configs).length;
+    toast(`Configs generated for ${n} node${n === 1 ? "" : "s"}${skipped.length ? ` (not ${skipped.join(", ")})` : ""}. ` +
+      "Preview them, then Save.");
+  } catch (e) {
+    $("#gen-error").textContent = e.message;
+    $("#gen-error").hidden = false;
+  }
+}
+
 // --- new lab ------------------------------------------------------------------------
 
 async function openNewLab() {
@@ -518,6 +563,9 @@ function builderSetup() {
   $("#edit-topo").addEventListener("click", startEditing);
   $("#builder-save").addEventListener("click", save);
   $("#builder-preview").addEventListener("click", preview);
+  $("#builder-generate").addEventListener("click", openGenerate);
+  $("#gen-form").addEventListener("submit", generate);
+  $("#gen-routing").addEventListener("change", () => { $("#gen-asn-row").hidden = $("#gen-routing").value !== "bgp"; });
   $("#builder-discard").addEventListener("click", async () => { if (await confirmLeave()) stopEditing(); });
   $("#new-lab").addEventListener("click", openNewLab);
   $("#newlab-form").addEventListener("submit", createLab);

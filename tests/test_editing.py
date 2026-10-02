@@ -332,6 +332,22 @@ def test_builder_endpoints(tmp_path, monkeypatch):
                                    "template": "nope"}, 400)]:
                 assert (await client.post("/api/topologies", json=body)).status == status, body
             assert not (tmp_path / "ok.clab.yml").exists()
+            # The template's nodes come with configs (the builder warns before replacing them)
+            assert all(n["config"] for n in fabric["nodes"]) and not mine["nodes"][0]["config"]
+
+            # Configs for a drawing: computed, not written
+            resp = await client.post("/api/builder/configs", json={
+                "nodes": {"A": "arista_ceos", "B": "arista_ceos", "H": "linux"},
+                "links": [["A", "eth1", "B", "eth1"], ["B", "eth2", "H", "eth1"]],
+                "routing": "bgp", "asn": 65010})
+            body = await resp.json()
+            assert resp.status == 200 and body["skipped"] == []
+            assert "router bgp 65010" in body["configs"]["A"]["startup-config"]
+            assert body["configs"]["H"]["exec"][-1].startswith("ip route replace default via")
+            for bad in ({"nodes": [], "links": []},
+                        {"nodes": {"A": "arista_ceos"}, "links": [["A", "Gi1", "A", "eth2"]]},
+                        {"nodes": {}, "links": [], "link_subnet": "nope"}):
+                assert (await client.post("/api/builder/configs", json=bad)).status == 400, bad
 
     asyncio.run(scenario())
 

@@ -86,6 +86,7 @@
               <div id="builder-bar" class="builder-bar" hidden>
                 <span id="builder-status" class="small"></span>
                 <span class="grow"></span>
+                <button id="builder-generate" class="btn small" title="Address the links and write routing configs for the drawn lab">Generate configs…</button>
                 <button id="builder-preview" class="btn small" title="Show the YAML the drawing would write">Preview YAML</button>
                 <button id="builder-discard" class="btn small">Discard</button>
                 <button id="builder-save" class="btn small primary">Save</button>
@@ -263,6 +264,31 @@
       <div class="confirm-actions">
         <button class="btn" value="cancel" formnovalidate>Cancel</button>
         <button id="newlab-ok" class="btn primary" value="ok">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Builder: configs for the drawn lab -->
+  <dialog id="gen-dlg" class="confirm" aria-labelledby="gen-title">
+    <form id="gen-form" method="dialog" class="newlab">
+      <h2 id="gen-title">Generate configs</h2>
+      <p class="muted small">Gives every link a /31 and every node a /32 loopback, then writes
+        startup-configs for the routers (cEOS, IOL) and addresses with a default route for Linux
+        hosts. Nothing is written to the file until you Save.</p>
+      <label>Routing <select id="gen-routing">
+        <option value="ospf">OSPF, area 0</option>
+        <option value="bgp">eBGP, one AS per router</option>
+      </select></label>
+      <div class="newlab-params">
+        <label>Link subnet <input id="gen-links" class="mono" value="10.0.0.0/16" required></label>
+        <label>Loopback subnet <input id="gen-loops" class="mono" value="10.255.0.0/16" required></label>
+        <label id="gen-asn-row" hidden>First ASN <input id="gen-asn" type="number" value="65000" min="1"></label>
+      </div>
+      <p id="gen-warn" class="small gen-warn" hidden></p>
+      <p id="gen-error" class="login-error small" role="alert" hidden></p>
+      <div class="confirm-actions">
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button id="gen-ok" class="btn primary" value="ok">Generate</button>
       </div>
     </form>
   </dialog>

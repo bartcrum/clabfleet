@@ -112,6 +112,7 @@ def topology_view(topo: Topology) -> dict:
             "host_tags": labels.get(LABEL_HOST_TAGS, ""),
             "pos": pos,
             "modes": access_modes(eff["kind"]),
+            "config": bool(eff.get("startup-config") or eff.get("exec")),
         })
 
     links = []
