@@ -113,12 +113,16 @@ def test_local_terminal_pauses_reading_when_the_browser_lags(tty):
             assert session._queue.qsize() == QUEUE_CHUNKS
             # Taking output resumes reading, and the queue never grows past the bound
             out = session.output()
+            seen = b""
             for _ in range(QUEUE_CHUNKS * 4):
                 chunk = await asyncio.wait_for(out.__anext__(), 5)
-                assert chunk.startswith(b"0123") or b"0123" in chunk
+                # Reads split the stream anywhere (a chunk may be just "\r\n")
+                assert chunk and not chunk.translate(None, b"0123456789\r\n")
                 assert session._queue.qsize() <= QUEUE_CHUNKS
+                seen += chunk
+            assert b"0123456789" * 50 in seen
             if not tty:  # no pty: newlines are made terminal-safe here
-                assert b"\r\n" in chunk
+                assert b"\r\n" in seen and b"\n" not in seen.replace(b"\r\n", b"")
         finally:
             session.close()
             await session.wait_closed()
