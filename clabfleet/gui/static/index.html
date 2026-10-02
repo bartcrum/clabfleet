@@ -84,8 +84,10 @@
           <section id="view-routing" class="view" hidden>
             <svg id="routing" class="diagram routing" aria-label="Routing protocol diagram"></svg>
             <div class="routing-bar">
+              <div id="routing-modes" class="seg" role="group" aria-label="Intended or live"></div>
               <div id="routing-protos" class="seg" role="group" aria-label="Protocol"></div>
               <div id="routing-filters" class="routing-filters"></div>
+              <span id="routing-live-status" class="routing-live-status small" hidden></span>
             </div>
             <div class="diagram-tools">
               <button id="routing-problems-btn" class="btn ghost small" hidden></button>

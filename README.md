@@ -270,9 +270,32 @@ host:
   and route targets that do not match.
 
 Configs in IOS style are read: Cisco IOS, IOS-XE and NX-OS, and Arista
-EOS. Other formats (Junos, SR Linux) are listed as not read. This is what
-the configs say, not what the routers do: live protocol state is on the
-[roadmap](ROADMAP.md).
+EOS. Other formats (Junos, SR Linux) are listed as not read.
+
+Add `--live` (and `--cluster` for a multi-host lab) to also ask the
+running nodes, with read-only `show` commands, and compare:
+
+```bash
+clabfleet routing topologies/spine_leaf.clab.yml --live
+```
+
+Every adjacency, session and VXLAN tunnel gets a state: **up**, **down**
+(with the reason: the BGP state such as `Active`, the OSPF state such as
+`EXSTART`, a neighbour missing from the running config, a remote VTEP not
+learned), **partial** (some address families down) or **unknown** (node
+not running or not readable). Up BGP sessions show their uptime and
+prefixes received. Neighbours that run but are not in the startup configs
+are listed, and so are sessions configured on one side in the startup
+configs but on both sides on the routers: both mean the running config
+has drifted, for example after changes on the CLI.
+
+| Kind | How | Commands |
+|------|-----|----------|
+| Arista cEOS | one `docker exec`, JSON output | `show ip ospf neighbor vrf all`, `show ip bgp summary vrf all`, `show bgp evpn summary`, `show vxlan vtep` |
+| Cisco IOL, CSR1000v, Catalyst 8000v | SSH to the management address (as `exec`; password from `CLAB_NODE_PASSWORD`, default `admin`) | `show ip ospf neighbor`, `show ip bgp summary`, `show bgp l2vpn evpn summary`, `show nve peers` |
+
+A node is only asked about the protocols its startup config uses. Other
+kinds show their sessions as unknown.
 
 ### Generate a lab from a template
 
@@ -402,6 +425,13 @@ printed in the terminal). Stop it with Ctrl+C.
   Problems found in the configs are listed under the button at the top
   right; click one to select its node. Nodes without the protocol are
   dimmed. **Cabling** shows the physical links faintly behind.
+  Switch to **Live** on a deployed lab to colour every adjacency, session
+  and tunnel by its running state (as `clabfleet routing --live`): green
+  up, red down, amber partly up, grey not known, and blue dotted for
+  neighbours running but not in the startup config. Cards show uptime and
+  prefix counts, and sessions that are down join the problem list. The
+  GUI asks the nodes in the background about every 10 seconds, only for
+  labs someone has open on this tab.
 - **YAML editor:** edit the topology file in the YAML tab. Problems are
   listed as you type, using the same checks as `clabfleet validate`.
   Save with the button or Ctrl+S. Text that is not a loadable topology

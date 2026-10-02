@@ -363,7 +363,7 @@ def _session(lab: _Lab, nodes: dict, p: _Peering, q: Optional[_Peering]) -> dict
         b = {"node": p.remote.node, "iface": p.remote.iface.name, "ip": p.ip,
              "asn": nodes.get(p.remote.node, {}).get("asn", "")}
         external = False
-    a_owner = lab.owner(q.ip) if q else None
+    a_owner = lab.owner(q.ip) if q else (lab.owner(p.source) if p.source else None)
     a_iface = a_owner.iface if a_owner and a_owner.node == p.node else None
     a = {"node": p.node, "iface": a_iface.name if a_iface else "",
          "ip": q.ip if q else (p.source or ""), "asn": asn_a}
@@ -526,4 +526,9 @@ def routing_view(topo: Topology) -> dict:
         "evpn": evpn,
         "unparsed": lab.unparsed,
         "problems": lab.problems,
+        # Which node owns each address (anycast gateways left out): resolves
+        # live peers that the startup configs do not mention
+        "addresses": {ip: {"node": owners[0].node, "iface": owners[0].iface.name}
+                      for ip, owners in sorted(lab.owners.items())
+                      if not any(o.iface.anycast for o in owners)},
     }

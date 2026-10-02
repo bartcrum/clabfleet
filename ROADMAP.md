@@ -277,6 +277,8 @@ needs hand edits before it deploys.
 
 ### 4.1 Logical routing view (intended) — M
 
+**Done.** IOS-style configs (IOS, IOS-XE, NX-OS, EOS).
+
 The diagram shows cabling only; the OSPF areas, BGP sessions and EVPN
 overlay a lab is built to run are only visible by reading every
 startup-config. Add a **Routing** tab that parses the configs (no
@@ -301,11 +303,16 @@ New `clabfleet/routing/` package, `clabfleet/gui/static/routing.js`.
 
 ### 4.2 Live protocol state — M
 
+**Done.** `routing --live` and the Routing tab's Live mode. cEOS through
+`docker exec` with `| json` output; IOL, CSR and Cat8kv over SSH with
+text parsing. EVPN state is the EVPN session state and the remote VTEPs
+each VTEP has learned; EVPN routes per VNI are left for later.
+
 Overlay the running state on the intended view: OSPF neighbour state,
-BGP session state, uptime and prefix counts, EVPN routes per VNI, and
-sessions that are up but not intended. cEOS first (`| json` output), then
-IOL (text parsing) over the `exec` machinery, cached and refreshed in the
-background like the live link state.
+BGP session state, uptime and prefix counts, and sessions that are up but
+not intended. cEOS first (`| json` output), then IOL (text parsing) over
+the `exec` machinery, cached and refreshed in the background like the
+live link state.
 
 ### 4.3 More dialects and checks — L
 

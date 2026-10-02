@@ -198,33 +198,8 @@ class LabExecutor:
         result.exit_code, result.output = code, output
 
     def _ssh_exec(self, runner: Runner, kind: str, ipv4: str, command: str) -> tuple[int, str]:
-        import paramiko
-
-        if not ipv4:
-            raise ValueError("node has no management IPv4 address")
-        sock = None
-        if isinstance(runner, SSHRunner):
-            transport = runner.client().get_transport()
-            sock = transport.open_channel("direct-tcpip", (ipv4, 22), ("127.0.0.1", 0),
-                                          timeout=self.timeout)
-        client = paramiko.SSHClient()
-        # Lab nodes get fresh host keys on every deploy; the terminal in the
-        # GUI skips host key checks for the same reason
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            client.connect(
-                ipv4, username=self.ssh_user or KIND_SSH_USER.get(kind, "admin"),
-                password=self.ssh_password, sock=sock, timeout=self.timeout,
-                banner_timeout=self.timeout, auth_timeout=self.timeout,
-                look_for_keys=False, allow_agent=False,
-            )
-            _, stdout, stderr = client.exec_command(command, timeout=self.timeout)
-            output = stdout.read().decode(errors="replace") + stderr.read().decode(errors="replace")
-            code = stdout.channel.recv_exit_status()
-        finally:
-            client.close()
-        # Network OSes often close the channel without an exit status (-1)
-        return (0 if code == -1 else code), output
+        return ssh_exec(runner, kind, ipv4, command, user=self.ssh_user,
+                        password=self.ssh_password, timeout=self.timeout)
 
     def _host(self, name: str) -> HostInfo:
         return next(h for h in self.cluster.hosts if h.name == name)
@@ -238,3 +213,41 @@ class LabExecutor:
         for runner in self._runners.values():
             runner.close()
         self._runners.clear()
+
+
+def ssh_exec(runner: Runner, kind: str, ipv4: str, command: str, *,
+             user: Optional[str] = None, password: Optional[str] = None,
+             timeout: float = 60) -> tuple[int, str]:
+    """Run ``command`` over SSH on a node's management address: (exit code, output).
+
+    On a remote lab host the connection is tunnelled through the host's SSH
+    session, since management addresses are only reachable from the host.
+    """
+    import paramiko
+
+    if not ipv4:
+        raise ValueError("node has no management IPv4 address")
+    password = password or os.environ.get("CLAB_NODE_PASSWORD") or DEFAULT_SSH_PASSWORD
+    sock = None
+    if isinstance(runner, SSHRunner):
+        transport = runner.client().get_transport()
+        sock = transport.open_channel("direct-tcpip", (ipv4, 22), ("127.0.0.1", 0),
+                                      timeout=timeout)
+    client = paramiko.SSHClient()
+    # Lab nodes get fresh host keys on every deploy; the terminal in the
+    # GUI skips host key checks for the same reason
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            ipv4, username=user or KIND_SSH_USER.get(kind, "admin"),
+            password=password, sock=sock, timeout=timeout,
+            banner_timeout=timeout, auth_timeout=timeout,
+            look_for_keys=False, allow_agent=False,
+        )
+        _, stdout, stderr = client.exec_command(command, timeout=timeout)
+        output = stdout.read().decode(errors="replace") + stderr.read().decode(errors="replace")
+        code = stdout.channel.recv_exit_status()
+    finally:
+        client.close()
+    # Network OSes often close the channel without an exit status (-1)
+    return (0 if code == -1 else code), output

@@ -17,7 +17,7 @@ Usage:
                       [-c COUNT] [--duration SECONDS] [--snaplen BYTES] [--via auto|node|helper]
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
-    clabfleet routing <topology.clab.yml> [--protocol ospf|bgp|evpn] [--json]
+    clabfleet routing <topology.clab.yml> [--protocol ospf|bgp|evpn] [--live [--cluster <cluster.yaml>]] [--json]
     clabfleet export-live [<inventory>] [-o output.clab.yml] [--netbox URL | --nautobot URL
                           | --ansible FILE] [--filter KEY=VALUE] [--allowed-network CIDR]
                           [--sanitise [--allow-residual] | --no-sanitise]
@@ -78,6 +78,7 @@ from .exporter import (
 from .inventory import load_inventory, printable
 from .resync import apply_diff, diff_topology, was_sanitised
 from .routing import routing_view
+from .routing.live import collect_lab
 from .routing.report import PROTOCOLS, format_report
 from .sanitise import SanitiseOptions
 from .templates import (
@@ -308,6 +309,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_routing.add_argument("topology", help="Topology file")
     p_routing.add_argument("--protocol", action="append", choices=PROTOCOLS,
                            help="Only this protocol (repeatable)")
+    p_routing.add_argument("--live", action="store_true",
+                           help="Also ask the running nodes for their protocol state "
+                                "(read-only show commands) and compare")
+    add_cluster_arg(p_routing)
     p_routing.add_argument("--json", action="store_true", help="Print the full view as JSON")
 
     # --- export-live ---
@@ -523,8 +528,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     if cmd == "validate":
         return _validate(args)
 
-    if cmd == "routing":
-        return _routing(args)
+    if cmd == "routing" and not args.live:
+        return _routing(args, None)
 
     if cmd == "new":
         return _new(args)
@@ -551,6 +556,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "exec":
         return _exec(args, cluster)
+
+    if cmd == "routing":
+        return _routing(args, cluster)
 
     if cmd == "snapshot":
         return _snapshot(args, cluster)
@@ -880,12 +888,14 @@ def _validate(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def _routing(args: argparse.Namespace) -> int:
-    view = routing_view(load_topology(args.topology))
+def _routing(args: argparse.Namespace, cluster: ClusterConfig | None) -> int:
+    topo = load_topology(args.topology)
+    view = routing_view(topo)
+    live = collect_lab(cluster, topo, view) if cluster is not None else None
     if args.json:
-        print(json.dumps(view, indent=2))
+        print(json.dumps({**view, "live": live} if live else view, indent=2))
     else:
-        print(format_report(view, args.protocol or PROTOCOLS), end="")
+        print(format_report(view, args.protocol or PROTOCOLS, live), end="")
     return 0
 
 
