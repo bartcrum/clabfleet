@@ -7,26 +7,49 @@ Usage:
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
+    clabfleet snapshot <topology.clab.yml> [--nodes GLOB] [--dir DIR] [--no-save] [--name NAME]
+    clabfleet snapshot <topology.clab.yml> --list [--dir DIR]
+    clabfleet diff <topology.clab.yml> [--nodes GLOB] [--from SNAPSHOT]
+                   [--against previous|startup|latest|SNAPSHOT] [--json]
     clabfleet inspect [<topology.clab.yml>] [--cluster <cluster.yaml>]
     clabfleet exec <topology.clab.yml> <command> [--nodes GLOB] [--mode auto|cli|shell|ssh] [--json]
+    clabfleet capture <topology.clab.yml> <node>:<iface> [-w FILE.pcap|-] [-f FILTER]
+                      [-c COUNT] [--duration SECONDS] [--snaplen BYTES] [--via auto|node|helper]
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
-    clabfleet export-live <devices.yaml> [-o output.clab.yml]
+    clabfleet export-live [<inventory>] [-o output.clab.yml] [--netbox URL | --nautobot URL
+                          | --ansible FILE] [--filter KEY=VALUE] [--sanitise]
+                          [--include-neighbours] [--apply [--prune] | --overwrite] [--json]
+    clabfleet new <template> [--spines N ...] [--kind KIND] [--image IMAGE] [-o FILE] [--force]
+    clabfleet new --list
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
+                  [--bind ADDR] [--tls-cert CERT --tls-key KEY] [--users FILE]
+    clabfleet user add|list|remove|rotate [NAME] [--role operator|viewer] [--users FILE]
 
 Without --cluster, commands target a single host: this machine by default,
 or a remote server over SSH with --host.
 """
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
+import signal
+import socket
 import sys
 from pathlib import Path
 
 import yaml
 
+from .capture import (
+    DEFAULT_HELPER_IMAGE,
+    Capture,
+    CaptureSpec,
+    check_interface,
+    find_container,
+    parse_target,
+)
 from .cluster import (
     ClusterConfig,
     HostInfo,
@@ -39,8 +62,30 @@ from .deployer import LabDeployer
 from .execute import LabExecutor
 from .linkcheck import all_pairs, check_links, describe, failures
 from .nodes import inspect_all, running_usage
-from .exporter import export_from_live_network
-from .topology import dump_yaml
+from .exporter import (
+    ExportOptions,
+    build_topology,
+    collect_devices,
+    load_report,
+    pinned_from_report,
+    report_path,
+    write_result,
+)
+from .inventory import load_inventory
+from .resync import apply_diff, diff_topology
+from .sanitise import SanitiseOptions
+from .templates import (
+    DEFAULT_KIND,
+    DEFAULT_LINK_SUBNET,
+    DEFAULT_LOOPBACK_SUBNET,
+    KINDS,
+    TEMPLATES,
+    describe_templates,
+    generate,
+    render,
+)
+from .snapshots import SnapshotError, Snapshotter, diff_lab, list_snapshots
+from .topology import dump_yaml, load_topology
 from .validate import validate_topology
 
 
@@ -111,6 +156,50 @@ def _build_parser() -> argparse.ArgumentParser:
     p_save.add_argument("topology", help="Path to the topology file")
     add_cluster_arg(p_save)
 
+    def add_nodes_arg(p):
+        p.add_argument("--nodes", action="append", metavar="GLOB",
+                       help="Only nodes matching this glob (repeatable or "
+                            "comma-separated, e.g. 'leaf*,spine1')")
+
+    def add_snapshot_dir_arg(p):
+        p.add_argument("--dir", dest="snapshot_dir", metavar="DIR",
+                       help="Snapshot folder; each lab gets DIR/<lab>/ "
+                            "(default: snapshots/ next to the topology)")
+
+    # --- snapshot ---
+    p_snap = sub.add_parser(
+        "snapshot", help="Save the lab's configs and copy them to a local snapshot",
+        description="Run save, then copy each node's saved config to "
+                    "<dir>/<lab>/<UTC time>/<node>.cfg (dir defaults to "
+                    "snapshots/ next to the topology).")
+    p_snap.add_argument("topology", help="Topology file the lab was deployed from")
+    add_cluster_arg(p_snap)
+    add_nodes_arg(p_snap)
+    add_snapshot_dir_arg(p_snap)
+    p_snap.add_argument("--no-save", action="store_true",
+                        help="Copy the configs saved last time without saving again")
+    p_snap.add_argument("--name", help="Snapshot name (default: the UTC time)")
+    p_snap.add_argument("--list", action="store_true",
+                        help="List the lab's snapshots instead of taking one")
+    p_snap.add_argument("--json", action="store_true", help="Print the result as JSON")
+
+    # --- diff ---
+    p_diff = sub.add_parser(
+        "diff", help="Diff a config snapshot against another or the startup-config",
+        description="Unified diff of a snapshot's configs. Exit code: 0 no "
+                    "differences, 1 differences, 2 error.")
+    p_diff.add_argument("topology", help="Topology file of the lab")
+    add_nodes_arg(p_diff)
+    add_snapshot_dir_arg(p_diff)
+    p_diff.add_argument("--from", dest="from_snapshot", default="latest", metavar="SNAPSHOT",
+                        help="Snapshot to look at (default: latest)")
+    p_diff.add_argument("--against", default="previous",
+                        metavar="previous|startup|latest|SNAPSHOT",
+                        help="What to compare it with: the snapshot before it "
+                             "(default), the topology's startup-config, the latest "
+                             "snapshot or a named one")
+    p_diff.add_argument("--json", action="store_true", help="Print results as JSON")
+
     # --- inspect ---
     p_inspect = sub.add_parser("inspect", help="Show running lab containers")
     p_inspect.add_argument("topology", nargs="?",
@@ -142,6 +231,32 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="SSH connect/command timeout in seconds (default: 60)")
     p_exec.add_argument("--json", action="store_true", help="Print results as JSON")
 
+    # --- capture ---
+    p_cap = sub.add_parser(
+        "capture", help="Capture packets on a lab node interface",
+        description="Run tcpdump on a node interface and print a live decode, or write a "
+                    "pcap with -w. Stream into Wireshark with: "
+                    "clabfleet capture lab.clab.yml r1:eth1 -w - | wireshark -k -i -")
+    p_cap.add_argument("topology", help="Topology file the lab was deployed from")
+    p_cap.add_argument("target", metavar="node:iface", help="Node and interface, e.g. spine1:eth1")
+    add_cluster_arg(p_cap)
+    p_cap.add_argument("-w", "--write", metavar="FILE",
+                       help="Write a pcap to FILE ('-' for stdout) instead of a text decode")
+    p_cap.add_argument("-f", "--filter", default="", metavar="FILTER",
+                       help="BPF capture filter, e.g. 'tcp port 179' (quote it)")
+    p_cap.add_argument("-c", "--count", type=int, help="Stop after this many packets")
+    p_cap.add_argument("--duration", type=float, metavar="SECONDS",
+                       help="Stop after this many seconds")
+    p_cap.add_argument("--snaplen", type=int, metavar="BYTES",
+                       help="Bytes to keep per packet (default: tcpdump's, 262144)")
+    p_cap.add_argument("--via", default="auto", choices=["auto", "node", "helper"],
+                       help="auto (default): the node's own tcpdump if it has one, else a "
+                            "helper container in the node's network namespace")
+    p_cap.add_argument("--helper-image", default=os.environ.get("CLAB_CAPTURE_IMAGE"),
+                       metavar="IMAGE",
+                       help=f"Image with tcpdump for --via helper (default: "
+                            f"{DEFAULT_HELPER_IMAGE}, or CLAB_CAPTURE_IMAGE)")
+
     # --- status ---
     p_status = sub.add_parser("status", help="Show containerlab version and resources per host")
     add_cluster_arg(p_status)
@@ -159,13 +274,88 @@ def _build_parser() -> argparse.ArgumentParser:
                             help="Fail on warnings as well as errors")
 
     # --- export-live ---
-    p_live = sub.add_parser("export-live",
-                            help="Build a topology from live network devices (NAPALM)")
-    p_live.add_argument("devices", help="YAML file with device connection info")
+    p_live = sub.add_parser(
+        "export-live", help="Build a topology from live network devices (NAPALM)",
+        description="Connect to real devices with NAPALM and build a containerlab "
+                    "topology from their configs and LLDP neighbours. If the output "
+                    "file exists, report what changed instead of overwriting it.")
+    p_live.add_argument("devices", nargs="?", metavar="inventory",
+                        help="Device inventory: clabfleet YAML (devices:, defaults:, "
+                             "source:, kinds:, images:) or an Ansible inventory (YAML/INI)")
     p_live.add_argument("-o", "--output", help="Output topology file "
-                        "(configs are written to configs/ next to it)")
+                        "(configs are written to configs/ next to it, plus an "
+                        "<name>.import-report.yaml)")
     p_live.add_argument("--lab-name", default="imported-topology",
                         help="Name for the generated lab")
+    src = p_live.add_argument_group("device sources (instead of or with the inventory file)")
+    src.add_argument("--netbox", metavar="URL",
+                     help="Take devices from NetBox (token in NETBOX_TOKEN)")
+    src.add_argument("--nautobot", metavar="URL",
+                     help="Take devices from Nautobot (token in NAUTOBOT_TOKEN)")
+    src.add_argument("--ansible", metavar="INVENTORY",
+                     help="Take devices from an Ansible inventory file (YAML or INI)")
+    src.add_argument("--filter", action="append", metavar="KEY=VALUE", default=[],
+                     help="NetBox/Nautobot query filter, e.g. site=dc1, role=leaf, tag=lab "
+                          "(repeatable); for Ansible only group=NAME")
+    src.add_argument("--token-env", metavar="VAR",
+                     help="Environment variable holding the NetBox/Nautobot token")
+    conv = p_live.add_argument_group("conversion")
+    conv.add_argument("--keep-interface-names", action="store_true",
+                      help="Use the devices' interface names as they are instead of "
+                           "mapping them to each kind's naming")
+    conv.add_argument("--include-neighbours", action="store_true",
+                      help="Add LLDP neighbours that are not in the inventory as "
+                           "placeholder linux nodes")
+    conv.add_argument("--neighbour-image", default="alpine:3", metavar="IMAGE",
+                      help="Image for neighbour placeholders (default: alpine:3)")
+    conv.add_argument("--sanitise", "--sanitize", action="store_true",
+                      help="Remove or replace secrets, AAA/SNMP config and management "
+                           "addresses in the saved configs")
+    conv.add_argument("--mgmt-address", choices=["remove", "dhcp", "keep"], default="remove",
+                      help="With --sanitise: what to do with management interface "
+                           "addresses (default: remove)")
+    conv.add_argument("--lab-user", default="admin",
+                      help="With --sanitise: placeholder login added to configs "
+                           "(default: admin)")
+    conv.add_argument("--lab-password", default="admin",
+                      help="With --sanitise: its password (default: admin)")
+    sync = p_live.add_argument_group("re-sync (when the output file exists)")
+    sync.add_argument("--apply", action="store_true",
+                      help="Apply the reported changes to the existing topology "
+                           "(hand edits are kept)")
+    sync.add_argument("--prune", action="store_true",
+                      help="With --apply: also delete nodes and links that are gone")
+    sync.add_argument("--overwrite", action="store_true",
+                      help="Replace the existing topology with a fresh import")
+    sync.add_argument("--json", action="store_true", help="Print the change report as JSON")
+
+    # --- new ---
+    p_new = sub.add_parser("new", help="Generate a topology from a lab template",
+                           description="Generate a ready-to-deploy topology "
+                                       "(nodes, links, startup configs) from a template.")
+    p_new.add_argument("--list", action="store_true", dest="list_templates",
+                       help="List templates, their options and the supported kinds")
+    templates = p_new.add_subparsers(dest="template", metavar="template")
+    for tmpl in TEMPLATES.values():
+        p_tmpl = templates.add_parser(tmpl.name, help=tmpl.description,
+                                      description=tmpl.description)
+        for param in tmpl.params:
+            p_tmpl.add_argument(f"--{param.name}", type=int, metavar="N",
+                                help=f"{param.help} (default: {param.default})")
+        p_tmpl.add_argument("--kind", default=DEFAULT_KIND, choices=list(KINDS),
+                            help=f"Node kind (default: {DEFAULT_KIND})")
+        p_tmpl.add_argument("--image", help="Node image (default: per kind, see --list)")
+        p_tmpl.add_argument("--name", help=f"Lab name (default: {tmpl.default_name})")
+        p_tmpl.add_argument("--link-subnet", default=DEFAULT_LINK_SUBNET,
+                            help=f"Subnet the /31 link addresses come from "
+                                 f"(default: {DEFAULT_LINK_SUBNET})")
+        p_tmpl.add_argument("--loopback-subnet", default=DEFAULT_LOOPBACK_SUBNET,
+                            help=f"Subnet for /32 loopbacks, one /24 per tier "
+                                 f"(default: {DEFAULT_LOOPBACK_SUBNET})")
+        p_tmpl.add_argument("-o", "--output", metavar="FILE",
+                            help="Write the topology here (default: print it)")
+        p_tmpl.add_argument("--force", action="store_true",
+                            help="Overwrite FILE if it exists")
 
     # --- gui ---
     p_gui = sub.add_parser("gui", help="Open the web GUI")
@@ -179,6 +369,52 @@ def _build_parser() -> argparse.ArgumentParser:
                             "opens shells on lab nodes, so keep it local)")
     p_gui.add_argument("--no-browser", action="store_true",
                        help="Don't open a browser window")
+    p_gui.add_argument("--users", metavar="FILE",
+                       help="Users file for named logins with roles (default: "
+                            "~/.clabfleet/users.yaml if it exists; without one, a "
+                            "single random token is printed at start-up)")
+    p_gui.add_argument("--audit-log", metavar="FILE",
+                       help="JSON Lines log of logins, jobs, edits and terminal "
+                            "sessions (default with users: audit.jsonl next to the "
+                            "users file)")
+    p_gui.add_argument("--tls-cert", metavar="CERT", help="Serve HTTPS with this certificate (PEM)")
+    p_gui.add_argument("--tls-key", metavar="KEY", help="Private key for --tls-cert (PEM)")
+    p_gui.add_argument("--insecure-http", action="store_true",
+                       help="Allow --bind to a non-loopback address without TLS "
+                            "(tokens and terminal traffic travel in clear text)")
+    p_gui.add_argument("--public-url", metavar="URL",
+                       help="Address browsers use to reach the GUI, if it is not the "
+                            "one it listens on (e.g. https://lab.example.com behind a "
+                            "TLS proxy)")
+
+    # --- user ---
+    p_user = sub.add_parser("user", help="Manage named GUI users and their tokens")
+    user_sub = p_user.add_subparsers(dest="user_command", required=True)
+
+    def add_users_arg(p):
+        p.add_argument("--users", metavar="FILE",
+                       help="Users file (default: ~/.clabfleet/users.yaml)")
+
+    def add_url_arg(p):
+        p.add_argument("--url", metavar="URL",
+                       help="GUI address for the printed login link "
+                            "(default: https://<this host's name>:8650)")
+
+    u_add = user_sub.add_parser("add", help="Add a user and print its login token")
+    u_add.add_argument("name")
+    u_add.add_argument("--role", default="operator", choices=["operator", "viewer"],
+                       help="operator: everything (default); viewer: read-only")
+    add_users_arg(u_add)
+    add_url_arg(u_add)
+    u_list = user_sub.add_parser("list", help="List users")
+    add_users_arg(u_list)
+    u_remove = user_sub.add_parser("remove", help="Remove a user (ends their sessions)")
+    u_remove.add_argument("name")
+    add_users_arg(u_remove)
+    u_rotate = user_sub.add_parser("rotate", help="Give a user a new token (ends their sessions)")
+    u_rotate.add_argument("name")
+    add_users_arg(u_rotate)
+    add_url_arg(u_rotate)
 
     return parser
 
@@ -227,19 +463,22 @@ def _dispatch(args: argparse.Namespace) -> int:
     cmd = args.command
 
     if cmd == "export-live":
-        with open(Path(args.devices)) as fh:
-            devices = yaml.safe_load(fh)
-        if not isinstance(devices, list):
-            devices = devices.get("devices", [])
-        topo = export_from_live_network(
-            devices, output_file=args.output, lab_name=args.lab_name,
-        )
-        if not args.output:
-            print(dump_yaml(topo))
-        return 0
+        return _export_live(args)
 
     if cmd == "validate":
         return _validate(args)
+
+    if cmd == "new":
+        return _new(args)
+
+    if cmd == "diff":
+        return _diff(args)
+
+    if cmd == "snapshot" and args.list:
+        return _list_snapshots(args)
+
+    if cmd == "user":
+        return _user(args)
 
     cluster = _cluster_from_args(args)
 
@@ -254,6 +493,12 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "exec":
         return _exec(args, cluster)
+
+    if cmd == "snapshot":
+        return _snapshot(args, cluster)
+
+    if cmd == "capture":
+        return _capture(args, cluster)
 
     deployer = LabDeployer(cluster)
     if cmd == "deploy":
@@ -297,20 +542,94 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
             f"The GUI needs extra packages ({exc.name}). "
             "Install them with: pip install 'clabfleet[gui]'"
         ) from exc
+    from .gui.auth import AUDIT_FILE_NAME, AuditLog
+
     roots = [Path(d).expanduser() for d in (args.dir or ["."])]
     for root in roots:
         if not root.is_dir():
             raise FileNotFoundError(f"Not a directory: {root}")
+
+    ssl_context = None
+    if bool(args.tls_cert) != bool(args.tls_key):
+        raise ValueError("--tls-cert and --tls-key go together")
+    if args.tls_cert:
+        import ssl
+        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        ssl_context.load_cert_chain(args.tls_cert, args.tls_key)
+    if not _is_loopback(args.bind) and not ssl_context:
+        if not args.insecure_http:
+            raise ValueError(
+                f"Refusing to listen on {args.bind} without TLS: login tokens and terminal "
+                "sessions would cross the network in clear text. Use --tls-cert/--tls-key, "
+                "or --insecure-http if the network is trusted.")
+        print(f"WARNING: listening on {args.bind} over plain HTTP (--insecure-http): "
+              "tokens and terminal traffic are not encrypted.", file=sys.stderr)
+
+    users = _user_store(args, must_exist=bool(args.users))
+    if users:
+        users.validate()
+    audit_path = args.audit_log or (users.path.parent / AUDIT_FILE_NAME if users else None)
     run(Workspace(cluster, roots), host=args.bind, port=args.port,
-        open_browser=not args.no_browser)
+        open_browser=not args.no_browser, users=users, audit=AuditLog(audit_path),
+        ssl_context=ssl_context, public_url=args.public_url)
+    return 0
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # a host name: could resolve to anything
+
+
+def _user_store(args: argparse.Namespace, must_exist: bool = True):
+    """The users file from --users or the default; None if the default does
+    not exist and ``must_exist`` is false."""
+    from .gui.auth import DEFAULT_USERS_FILE, UserStore
+
+    path = Path(args.users or DEFAULT_USERS_FILE).expanduser()
+    if not must_exist and not path.exists():
+        return None
+    return UserStore(path)
+
+
+def _user(args: argparse.Namespace) -> int:
+    store = _user_store(args)
+    cmd = args.user_command
+    if cmd == "list":
+        users = store.validate() if store.path.exists() else {}
+        if not users:
+            print(f"No users in {store.path}")
+            return 0
+        width = max(len(n) for n in users)
+        for name, user in sorted(users.items()):
+            print(f"{name:<{width}}  {user.role:<8}  created {user.created}")
+        return 0
+    if cmd == "remove":
+        store.remove(args.name)
+        print(f"Removed user '{args.name}' from {store.path}")
+        return 0
+
+    if cmd == "add":
+        token = store.add(args.name, args.role)
+        print(f"Added {args.role} '{args.name}' to {store.path}")
+    else:  # rotate
+        token = store.rotate(args.name)
+        print(f"New token for '{args.name}'; the old one and its sessions no longer work")
+    base = (args.url or f"https://{socket.gethostname()}:8650").rstrip("/")
+    print(f"\nToken (shown only once, it is not stored):\n\n    {token}\n")
+    print(f"Login link (adjust the address to where the GUI runs):\n\n"
+          f"    {base}/?token={token}\n")
     return 0
 
 
 def _exec(args: argparse.Namespace, cluster: ClusterConfig) -> int:
-    patterns = [p.strip() for arg in args.nodes or [] for p in arg.split(",") if p.strip()]
     executor = LabExecutor(cluster, ssh_user=args.node_user, ssh_password=args.node_password,
                            parallel=args.parallel, timeout=args.timeout)
-    out = executor.run(args.topology, " ".join(args.cmd), nodes=patterns or None,
+    out = executor.run(args.topology, " ".join(args.cmd), nodes=_node_patterns(args),
                        mode=args.mode)
     results = out["results"]
     failed = [r for r in results if r["error"] or r["exit_code"] != 0]
@@ -342,6 +661,145 @@ def _exec(args: argparse.Namespace, cluster: ClusterConfig) -> int:
     return 1 if failed or not results else 0
 
 
+def _new(args: argparse.Namespace) -> int:
+    if args.list_templates or not args.template:
+        print(describe_templates())
+        return 0 if args.list_templates else 2
+    params = {p.name: getattr(args, p.name) for p in TEMPLATES[args.template].params}
+    data = generate(args.template, params, kind=args.kind, image=args.image,
+                    name=args.name, link_subnet=args.link_subnet,
+                    loopback_subnet=args.loopback_subnet)
+    text = render(data, args.template, params, args.kind)
+    if not args.output:
+        print(text, end="")
+        return 0
+    out = Path(args.output)
+    if out.exists() and not args.force:
+        raise FileExistsError(f"{out} already exists (use --force to overwrite)")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    topo = data["topology"]
+    print(f"Wrote {out}: lab '{data['name']}', {len(topo['nodes'])} {args.kind} nodes, "
+          f"{len(topo['links'])} links")
+    return 0
+
+
+def _node_patterns(args: argparse.Namespace) -> list[str] | None:
+    return [p.strip() for arg in args.nodes or [] for p in arg.split(",") if p.strip()] or None
+
+
+def _snapshot(args: argparse.Namespace, cluster: ClusterConfig) -> int:
+    out = Snapshotter(cluster).take(
+        args.topology, nodes=_node_patterns(args), directory=args.snapshot_dir,
+        save=not args.no_save, name=args.name,
+    )
+    save_failed = {h: r["error"] for h, r in out["hosts"].items() if "error" in r}
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 1 if save_failed else 0
+
+    for host, err in save_failed.items():
+        print(f"warning: save failed on {host}: {err}", file=sys.stderr)
+    multi = len(cluster.hosts) > 1
+    print(f"Snapshot {out['snapshot']} of lab '{out['lab']}': {out['path']}")
+    for node, info in out["nodes"].items():
+        print(f"  {node:<20} {info['file']}" + (f"  ({info['host']})" if multi else ""))
+    for node, reason in out["skipped"].items():
+        print(f"  {node:<20} skipped: {reason}")
+    return 1 if save_failed else 0
+
+
+def _list_snapshots(args: argparse.Namespace) -> int:
+    topo = load_topology(args.topology)
+    snapshots = list_snapshots(topo, args.snapshot_dir)
+    if args.json:
+        print(json.dumps(snapshots, indent=2))
+        return 0
+    if not snapshots:
+        print(f"Lab '{topo.name}' has no snapshots.")
+        return 0
+    for snap in snapshots:
+        skipped = len(snap.get("skipped") or {})
+        print(f"{snap['name']:<24} {snap.get('taken_at', '?'):<26} "
+              f"{len(snap['nodes'])} nodes" + (f", {skipped} skipped" if skipped else ""))
+    return 0
+
+
+def _diff(args: argparse.Namespace) -> int:
+    """Exit 0 when nothing differs, 1 on differences, 2 on errors."""
+    try:
+        out = diff_lab(args.topology, nodes=_node_patterns(args), against=args.against,
+                       from_snapshot=args.from_snapshot, directory=args.snapshot_dir)
+    except Exception as exc:  # noqa: BLE001 - 2, not main()'s 1, so 1 means "differs"
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    rc = 1 if out["changed"] else 0
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return rc
+
+    for r in out["nodes"]:
+        if r["diff"]:
+            sys.stdout.write(r["diff"])
+    sys.stdout.flush()  # diffs before the summary when both go to a terminal
+    for r in out["nodes"]:
+        if r["status"] == "skipped":
+            print(f"skipped {r['node']}: {r['reason']}", file=sys.stderr)
+    compared = [r for r in out["nodes"] if r["status"] != "skipped"]
+    print(f"{out['from']} vs {out['against']}: {out['changed']} of {len(compared)} "
+          "nodes differ", file=sys.stderr)
+    return rc
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def _capture(args: argparse.Namespace, cluster: ClusterConfig) -> int:
+    node, iface = parse_target(args.target)
+    topo = load_topology(args.topology)
+    iface = check_interface(topo, node, iface)
+    spec = CaptureSpec(node, iface, format="pcap" if args.write else "text",
+                       bpf_filter=args.filter, count=args.count, duration=args.duration,
+                       snaplen=args.snaplen)
+    host, container = find_container(cluster, topo, node)
+
+    def message(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
+    to_file = args.write and args.write != "-"
+    out = open(args.write, "wb") if to_file else sys.stdout.buffer
+    # Stop tcpdump in the container on `kill` too, not only on Ctrl+C
+    signal.signal(signal.SIGTERM, _raise_interrupt)
+    runner = create_runner(host)
+    capture = Capture(runner, container["container"], spec, host_sudo=host.sudo,
+                      method=args.via, helper_image=args.helper_image, on_message=message)
+    try:
+        capture.start()
+        where = f" on {host.name}" if len(cluster.hosts) > 1 else ""
+        message(f"Capturing on {capture.describe()}{where}"
+                + (f", writing {args.write}" if to_file else "")
+                + ". Ctrl+C to stop.")
+        while True:
+            chunk = capture.read()
+            if not chunk:
+                break
+            out.write(chunk)
+            out.flush()
+    except KeyboardInterrupt:
+        capture.stop("interrupted")
+    except BrokenPipeError:  # e.g. Wireshark closed
+        capture.stop("output closed")
+        # Nothing reads stdout any more: don't fail flushing it at exit
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    finally:
+        capture.stop()
+        runner.close()
+        if to_file:
+            out.close()
+    if capture.stop_reason in ("interrupted", "output closed", "duration"):
+        return 0
+    return 0 if capture.exit_code in (0, None) else 1
+
+
 def _validate(args: argparse.Namespace) -> int:
     # Only an explicit --cluster is checked: never probe or contact hosts here
     cluster = load_cluster_config(args.cluster) if args.cluster else None
@@ -356,6 +814,89 @@ def _validate(args: argparse.Namespace) -> int:
         if report.errors or (args.strict and report.warnings):
             failed += 1
     return 1 if failed else 0
+
+
+def _export_live(args: argparse.Namespace) -> int:
+    if not (args.devices or args.netbox or args.nautobot or args.ansible):
+        raise ValueError("give an inventory file or --netbox, --nautobot or --ansible")
+    if args.prune and not args.apply:
+        raise ValueError("--prune only works with --apply")
+    filters: dict = {}
+    for item in args.filter:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"--filter wants KEY=VALUE, got {item!r}")
+        filters.setdefault(key, []).append(value)
+    filters = {k: v[0] if len(v) == 1 else v for k, v in filters.items()}
+
+    inventory = load_inventory(args.devices, netbox=args.netbox, nautobot=args.nautobot,
+                               ansible=args.ansible, filters=filters,
+                               token_env=args.token_env)
+    for msg in inventory.warnings:
+        print(f"warning: {msg}", file=sys.stderr)
+    if not inventory.devices:
+        raise ValueError("the inventory has no devices")
+
+    output = Path(args.output) if args.output else None
+    resync = output is not None and output.exists() and not args.overwrite
+    if (args.apply or args.json) and not resync:
+        raise ValueError("--apply and --json are for re-syncing an existing --output file")
+    options = ExportOptions(
+        lab_name=args.lab_name,
+        kind_rules=inventory.kind_rules,
+        image_rules=inventory.image_rules,
+        map_interfaces=not args.keep_interface_names,
+        sanitise=SanitiseOptions(mgmt=args.mgmt_address, user=args.lab_user,
+                                 password=args.lab_password) if args.sanitise else None,
+        include_neighbours=args.include_neighbours,
+        neighbour_image=args.neighbour_image,
+        inline_configs=output is None,
+        pinned_interfaces=pinned_from_report(load_report(output)) if output else {},
+    )
+    if resync:
+        options.lab_name = (yaml.safe_load(output.read_text()) or {}).get("name") \
+            or args.lab_name
+
+    collected = collect_devices(inventory.devices)
+    if not collected:
+        raise ValueError("no device could be reached")
+    result = build_topology(collected, options)
+    for msg in result.warnings:
+        print(f"warning: {msg}", file=sys.stderr)
+
+    if output is None:
+        print(dump_yaml(result.topology))
+        return 0
+    if not resync:
+        write_result(result, output)
+        topo = result.topology["topology"]
+        print(f"Wrote {output} ({len(topo['nodes'])} nodes, {len(topo['links'])} links); "
+              f"report in {report_path(output)}")
+        return 0
+
+    diff = diff_topology(output, result)
+    if args.json:
+        print(json.dumps({"topology": str(output), "applied": args.apply and not diff.empty,
+                          **diff.as_dict()}, indent=2))
+    else:
+        print(f"Changes since the last import of {output}:")
+        print(diff.as_text())
+    if diff.empty:
+        return 0
+    if not args.apply:
+        if not args.json:
+            print("\nNothing written. Re-run with --apply to update the topology "
+                  "(add --prune to delete what is gone), or --overwrite to replace it.")
+        return 0
+    actions = apply_diff(output, result, diff, prune=args.prune)
+    if not args.json:
+        print()
+        for action in actions:
+            print(f"  {action}")
+        skipped = len(diff.removed_nodes) + len(diff.removed_links)
+        if skipped and not args.prune:
+            print(f"  ({skipped} removed nodes/links kept; use --prune to delete them)")
+    return 0
 
 
 def _check_links(cluster: ClusterConfig) -> int:

@@ -17,14 +17,23 @@ deploys with plain `containerlab deploy`.
   and removes itself
 - **Placement strategies** — bin-pack, spread, or resource-based
 - **Host pinning & tag affinity** — via ordinary node `labels`
-- **Import from live network** — connects to real devices via NAPALM, pulls
-  running configs and LLDP neighbours, writes a matching containerlab topology
+- **Import from live network** — connects to real devices via NAPALM (device
+  list from YAML, NetBox, Nautobot or Ansible), pulls running configs and LLDP
+  neighbours, and writes a matching containerlab topology: interface names
+  mapped per kind, images from rules, optional config sanitising, and
+  re-syncs that report changes instead of overwriting
 - **Image pre-flight** — fail before anything is created when a node's
   image is missing on its host, or pull it with `--pull`
 - **Dry-run** — see the placement plan and the per-host topology files
   without deploying
 - **Exec** — run a command on all or some nodes of a lab at once, through
   each kind's CLI, SSH or a shell
+- **Lab templates** — generate a spine-leaf, ring or campus lab with
+  addressing and routing configs for cEOS, IOL or plain Linux nodes
+- **Config snapshots** — copy saved node configs into dated local folders
+  and diff them against each other or the topology's `startup-config`
+- **Capture** — `tcpdump` on any node interface as a live decode or a pcap
+  you can pipe into Wireshark, from the CLI or by clicking a link in the GUI
 - **Validate** — check topology files (and placement labels against a
   cluster) without touching any host, e.g. in CI
 - **Web GUI** — browse topologies, see live node state on a diagram,
@@ -107,6 +116,90 @@ joined with spaces, as `ssh` does, so quote the command or put it after
 shell modes need Docker access on the host. If Docker refuses and the
 host uses `sudo`, clabfleet retries with `sudo`.
 
+### Snapshot and diff configs
+
+```bash
+clabfleet --sudo snapshot topologies/spine_leaf.clab.yml
+clabfleet --sudo snapshot topologies/spine_leaf.clab.yml --nodes 'leaf*' --name before-bgp
+clabfleet snapshot topologies/spine_leaf.clab.yml --list
+
+clabfleet diff topologies/spine_leaf.clab.yml                     # latest vs the one before
+clabfleet diff topologies/spine_leaf.clab.yml --against startup   # latest vs the topology
+clabfleet diff topologies/spine_leaf.clab.yml --from before-bgp --against latest
+```
+
+`snapshot` runs `save` (skip it with `--no-save`), then copies each
+node's saved config from the lab directory into a local folder:
+
+```
+topologies/snapshots/spine-leaf-fabric/20261002T004701Z/
+  snapshot.json     # when, and each node's host, kind and source file
+  Spine-1.cfg
+  Leaf-1.cfg
+  ...
+```
+
+Snapshots go to `snapshots/<lab>/` next to the topology, or
+`DIR/<lab>/` with `--dir`, and are named after the UTC time unless you
+give `--name`. Configs are read with `cat` on each node's host, from the
+placement record, so nodes on remote hosts work too. If the file is not
+readable and the host uses `sudo`, clabfleet retries with `sudo`.
+
+| Kind | Saved config |
+|------|--------------|
+| cEOS | `clab-<lab>/<node>/flash/startup-config` → `<node>.cfg` |
+| SR Linux | `clab-<lab>/<node>/config/config.json` → `<node>.json` |
+| cRPD | `clab-<lab>/<node>/config/juniper.conf` → `<node>.conf` |
+
+Other kinds are listed as skipped. Cisco IOL saves into its binary NVRAM
+file, which a snapshot cannot read, and `linux` nodes have nothing to
+save.
+
+`diff` prints a unified diff per node of a snapshot (`--from`, default
+the latest) against `previous` (the snapshot before it, the default),
+`startup` (the node's `startup-config` in the topology, inline or a
+file), `latest` or a snapshot name. Lines that change on every save, such
+as cEOS's `! Startup-config last modified at` comment, are ignored. Expect
+a diff against `startup` even without changes: the saved config is the
+whole running config, including defaults and the management interface
+containerlab sets up. The exit code is 0 with no differences, 1 with
+differences and 2 on errors. Add `--json` for machine-readable output.
+
+### Capture packets
+
+```bash
+# Live decode, BGP only, 5 packets
+clabfleet capture topologies/spine_leaf.clab.yml Spine-1:eth1 -f 'tcp port 179' -c 5
+
+# pcap file, stopped after 60 seconds
+clabfleet capture topologies/spine_leaf.clab.yml Leaf-1:eth1 -w leaf1.pcap --duration 60
+
+# Straight into Wireshark
+clabfleet capture topologies/spine_leaf.clab.yml Spine-1:eth1 -w - | wireshark -k -i -
+```
+
+`capture` runs `tcpdump` in the node's network namespace on whichever host
+the node runs on. Without `-w` it prints a live text decode; with `-w FILE`
+(or `-w -` for stdout) it writes a pcap. `-f` takes a BPF filter, `-c` a
+packet count, `--duration` a time limit in seconds and `--snaplen` the bytes
+kept per packet. Without a limit it runs until Ctrl+C.
+
+The interface must be one the node uses in the topology's links, or `eth0`
+(management). Nodes with their own `tcpdump`, such as cEOS, use it through
+`docker exec`. For nodes without one, such as `alpine`, clabfleet starts a
+throwaway helper container that shares the node's network namespace
+(`docker run --net container:<node>`). The helper image is
+`nicolaka/netshoot` by default, pulled on first use; set `--helper-image`
+or `CLAB_CAPTURE_IMAGE` to use another image with `tcpdump`, and `--via
+node|helper` to force either way.
+
+Stopping the local `docker` client does not stop a process inside a
+container, so clabfleet always stops captures explicitly: it kills the
+node's `tcpdump` by PID, or removes the helper container. With
+`--duration`, the node's `tcpdump` also runs under `timeout` (when the node
+has it), so it ends even if clabfleet is killed outright. Like `exec`,
+captures need Docker access on the host, with the same `sudo` retry.
+
 ### Check a topology before deploying
 
 ```bash
@@ -126,6 +219,47 @@ clabfleet validate topologies/large_campus.clab.yml --cluster topologies/cluster
   matches and cluster hosts without a VXLAN address.
 
 Add `--strict` to fail on warnings as well.
+
+### Generate a lab from a template
+
+```bash
+clabfleet new --list
+clabfleet new spine-leaf --spines 2 --leaves 4 -o labs/fabric.clab.yml
+clabfleet new ring --nodes 5 --kind cisco_iol -o labs/ring.clab.yml
+clabfleet new campus --core 2 --dist 2 --access 6 --kind linux -o labs/campus.clab.yml
+```
+
+`new` writes a complete topology: nodes, links and a startup config for
+every node. Without `-o` it prints the YAML. It will not overwrite an
+existing file unless you add `--force`.
+
+| Template | Options (default) | Routing |
+|----------|-------------------|---------|
+| `spine-leaf` | `--spines` (2), `--leaves` (4), `--asn` (65000) | eBGP: spines share `--asn`, leaf *n* uses `--asn` + *n*, leaves use ECMP over the spines |
+| `ring` | `--nodes` (4, at least 3) | OSPF area 0 |
+| `campus` | `--core` (2), `--dist` (2), `--access` (4) | OSPF area 0. Cores are fully meshed, every distribution node links to every core, and access nodes are split over the distribution nodes in blocks with one uplink each |
+
+Every template takes the same common options:
+
+- `--kind`: `arista_ceos` (default), `cisco_iol` or `linux`. cEOS configs
+  create the `admin`/`admin` login that SSH needs. IOL links start at
+  `Ethernet0/1`, after the management port, and continue `0/2`, `0/3`,
+  `1/0` and so on. `linux` nodes (default image `alpine:3.20`, deploy with
+  `--pull`) get their addresses through `exec` commands but run no
+  routing, so each node reaches only its direct neighbours.
+- `--image` replaces the kind's default image (`--list` shows them).
+  `--name` sets the lab name, which defaults to the template name.
+- `--link-subnet` (default `10.0.0.0/16`): every link gets the next /31
+  from it, and the first node of the link, such as the spine or the core,
+  gets the lower address.
+- `--loopback-subnet` (default `10.255.0.0/16`): each node gets a /32
+  loopback, with one /24 per tier. For example spines are `10.255.0.n` and
+  leaves `10.255.1.n`.
+
+The cEOS and IOL configs use the same syntax as the example topologies,
+and the tests check every template and kind with `validate`. Only `linux`
+labs have been deployed and pinged so far; the cEOS and IOL configs have
+not been booted.
 
 ### Node images
 
@@ -181,19 +315,36 @@ printed in the terminal). Stop it with Ctrl+C.
   writes them into the topology file as `graph-posX`/`graph-posY` node
   labels, so the layout travels with the file. Only those labels change:
   comments, ordering, quoting and indentation are kept.
+- **Live link and node state:** while a deployed lab is open, links with
+  an end down are drawn red and dashed. The link's tooltip says which
+  end is down: **admin down** is the end that was shut, **no carrier** is
+  the far side of it. A thin bar in each node shows its CPU use, full at
+  one busy core. Hover a node, or click it, for CPU and memory. The GUI
+  reads each node's interface state from `/sys/class/net` with one
+  `docker exec` per node, and CPU and memory with one `docker stats` per
+  host. It does this in the background, about every 5 to 10 seconds and
+  only for labs someone has open, so many browser tabs do not add load.
+  Topologies may name interfaces the kind's way (`Ethernet1` on cEOS,
+  `Ethernet0/1` on IOL, `ethernet-1/1` on SR Linux). For VM-based kinds
+  the state is that of the container's link to the VM, so a port shut
+  inside the VM still shows as up. Links whose state cannot be read keep
+  their normal colour.
 - **YAML editor:** edit the topology file in the YAML tab. Problems are
   listed as you type, using the same checks as `clabfleet validate`.
   Save with the button or Ctrl+S. Text that is not a loadable topology
   cannot be saved, but other errors, such as a startup config file that
   does not exist yet, do not block saving. Saving is refused while a job
   runs for the lab, or if the file changed on disk since you opened it.
-- **Deploy / Redeploy / Save configs / Destroy** with containerlab's output
+- **Deploy / Redeploy / Save configs / Snapshot / Destroy** with containerlab's output
   streamed into the Activity panel. Different labs can run jobs at the
   same time, up to four, with one job per lab. Pick any job, running or
   past, from the Activity panel's list to see its output, how long it
   took, and the time each host took. The last 50 jobs are kept in
   `.clabfleet/jobs/` under the first workspace directory, so they survive
   a restart of the GUI.
+- **Config diff:** the node card's button opens a tab with the node's
+  config in the latest snapshot against its `startup-config` or the
+  previous snapshot
 - **Terminals** in tabs at the bottom:
   - **CLI**: the node's own CLI via `docker exec` (`Cli` on cEOS, `sr_cli`
     on SR Linux, `cli` on cRPD)
@@ -205,12 +356,84 @@ printed in the terminal). Stop it with Ctrl+C.
     kinds such as Cisco IOL. It needs a login on the node: containerlab's
     default configs create `admin`/`admin`, but your own `startup-config`
     must include a user
+- **Packet capture:** click a link in the diagram, pick which end to
+  capture on, and optionally set a BPF filter, a packet count and a time
+  limit (60 seconds by default). **Live** decodes packets in a tab at the
+  bottom; press Ctrl+C there or close the tab to stop. **Download .pcap**
+  captures to a file for Wireshark; **Stop & save** ends it early and keeps
+  what was captured. Every GUI capture has a time limit: up to 10 minutes
+  for a download, which also stops at 200 MB, and 30 minutes for a live
+  tab. tcpdump is stopped inside the container when the tab closes, the
+  download is cancelled or the GUI stops. See
+  [Capture packets](#capture-packets) for how it reaches the node.
 - Nodes on remote hosts are reached over the host's SSH connection, so the
   SSH user there needs Docker access (the `docker` group)
 
 Security: terminals are shell access, so the GUI listens on `127.0.0.1`
 only and needs the random token from its start-up URL. Requests from other
 websites are refused. Use `--bind` with care.
+
+### Several users on a shared lab server
+
+To let several people reach one GUI remotely, give each a named login
+and serve it over TLS:
+
+```bash
+clabfleet user add alice                  # operator: everything
+clabfleet user add bob --role viewer      # read-only
+clabfleet user list
+clabfleet user rotate alice               # new token, ends alice's sessions
+clabfleet user remove bob                 # ends bob's sessions
+
+clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
+```
+
+- **Users file:** `~/.clabfleet/users.yaml` (mode 0600; another file with
+  `--users FILE` on both `gui` and `user`). When it exists, the GUI uses
+  named logins instead of the start-up token. Only SHA-256 hashes of the
+  tokens are stored. `user add` and `user rotate` print the token once,
+  with a login link (`--url https://lab.example.com:8650` sets its
+  address). Changes apply to a running GUI right away.
+- **Login:** each user opens `https://<server>:8650/?token=<their token>`.
+  The token is swapped for a session cookie (HttpOnly, SameSite=Strict,
+  Secure over HTTPS) that ends after 12 hours idle, on **Log out**, or
+  when the user is removed or rotated. Sessions live in memory, so a GUI
+  restart logs everyone out. The header shows who you are and your role.
+- **Roles:**
+  - `operator`: deploy, redeploy, save and destroy, terminals, YAML edits
+    and layout saves
+  - `viewer`: topologies, diagrams, YAML, node state, job output and node
+    logs (the Logs tab). Controls they cannot use are hidden. The server
+    refuses everything else with 403. Any route that is not a plain GET
+    is operator-only unless the code marks it otherwise, so new features
+    are protected by default.
+- **Audit log:** `audit.jsonl` next to the users file (or `--audit-log
+  FILE`; in single-token mode only with `--audit-log`). One JSON object
+  per line with `ts`, `user`, `role`, `remote`, `event` and `details`.
+  Events: `login`, `login_failed`, `logout`, `denied`, `job_started`
+  (action, topology, options), `job_finished` (status, seconds),
+  `topology_saved`, `positions_saved`, `terminal_opened` and
+  `terminal_closed` (lab, node, mode, host, seconds, exit code). Jobs also
+  record who started them, shown in the Activity panel.
+
+  ```json
+  {"ts": "2026-10-02T00:51:40.197+00:00", "user": "alice", "role": "operator", "remote": "10.1.2.3", "event": "terminal_opened", "details": {"lab": "spine-leaf-fabric", "node": "Spine-1", "mode": "cli", "host": "localhost"}}
+  ```
+- **TLS:** `--tls-cert` and `--tls-key` take PEM files. For a quick test,
+  a self-signed pair:
+  `openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 365 -subj "/CN=$(hostname)" -addext "subjectAltName=DNS:$(hostname)"`.
+  `--bind` to anything but a loopback address without TLS is refused;
+  `--insecure-http` overrides that with a warning, for trusted networks
+  only. Behind a reverse proxy that terminates TLS, keep the GUI on
+  `127.0.0.1` and pass `--public-url https://lab.example.com` so the
+  origin check and secure cookies match the address browsers use.
+
+Security notes: an operator can open shells on every node and, through
+`docker exec`, act as the account the GUI runs as on each lab host, so
+make only trusted people operators. Tokens are bearer secrets: anyone with
+a login link is that user until you rotate it. Terminals that are already
+open stay open when a user is removed or rotated; close their tabs (or
+restart the GUI) to cut them off.
 
 For the CLI and Shell buttons, your user must be able to run `docker`
 (member of the `docker` group, in a session started after you were added).
@@ -391,17 +614,165 @@ The chosen range is shown as `vni_range` in the deploy output.
 ```bash
 pip install -e ".[napalm]"
 
+export PROD_NET_PASSWORD=...          # read via password_env in the inventory
 clabfleet export-live topologies/live_devices_example.yaml \
-    -o imported/prod_mirror.clab.yml --lab-name prod-mirror
+    -o imported/prod_mirror.clab.yml --lab-name prod-mirror --sanitise
 
+clabfleet validate imported/prod_mirror.clab.yml
 clabfleet --sudo deploy imported/prod_mirror.clab.yml
 ```
 
-Each device becomes a node (kind from the NAPALM platform unless you set
-`kind`) with its running config saved to `configs/<node>.cfg`. Each LLDP
-adjacency between two inventoried devices becomes a link. Check that the
-interface names match what each containerlab kind accepts before deploying.
-See `topologies/live_devices_example.yaml` for the inventory format.
+Each device becomes a node with its running config saved to
+`configs/<node>.cfg`. Each LLDP adjacency between two inventoried devices
+becomes a link. Next to the topology, `<name>.import-report.yaml` lists,
+per node, every interface rename, where the image came from and what
+`--sanitise` changed (counts only, never values). Without `-o` the
+topology is printed with the configs inline.
+
+### Device sources
+
+| Source | How |
+|--------|-----|
+| clabfleet YAML | `export-live inventory.yaml` with a `devices:` list; see `topologies/live_devices_example.yaml` |
+| NetBox | `--netbox URL` (token in `NETBOX_TOKEN`), or `source: {type: netbox, url: ...}` in the YAML |
+| Nautobot | `--nautobot URL` (token in `NAUTOBOT_TOKEN`), or `source: {type: nautobot, ...}` |
+| Ansible | `export-live hosts.ini` (or `hosts.yml`), `--ansible FILE`, or `source: {type: ansible, path: ...}` |
+
+- **NetBox / Nautobot:** `--filter KEY=VALUE` (repeatable; the same key
+  twice means either value) is passed to `/api/dcim/devices/`, e.g.
+  `--filter site=dc1 --filter role=leaf --filter tag=lab-import`
+  (Nautobot: `location=`). All pages are fetched. Each device is reached on
+  its primary IP (else its name). The NAPALM driver comes from
+  `source.platform_map` (platform slug, or name on Nautobot → driver), else
+  the platform's NAPALM driver field, else a guess from the platform name
+  (`ios`, `eos`, `nxos`, `iosxr`, `junos`, ...); devices with no driver are
+  skipped with a warning. Use `--token-env VAR` or `source.token_env` for
+  another token variable.
+- **Ansible:** YAML or INI static inventories, including `[group:vars]`,
+  `[group:children]`, host ranges such as `leaf[01:04]`, and `group_vars/`
+  and `host_vars/` next to the file. Variables merge like Ansible's (`all`,
+  then parent groups, then child groups, then the host). Uses
+  `ansible_host`, `ansible_user`, `ansible_password` (or `ansible_ssh_pass`),
+  `ansible_port`, `ansible_become_password` (NAPALM's enable secret) and
+  `ansible_network_os` (`cisco.ios.ios` → `ios`, `arista.eos.eos` → `eos`,
+  `cisco.nxos.nxos` → `nxos_ssh`, ...; `napalm_platform` overrides it).
+  Optional `clab_kind`, `clab_type` and `clab_image` host variables set the
+  node directly. `--filter group=NAME` keeps one group. Vault-encrypted
+  values are not decrypted.
+- **Credentials:** the device entry, then `defaults:` in the YAML, then the
+  variable named by `password_env` / `username_env`, then
+  `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD`. Passwords and
+  tokens are never logged or written to the output.
+
+### Kinds and images
+
+A node's kind is the device's `kind`, else the first matching `kinds:`
+rule in the inventory, else the platform default (`ios` → `cisco_iol`,
+`eos` → `arista_ceos`, `nxos` → `cisco_n9kv`, `junos` →
+`juniper_vjunosrouter`, ...). Its image is the device's `image`, else the
+first matching `images:` rule, else `REPLACE-ME/<kind>:latest` with a
+warning. Rules match regexes against the whole value, ignoring case, on
+`platform`, `vendor`, `model`, `version` (from the device's NAPALM facts),
+`role`, `site`, `tag` (NetBox/Nautobot), `group` (Ansible), `hostname`, `name`, and
+for images also `kind` and `type`:
+
+```yaml
+kinds:
+  - {platform: ios, model: "C9[23]00.*", kind: cisco_iol, type: L2}
+images:
+  - {kind: cisco_iol, version: '17\.12\..*', image: "vrnetlab/cisco_iol:17.12.01"}
+  - {kind: arista_ceos, image: "ceos:4.32.0F"}
+```
+
+### Interface names
+
+Interface names are mapped to the names each kind accepts, in the links
+and in the saved configs (`interface` stanzas and references such as
+`passive-interface` or `source-interface`; descriptions are left alone).
+Abbreviations are expanded first (`Gi0/1`, `Te1/1`, `Et49/1`, ...), so
+both ends of an adjacency agree.
+
+| Kind | Topology name | Config name | 1:1 when the device has |
+|------|---------------|-------------|-------------------------|
+| `cisco_iol` | `Ethernet0/1` … `Ethernet15/3` (63 ports; `0/0` is management) | same | an Ethernet port whose last two numbers fit, e.g. `Gi0/0/2` → `Ethernet0/2` |
+| `arista_ceos` | `eth1`, `eth49_1` | `Ethernet1`, `Ethernet49/1` | `EthernetN`, `EthernetN/M` |
+| `cisco_n9kv` | `eth5` | `Ethernet1/5` | `Ethernet1/N` |
+| `nokia_srlinux` | `e1-3` | `ethernet-1/3` | `ethernet-1/N` |
+| `cisco_xrd` | `Gi0-0-0-2` | `GigabitEthernet0/0/0/2` | any `…0/0/0/N` port |
+| `cisco_xrv9k` | `eth3` | `GigabitEthernet0/0/0/2` | any `…0/0/0/N` port |
+| `juniper_vjunos*`, `juniper_vsrx` | `eth4` | `ge-0/0/3` (vJunosEvolved `et-`) | `ge-`/`xe-`/`et-0/0/N` (vJunos router/switch: 10 ports) |
+| `cisco_c8000v`, `cisco_csr1000v` | `eth2` | `GigabitEthernet3` | `GigabitEthernetN` |
+| `nokia_sros` | `eth4` | `1/1/4` | `1/1/N` |
+| `linux` and others | `eth1`, `eth2`, … | not rewritten | `EthernetN` |
+
+Other interfaces get the lowest free port: link interfaces first, then
+the other physical interfaces in the config, each in natural order, so the
+result does not depend on the order devices report them in. Management
+ports and logical interfaces (loopbacks, VLANs, port-channels, tunnels,
+subinterfaces) are never mapped. Interfaces beyond a kind's port count
+are listed as dropped in the report: their links are left out and their
+IOS-style config stanzas removed. `--keep-interface-names` turns mapping
+off. A port is only ever used by one link: when the LLDP data of the two
+ends disagrees, the second link is left out with a warning.
+
+### Sanitising configs
+
+`--sanitise` cleans every saved config, for IOS/IOS-XE, IOS-XR, NX-OS, EOS
+and Junos (with it, configs of other platforms are not saved at all):
+
+- **Removed:** `enable secret/password`, all `username` lines, `aaa ...`,
+  TACACS+/RADIUS servers and keys, `snmp-server community/user/host`,
+  `crypto pki` / `crypto ca` trustpoints and certificate chains,
+  `key config-key`. Junos: `tacplus-server`, `radius-server`,
+  `authentication-order`, SNMP communities and SNMPv3, SSH public keys.
+- **Replaced with `lab-key`:** OSPF/IS-IS/BGP/HSRP/VRRP authentication keys,
+  key-chain `key-string`, NTP authentication keys, ISAKMP/IKE pre-shared
+  keys, line and other `password`/`secret` values, Junos `$9$` secrets.
+  Both ends get the same value, so authenticated adjacencies still form.
+- **Management:** addresses on management interfaces (`Management*`,
+  `mgmt0`, `fxp0`, `em0`, or any interface in a management VRF) and static
+  routes in the management VRF are removed; `--mgmt-address dhcp` turns the
+  addresses into DHCP instead, `keep` leaves them.
+- **Login:** a placeholder user (`--lab-user` / `--lab-password`, default
+  `admin`/`admin`) is added after `hostname` so the node stays reachable.
+  Junos keeps its users, but every `encrypted-password` becomes the hash of
+  `admin@123` (the vrnetlab default).
+
+### Neighbours outside the inventory
+
+`--include-neighbours` adds LLDP neighbours that are not in the inventory
+(servers, devices you cannot log in to, ...) as `linux` nodes
+(`--neighbour-image`, default `alpine:3`), named after their LLDP system
+name or chassis ID, with their links. The report marks them
+`neighbour: true`.
+
+### Re-sync
+
+Running `export-live` again with the same `-o` file does not overwrite
+it. It reports what changed since the last import:
+
+```
+Changes since the last import of imported/prod_mirror.clab.yml:
+- node server-01
+~ node core-rtr-02: startup config changed
++ link core-rtr-02:Ethernet0/3 -- dist-sw-02:eth51_1
+~ link dist-sw-01:eth49_1 -- dist-sw-02:eth50_1 -> dist-sw-01:eth48_1 -- dist-sw-02:eth50_1
+
+Nothing written. Re-run with --apply to update the topology (add --prune to delete what is gone), or --overwrite to replace it.
+```
+
+`--json` prints the same as JSON. `--apply` edits the file in place:
+comments, order, GUI positions and other labels, and nodes and links you
+added by hand all stay. New nodes and links are added, moved links get
+their new interfaces, and changed nodes get their new kind/type/image (an
+image you set by hand is never replaced by a placeholder) and config. A
+node whose `startup-config` you pointed at another file keeps it; the new
+config goes to `configs/<node>.cfg` for you to compare. Removed nodes and
+links are only deleted with `--prune`, and only nodes an import created
+count as removed. Interface assignments from the last report are reused,
+so a new port does not renumber the others. Lines that change on every
+fetch (such as `! Last configuration change`) are not a config change.
+`--overwrite` replaces the file with a fresh import.
 
 ## Example topologies
 
@@ -422,6 +793,9 @@ See `topologies/live_devices_example.yaml` for the inventory format.
 | `CLAB_SSH_KEY` | SSH agent / defaults | SSH private key |
 | `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
 | `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
+| `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot:latest` | Image with `tcpdump` for capturing on nodes that have none |
+| `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD` | — | `export-live`: device login when the inventory gives none |
+| `NETBOX_TOKEN` / `NAUTOBOT_TOKEN` | — | `export-live`: API token for `--netbox` / `--nautobot` |
 
 ## Development
 
@@ -443,16 +817,25 @@ clabfleet/
   deployer.py      # Deploy/destroy/save/inspect; split topology per host
   runner.py        # Run commands locally or over SSH
   exporter.py      # Build a topology from live devices (NAPALM)
+  inventory.py     # Device lists: YAML, NetBox, Nautobot, Ansible; kind/image rules
+  ifmap.py         # Map device interface names to each kind's naming
+  sanitise.py      # Strip secrets and management addressing from configs
+  resync.py        # Diff and apply a re-import against an existing topology
   execute.py       # Run a command on lab nodes (clabfleet exec)
+  snapshots.py     # Config snapshots and diffs (clabfleet snapshot/diff)
+  capture.py       # tcpdump on node interfaces (clabfleet capture, GUI)
   nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
   validate.py      # Topology checks (clabfleet validate)
+  templates.py     # Lab templates (clabfleet new)
   linkcheck.py     # Ping and UDP checks between cluster hosts
   readiness.py     # Is a node's CLI/SSH up yet (deploy --wait, GUI)
   cli.py           # CLI entrypoint
   gui/
-    server.py      # aiohttp app: API, auth, terminal websockets
+    server.py      # aiohttp app: API, auth middleware, terminal websockets
+    auth.py        # Users file, roles, audit log
     state.py       # Topology discovery, running labs, deploy/destroy jobs
-    terminals.py   # Local pty and SSH-channel terminal sessions
+    terminals.py   # Local pty, SSH-channel and live capture sessions
+    captures.py    # GUI packet captures: limits, pcap downloads
     editing.py     # Format-preserving saves of topology files
     static/        # Web UI (vanilla JS; xterm.js bundled in vendor/)
 topologies/        # Example topologies and cluster inventory

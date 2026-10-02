@@ -182,22 +182,39 @@ different labs, and show elapsed time per host in the Activity panel.
 
 ### 3.1 Config snapshots and diffs — M
 
+**Done.** cEOS, SR Linux and cRPD; IOL saves to binary NVRAM and is
+skipped. Also a Snapshot job and a per-node diff tab in the GUI.
+
 `save` writes configs into the lab directory but nothing reads them back.
 Add `snapshot` (pull configs to a local dated folder) and `diff` against
 the previous snapshot or the committed `startup-config`.
 
 ### 3.2 Lab templates — M
 
+**Done.** Templates `spine-leaf`, `ring` and `campus` for `arista_ceos`,
+`cisco_iol` and `linux`, with /31 links and per-tier loopbacks. No GUI
+action yet. The `linux` kind was tested on a live deploy. The cEOS and IOL
+configs are only validated.
+
 `clabfleet new spine-leaf --spines 2 --leaves 4 --kind arista_ceos` that
 generates nodes, links and startup configs from a small template set.
 
 ### 3.3 Live link and node state in the diagram — M
+
+**Done.** Interface state is read from `/sys/class/net` rather than
+`ip link`, so it works in any container with `sh`. Probes run in the
+background only for labs open in a browser, at most once per lab every
+5 seconds however many tabs are open. Served at `/api/live/<topology>`.
 
 Nodes are coloured by container state only. Poll `ip link` inside
 containers to show links down, and `docker stats` for CPU and memory per
 node.
 
 ### 3.4 Packet capture from the diagram — L
+
+**Done.** Also `clabfleet capture` on the CLI. Nodes without `tcpdump` get
+a helper container in their network namespace. GUI captures always have a
+time limit, and tcpdump is killed inside the container when they end.
 
 Click a link, pick a side, and stream `tcpdump` from the container's
 network namespace to a download or a live decode. Fits the terminal
@@ -210,29 +227,51 @@ span hosts, built on `Workspace.host_status()`.
 
 ### 3.6 Multi-user and remote access — L
 
+**Done.** `clabfleet user add/list/remove/rotate` manages a users file
+with operator and viewer roles; only token hashes are stored. Viewers are
+read-only by default deny: any route that is not a plain GET needs an
+operator unless marked otherwise. Logins, jobs, edits and terminal
+sessions go to a JSON Lines audit log. `--tls-cert`/`--tls-key` serve
+HTTPS, and a non-loopback `--bind` without TLS is refused unless
+`--insecure-http` is given. Without a users file the GUI keeps its
+single-token mode.
+
 The GUI is single-token and localhost only. For a shared jump host: named
 users with per-user tokens, an audit log of terminal sessions and
 actions, and TLS.
 
 ### 3.7 Live network import improvements
 
+**Done.** All six items below. Tested against recorded NAPALM data and
+fake NetBox/Nautobot APIs only; no real devices were involved.
+
 The exporter in `clabfleet/exporter.py` produces a topology that usually
 needs hand edits before it deploys.
 
-- **Interface name mapping — M.** Per-kind rewrite tables (for example
+- **Interface name mapping — M.** **Done.** `clabfleet/ifmap.py`: per-kind
+  naming for IOL, cEOS, N9Kv, SR Linux, XRd, XRv9k, vJunos/vSRX, C8000v,
+  SR OS and linux; 1:1 where the port exists, else the next free port in a
+  deterministic order, within port limits. Links and configs both, with a
+  per-node report. Per-kind rewrite tables (for example
   `GigabitEthernet0/0/1` → `Ethernet0/1` for IOL) applied to both links
   and the saved configs.
-- **Config sanitising — M.** `--sanitise` strips or replaces password
-  hashes, SNMP communities, AAA servers and management addresses.
-- **Image mapping — S.** Map platform and version to a real image via the
-  inventory file instead of emitting `REPLACE-ME/<kind>:latest`.
-- **Incremental re-sync — M.** Diff the new LLDP graph against the
-  existing topology and report added, removed and changed nodes and links
-  instead of overwriting.
-- **Neighbour-only devices — S.** Optionally add LLDP neighbours that are
-  not in the inventory as placeholder `linux` nodes.
-- **Other inventory sources — M.** Accept a NetBox/Nautobot query or an
-  Ansible inventory as the device list.
+- **Config sanitising — M.** **Done.** `clabfleet/sanitise.py`, IOS-like
+  dialects and Junos; adds an admin/admin login, reports counts only.
+  `--sanitise` strips or replaces password hashes, SNMP communities, AAA
+  servers and management addresses.
+- **Image mapping — S.** **Done.** `images:` (and `kinds:`) rules in the
+  inventory. Map platform and version to a real image via the inventory
+  file instead of emitting `REPLACE-ME/<kind>:latest`.
+- **Incremental re-sync — M.** **Done.** `clabfleet/resync.py`: report only
+  by default, `--apply` edits in place keeping hand edits, `--prune` to
+  delete. Diff the new LLDP graph against the existing topology and report
+  added, removed and changed nodes and links instead of overwriting.
+- **Neighbour-only devices — S.** **Done.** `--include-neighbours`.
+  Optionally add LLDP neighbours that are not in the inventory as
+  placeholder `linux` nodes.
+- **Other inventory sources — M.** **Done.** `clabfleet/inventory.py`:
+  NetBox and Nautobot REST (stdlib only) and Ansible YAML/INI inventories.
+  Accept a NetBox/Nautobot query or an Ansible inventory as the device list.
 
 ## Not planned
 

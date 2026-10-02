@@ -15,6 +15,8 @@
       <span>clabfleet</span>
     </div>
     <div id="hosts" class="hosts" aria-label="Lab hosts"></div>
+    <span id="whoami" class="whoami small" hidden></span>
+    <button id="logout" class="btn ghost small" hidden>Log out</button>
     <button id="refresh" class="btn ghost small" title="Refresh now">Refresh</button>
   </header>
 
@@ -42,13 +44,14 @@
             <span id="lab-state" class="badge"></span>
             <div id="lab-path" class="muted mono small"></div>
           </div>
-          <div id="lab-actions" class="actions">
+          <div id="lab-actions" class="actions operator-only">
             <label class="opt" title="If a host fails during Deploy or Redeploy, destroy the lab on every host instead of leaving it partly running">
               <input type="checkbox" id="opt-rollback"> Roll back on failure
             </label>
             <button class="btn primary" data-action="deploy">Deploy</button>
             <button class="btn" data-action="redeploy" title="Destroy and recreate all nodes (discards node state)">Redeploy</button>
             <button class="btn" data-action="save" title="Save running configs into the lab directory">Save configs</button>
+            <button class="btn" data-action="snapshot" title="Save configs and copy them to a dated folder in snapshots/ next to the topology">Snapshot</button>
             <button class="btn danger" data-action="destroy">Destroy</button>
           </div>
         </div>
@@ -63,11 +66,12 @@
           <section id="view-diagram" class="view">
             <svg id="diagram" class="diagram" aria-label="Topology diagram"></svg>
             <div class="diagram-tools">
-              <button id="save-layout" class="btn ghost small" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
+              <button id="save-layout" class="btn ghost small operator-only" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
               <button id="relayout" class="btn ghost small" title="Discard manual positions">Auto layout</button>
               <button id="fit" class="btn ghost small">Fit</button>
             </div>
             <div id="node-card" class="node-card" hidden></div>
+            <div id="link-card" class="node-card link-card operator-only" hidden></div>
             <div id="diagram-error" class="diagram-error" hidden></div>
           </section>
           <section id="view-nodes" class="view" hidden>
@@ -77,7 +81,7 @@
             </table>
           </section>
           <section id="view-yaml" class="view yaml-view" hidden>
-            <div class="editor-bar">
+            <div class="editor-bar operator-only">
               <button id="yaml-save" class="btn small primary" disabled title="Save (Ctrl+S)">Save</button>
               <button id="yaml-revert" class="btn small" disabled title="Discard changes and reload the file">Revert</button>
               <span id="yaml-status" class="muted small"></span>
