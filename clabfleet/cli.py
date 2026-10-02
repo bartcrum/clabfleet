@@ -12,6 +12,8 @@ Usage:
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
     clabfleet export-live <devices.yaml> [-o output.clab.yml]
+    clabfleet new <template> [--spines N ...] [--kind KIND] [--image IMAGE] [-o FILE] [--force]
+    clabfleet new --list
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
 
 Without --cluster, commands target a single host: this machine by default,
@@ -40,6 +42,16 @@ from .execute import LabExecutor
 from .linkcheck import all_pairs, check_links, describe, failures
 from .nodes import inspect_all, running_usage
 from .exporter import export_from_live_network
+from .templates import (
+    DEFAULT_KIND,
+    DEFAULT_LINK_SUBNET,
+    DEFAULT_LOOPBACK_SUBNET,
+    KINDS,
+    TEMPLATES,
+    describe_templates,
+    generate,
+    render,
+)
 from .topology import dump_yaml
 from .validate import validate_topology
 
@@ -167,6 +179,34 @@ def _build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--lab-name", default="imported-topology",
                         help="Name for the generated lab")
 
+    # --- new ---
+    p_new = sub.add_parser("new", help="Generate a topology from a lab template",
+                           description="Generate a ready-to-deploy topology "
+                                       "(nodes, links, startup configs) from a template.")
+    p_new.add_argument("--list", action="store_true", dest="list_templates",
+                       help="List templates, their options and the supported kinds")
+    templates = p_new.add_subparsers(dest="template", metavar="template")
+    for tmpl in TEMPLATES.values():
+        p_tmpl = templates.add_parser(tmpl.name, help=tmpl.description,
+                                      description=tmpl.description)
+        for param in tmpl.params:
+            p_tmpl.add_argument(f"--{param.name}", type=int, metavar="N",
+                                help=f"{param.help} (default: {param.default})")
+        p_tmpl.add_argument("--kind", default=DEFAULT_KIND, choices=list(KINDS),
+                            help=f"Node kind (default: {DEFAULT_KIND})")
+        p_tmpl.add_argument("--image", help="Node image (default: per kind, see --list)")
+        p_tmpl.add_argument("--name", help=f"Lab name (default: {tmpl.default_name})")
+        p_tmpl.add_argument("--link-subnet", default=DEFAULT_LINK_SUBNET,
+                            help=f"Subnet the /31 link addresses come from "
+                                 f"(default: {DEFAULT_LINK_SUBNET})")
+        p_tmpl.add_argument("--loopback-subnet", default=DEFAULT_LOOPBACK_SUBNET,
+                            help=f"Subnet for /32 loopbacks, one /24 per tier "
+                                 f"(default: {DEFAULT_LOOPBACK_SUBNET})")
+        p_tmpl.add_argument("-o", "--output", metavar="FILE",
+                            help="Write the topology here (default: print it)")
+        p_tmpl.add_argument("--force", action="store_true",
+                            help="Overwrite FILE if it exists")
+
     # --- gui ---
     p_gui = sub.add_parser("gui", help="Open the web GUI")
     add_cluster_arg(p_gui)
@@ -240,6 +280,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "validate":
         return _validate(args)
+
+    if cmd == "new":
+        return _new(args)
 
     cluster = _cluster_from_args(args)
 
@@ -340,6 +383,29 @@ def _exec(args: argparse.Namespace, cluster: ClusterConfig) -> int:
         print(f"{len(failed)} of {len(results)} nodes failed: "
               f"{', '.join(r['node'] for r in failed)}", file=sys.stderr)
     return 1 if failed or not results else 0
+
+
+def _new(args: argparse.Namespace) -> int:
+    if args.list_templates or not args.template:
+        print(describe_templates())
+        return 0 if args.list_templates else 2
+    params = {p.name: getattr(args, p.name) for p in TEMPLATES[args.template].params}
+    data = generate(args.template, params, kind=args.kind, image=args.image,
+                    name=args.name, link_subnet=args.link_subnet,
+                    loopback_subnet=args.loopback_subnet)
+    text = render(data, args.template, params, args.kind)
+    if not args.output:
+        print(text, end="")
+        return 0
+    out = Path(args.output)
+    if out.exists() and not args.force:
+        raise FileExistsError(f"{out} already exists (use --force to overwrite)")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    topo = data["topology"]
+    print(f"Wrote {out}: lab '{data['name']}', {len(topo['nodes'])} {args.kind} nodes, "
+          f"{len(topo['links'])} links")
+    return 0
 
 
 def _validate(args: argparse.Namespace) -> int:

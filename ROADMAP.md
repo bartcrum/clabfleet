@@ -188,6 +188,11 @@ the previous snapshot or the committed `startup-config`.
 
 ### 3.2 Lab templates — M
 
+**Done.** Templates `spine-leaf`, `ring` and `campus` for `arista_ceos`,
+`cisco_iol` and `linux`, with /31 links and per-tier loopbacks. No GUI
+action yet. The `linux` kind was tested on a live deploy. The cEOS and IOL
+configs are only validated.
+
 `clabfleet new spine-leaf --spines 2 --leaves 4 --kind arista_ceos` that
 generates nodes, links and startup configs from a small template set.
 
