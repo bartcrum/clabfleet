@@ -29,14 +29,16 @@ from ..routing import routing_view
 from ..routing.live import collect as collect_protocols, overlay as protocol_overlay
 from ..snapshots import Snapshotter, diff_lab
 from ..validate import validate_text
-from .editing import EditConflict, set_positions, text_hash, write_if_unchanged
+from .editing import EditConflict, apply_graph, set_positions, text_hash, write_if_unchanged
 from ..runner import Runner
 from ..topology import (
     LABEL_HOST,
     LABEL_HOST_TAGS,
     SPECIAL_ENDPOINT_NODES,
     Topology,
+    dump_yaml,
     load_topology,
+    topology_from_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,7 @@ def topology_view(topo: Topology) -> dict:
             "host_tags": labels.get(LABEL_HOST_TAGS, ""),
             "pos": pos,
             "modes": access_modes(eff["kind"]),
+            "config": bool(eff.get("startup-config") or eff.get("exec")),
         })
 
     links = []
@@ -369,6 +372,56 @@ class Workspace:
             raise EditConflict(f"{path.name} changed on disk; reload it before saving the layout")
         write_if_unchanged(path, set_positions(text, clean), text_hash(text))
         return self.topology_detail(topo_id)
+
+    def apply_graph(self, topo_id: str, graph: dict, base_hash: str,
+                    dry_run: bool = False) -> dict:
+        """Change the file to match a graph drawn in the builder (see
+        ``editing.apply_graph``). ``dry_run``: only return the new YAML and
+        its validation."""
+        path = self.topology_path(topo_id)
+        text = path.read_text()
+        if base_hash and text_hash(text) != base_hash:
+            raise EditConflict(f"{path.name} changed on disk; reload it before saving")
+        from ..templates import KINDS
+
+        new = apply_graph(text, graph, {k: s.image for k, s in KINDS.items()})
+        if dry_run:
+            return {"yaml": new, "validation": self.validate_yaml(topo_id, new)}
+        return self.save_yaml(topo_id, new, text_hash(text))
+
+    def create_topology(self, file_name: str, lab_name: str, kind: str,
+                        template: Optional[str] = None, params: Optional[dict] = None) -> str:
+        """Write a new topology file in the first workspace directory: from
+        a ``clabfleet new`` template, or one node of ``kind`` to build on.
+        Returns its id. Never overwrites a file."""
+        from ..templates import KINDS, generate, render
+
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}", file_name or ""):
+            raise ValueError("File names are letters, digits, '.', '_' and '-'")
+        if not file_name.endswith((".clab.yml", ".clab.yaml")):
+            file_name += ".clab.yml"
+        if kind not in KINDS:
+            raise ValueError(f"Unsupported kind '{kind}' (choose from {', '.join(KINDS)})")
+        if template:
+            text = render(generate(template, params, kind, name=lab_name), template,
+                          params or {}, kind)
+        else:
+            data = {"name": lab_name, "topology": {
+                "kinds": {kind: {"image": KINDS[kind].image}},
+                "nodes": {"R1" if kind != "linux" else "Host-1": {"kind": kind}},
+                "links": [],
+            }}
+            topology_from_dict(data)  # checks the lab name
+            text = (f"# {lab_name}: drawn in the clabfleet GUI builder.\n"
+                    "#\n# Deploy:\n#   clabfleet deploy <this file>\n\n" + dump_yaml(data))
+        path = self.roots[0] / file_name
+        with open(path, "x") as fh:  # x: refuses an existing file, even one just created
+            fh.write(text)
+        self._topologies = find_topologies(self.roots)
+        for topo_id, p in self._topologies.items():
+            if p.resolve() == path.resolve():
+                return topo_id
+        raise KeyError(f"{path} is not in the workspace")  # e.g. a hidden directory
 
     # --- runtime ---
 

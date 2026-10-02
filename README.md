@@ -416,6 +416,25 @@ an operator.
   writes them into the topology file as `graph-posX`/`graph-posY` node
   labels, so the layout travels with the file. Only those labels change:
   comments, ordering, quoting and indentation are kept.
+- **Builder:** draw a lab instead of writing YAML. **+ New lab** in the
+  sidebar starts one, blank (one node) or from a `clabfleet new` template.
+  **Edit** on the Diagram tab (operators) opens a palette: drag a kind
+  (Arista cEOS, Cisco IOL, Linux host) onto the canvas to add a node, and
+  drag from a node's ● handle to another node to link them, with the next
+  free port of each kind (`eth1`, `Ethernet0/1`, ...). Click a node or a
+  link to rename it, change its kind or image, or change its ports; Delete
+  removes the selection. The drawing is a draft: **Preview YAML** shows
+  what it would write, **Save** writes it, **Discard** drops it. Saving
+  changes only what differs in the file, so existing configs, comments and
+  links of other forms (host, macvlan, ...) stay; a renamed node's
+  `hostname` line follows, and a new node of a kind with no image in the
+  file gets the kind's default image. **Generate configs…** addresses the
+  drawing (a /31 per link, a /32 loopback per node, from pools you can
+  change) and writes startup-configs: OSPF area 0, or eBGP with one AS per
+  router, for cEOS and IOL; Linux hosts get their addresses and a default
+  route through the router they are cabled to, which announces their
+  subnet. It says first which existing configs it replaces; nothing is
+  written until Save.
 - **Inspector:** clicking a node (on the Diagram, the Nodes table or the
   Routing tab) or a link opens its details in a panel on the right, which
   narrows the canvas instead of covering it. Drag its left edge to resize

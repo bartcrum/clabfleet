@@ -269,6 +269,8 @@ projectors for training sessions.
    the protocols on each, in one table. Fits the inspector (B2).
 10. **New lab wizard — M.** The `clabfleet new` templates as a form with
     a live diagram preview before writing the file.
+    **Done as a drawing builder** (branch `topology-builder`): New lab from
+    blank or a template, and an Edit mode on the Diagram tab.
 
 **Docs and sharing**
 

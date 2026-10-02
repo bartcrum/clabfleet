@@ -45,6 +45,7 @@ from yarl import URL
 from ..capture import GUI_MAX_BYTES, CaptureError
 from ..nodes import access_modes, run_docker, terminal_command, terminal_stop_command
 from ..snapshots import SnapshotError
+from ..topology import TopologyError
 from .auth import (
     ACCESS_ATTR, BOOTSTRAP_USER, DEFAULT_USERS_FILE, OPERATOR, VIEWER,
     AuditLog, SessionFile, User, UserStore, allow_viewer, check_new_password, hash_token,
@@ -302,6 +303,10 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/api/routing-live/{id:.+}", _routing_live)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
+    app.router.add_put("/api/graph/{id:.+}", _save_graph)
+    app.router.add_post("/api/topologies", _create_topology)
+    app.router.add_get("/api/builder", _builder_info)
+    app.router.add_post("/api/builder/configs", _builder_configs)
     app.router.add_get("/api/diff/{id:.+}", _node_diff)
     app.router.add_get("/api/jobs", _jobs)
     app.router.add_post("/api/jobs", _start_job)
@@ -864,6 +869,92 @@ async def _save_topology(request):
         raise web.HTTPConflict(text=str(exc))
     audit(request, "topology_saved", topology=topo_id, hash=result["detail"].get("hash"))
     return web.json_response(result)
+
+
+async def _save_graph(request):
+    """The builder: ``{"graph", "base_hash", "dry_run"?}`` changes the file to
+    match the drawn graph; a dry run returns the YAML it would write."""
+    topo_id = request.match_info["id"]
+    body = await _json_body(request)
+    graph, dry_run = body.get("graph"), body.get("dry_run") is True
+    if not isinstance(graph, dict):
+        raise web.HTTPBadRequest(text="Expected a graph")
+    if not dry_run:
+        _refuse_while_busy(request, topo_id)
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        result = await asyncio.to_thread(ws.apply_graph, topo_id, graph,
+                                         str(body.get("base_hash", "")), dry_run)
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
+    except (ValueError, TypeError) as exc:
+        raise web.HTTPBadRequest(text=f"Cannot apply the drawing: {exc}")
+    except UnloadableTopology as exc:
+        return web.json_response({"error": str(exc), "validation": exc.report}, status=400)
+    except EditConflict as exc:
+        raise web.HTTPConflict(text=str(exc))
+    if not dry_run:
+        audit(request, "topology_saved", topology=topo_id, hash=result["detail"].get("hash"),
+              via="builder")
+    return web.json_response(result)
+
+
+async def _create_topology(request):
+    """A new lab: ``{"file", "name", "kind", "template"?, "params"?}``."""
+    from ..templates import TemplateError
+
+    body = await _json_body(request)
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        topo_id = await asyncio.to_thread(
+            ws.create_topology, str(body.get("file", "")), str(body.get("name", "")),
+            str(body.get("kind", "arista_ceos")), body.get("template") or None,
+            body.get("params") if isinstance(body.get("params"), dict) else None)
+    except FileExistsError:
+        raise web.HTTPConflict(text="A file with that name exists already")
+    except (ValueError, TemplateError, TopologyError, KeyError) as exc:
+        raise web.HTTPBadRequest(text=str(exc.args[0]) if exc.args else str(exc))
+    audit(request, "topology_created", topology=topo_id, template=body.get("template"))
+    return web.json_response({"id": topo_id})
+
+
+async def _builder_info(request):
+    """What the builder offers: kinds (with images and port names) and templates."""
+    from ..templates import KINDS, TEMPLATES
+
+    return web.json_response({
+        "kinds": {k: {"image": s.image, "ports": [s.interface(i)[0] for i in range(1, 9)],
+                      "note": s.note} for k, s in KINDS.items()},
+        "templates": {t.name: {"description": t.description, "default_name": t.default_name,
+                               "params": [{"name": p.name, "default": p.default, "help": p.help,
+                                           "min": p.minimum, "max": p.maximum}
+                                          for p in t.params]}
+                      for t in TEMPLATES.values()},
+    })
+
+
+async def _builder_configs(request):
+    """Configs for a drawn graph (nothing is written): ``{"nodes": {name:
+    kind}, "links": [[a, a_port, b, b_port]], "routing", "link_subnet",
+    "loopback_subnet", "asn"}``."""
+    from ..templates import (DEFAULT_ASN, DEFAULT_LINK_SUBNET, DEFAULT_LOOPBACK_SUBNET,
+                             TemplateError, generate_configs)
+
+    body = await _json_body(request)
+    nodes, links = body.get("nodes"), body.get("links")
+    if not isinstance(nodes, dict) or not isinstance(links, list):
+        raise web.HTTPBadRequest(text="Expected nodes and links")
+    try:
+        configs, skipped = generate_configs(
+            {str(k): str(v) for k, v in nodes.items()},
+            [tuple(str(x) for x in link) for link in links if isinstance(link, list) and len(link) == 4],
+            str(body.get("routing", "ospf")),
+            str(body.get("link_subnet") or DEFAULT_LINK_SUBNET),
+            str(body.get("loopback_subnet") or DEFAULT_LOOPBACK_SUBNET),
+            int(body.get("asn") or DEFAULT_ASN))
+    except (TemplateError, ValueError, KeyError) as exc:
+        raise web.HTTPBadRequest(text=str(exc.args[0]) if exc.args else str(exc))
+    return web.json_response({"configs": configs, "skipped": skipped})
 
 
 async def _save_positions(request):

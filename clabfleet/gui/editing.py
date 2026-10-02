@@ -7,9 +7,11 @@ keeps comments, key order, quoting and indentation, so only the
 
 import hashlib
 import io
+import re
 import os
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 POS_X, POS_Y = "graph-posX", "graph-posY"
 
@@ -87,3 +89,175 @@ def write_if_unchanged(path: Path, text: str, base_hash: str) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+# --- The topology builder: a drawn graph back into the file ---
+
+SPECIAL_PREFIXES = ("host", "mgmt-net", "macvlan", "vxlan", "vxlan-stitch", "dummy", "bridge", "ovs-bridge")
+
+
+def _simple_link(link) -> Optional[tuple[str, str]]:
+    """(a, b) for a plain ``endpoints: ["n1:if", "n2:if"]`` link between two
+    lab nodes; None for any other form, which the builder leaves alone."""
+    if not isinstance(link, dict) or link.get("type") is not None:
+        return None
+    ends = link.get("endpoints")
+    if not isinstance(ends, list) or len(ends) != 2 or not all(isinstance(e, str) for e in ends):
+        return None
+    if any(e.partition(":")[0] in SPECIAL_PREFIXES for e in ends):
+        return None
+    return str(ends[0]), str(ends[1])
+
+
+def _link_nodes(link) -> set[str]:
+    """Every node a link of any form names."""
+    names = set()
+    if not isinstance(link, dict):
+        return names
+    for ep in link.get("endpoints") or []:
+        if isinstance(ep, str):
+            names.add(ep.partition(":")[0])
+        elif isinstance(ep, dict) and ep.get("node"):
+            names.add(str(ep["node"]))
+    ep = link.get("endpoint")
+    if isinstance(ep, dict) and ep.get("node"):
+        names.add(str(ep["node"]))
+    return names
+
+
+def _rename_in_link(link, old: str, new: str) -> None:
+    eps = link.get("endpoints") if isinstance(link, dict) else None
+    for i, ep in enumerate(eps or []):
+        if isinstance(ep, str) and ep.partition(":")[0] == old:
+            eps[i] = type(ep)(new + ":" + ep.partition(":")[2])  # keeps the quoting
+        elif isinstance(ep, dict) and ep.get("node") == old:
+            ep["node"] = new
+    ep = link.get("endpoint") if isinstance(link, dict) else None
+    if isinstance(ep, dict) and ep.get("node") == old:
+        ep["node"] = new
+
+
+def apply_graph(text: str, graph: dict, default_images: Optional[dict] = None) -> str:
+    """Return ``text`` changed to match a graph drawn in the GUI builder.
+
+    ``graph``: ``{"nodes": [{"name", "kind", "image"?, "pos"?, "rename_from"?,
+    "config"?}], "links": [{"a": "node:iface", "b": "node:iface"}]}``.
+
+    Only what differs is touched: nodes missing from the graph are removed
+    (with every link naming them), new ones added, kind / image / position
+    and generated configs (``config``: ``{"startup-config": text}`` or
+    ``{"exec": [...]}``) set, renames applied to the node and its links.
+    Plain node-to-node links follow the graph; links of other forms (host,
+    macvlan, ...) are kept as they are. Comments, order and everything
+    else in the file stay.
+
+    A renamed node's ``hostname <old>`` line in an inline startup-config is
+    renamed too. A node whose kind has no image here (none on the node, none
+    under ``kinds``) gets ``default_images[kind]``, so it can deploy.
+    """
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString, LiteralScalarString
+
+    yaml = _yaml_for(text)
+    data = yaml.load(text)
+    topo = data.setdefault("topology", CommentedMap())
+    if topo.get("nodes") is None:
+        topo["nodes"] = CommentedMap()
+    nodes = topo["nodes"]
+    if topo.get("links") is None:
+        topo["links"] = CommentedSeq()
+    links = topo["links"]
+    kinds = topo.get("kinds") or {}
+
+    wanted = graph.get("nodes") or []
+    names = [str(n["name"]) for n in wanted]
+    if len(set(names)) != len(names):
+        raise ValueError("Node names must be unique")
+
+    # Renames first, keeping the node's place in the file
+    for n in wanted:
+        old, new = n.get("rename_from"), str(n["name"])
+        if old and old != new and old in nodes:
+            if new in nodes:
+                raise ValueError(f"Cannot rename {old} to {new}: {new} exists")
+            items = list(nodes.items())
+            for key, _ in items:
+                del nodes[key]
+            for key, value in items:
+                nodes[new if key == old else key] = value
+            for link in links:
+                _rename_in_link(link, old, new)
+            config = (nodes[new] or {}).get("startup-config")
+            if isinstance(config, str) and "\n" in config:
+                renamed = re.sub(rf"(?m)^hostname {re.escape(old)}$", f"hostname {new}", config)
+                if renamed != config:
+                    nodes[new]["startup-config"] = LiteralScalarString(renamed)
+
+    # Removed nodes, and every link naming them
+    gone = [k for k in nodes if k not in set(names)]
+    for k in gone:
+        del nodes[k]
+    for i in reversed(range(len(links))):
+        if _link_nodes(links[i]) & set(gone):
+            del links[i]
+
+    for n in wanted:
+        name, kind = str(n["name"]), str(n.get("kind") or "")
+        node = nodes.get(name)
+        if node is None:
+            node = nodes[name] = CommentedMap()
+        if kind and node.get("kind") != kind:
+            node["kind"] = kind
+        image = str(n.get("image") or "")
+        default_image = ((kinds.get(node.get("kind")) or {}).get("image") or "")
+        if image and image == default_image:
+            node.pop("image", None)  # the kind's image covers it
+        elif image and image != node.get("image"):
+            node["image"] = image
+        if (not node.get("image") and not (kinds.get(node.get("kind")) or {}).get("image")
+                and (default_images or {}).get(node.get("kind"))):
+            node["image"] = default_images[node["kind"]]
+        pos = n.get("pos")
+        if pos:
+            labels = node.get("labels")
+            if labels is None:
+                labels = node["labels"] = CommentedMap()
+            labels[POS_X] = str(round(float(pos[0])))
+            labels[POS_Y] = str(round(float(pos[1])))
+        for key, value in (n.get("config") or {}).items():
+            if key == "startup-config":
+                node[key] = LiteralScalarString(str(value))
+            elif key == "exec":
+                node[key] = [str(c) for c in value]
+            else:
+                raise ValueError(f"Unsupported config key {key}")
+
+    # Plain links: follow the graph
+    want = []
+    for link in graph.get("links") or []:
+        a, b = str(link["a"]), str(link["b"])
+        for ep in (a, b):
+            if ep.partition(":")[0] not in nodes or not ep.partition(":")[2]:
+                raise ValueError(f"Link endpoint {ep} is not node:interface of a node")
+        want.append((a, b))
+    want_keys = {frozenset(w) for w in want}
+    have = set()
+    for i in reversed(range(len(links))):
+        pair = _simple_link(links[i])
+        if pair is None:
+            continue
+        if frozenset(pair) not in want_keys:
+            del links[i]
+        else:
+            have.add(frozenset(pair))
+    for a, b in want:
+        if frozenset((a, b)) in have:
+            continue
+        ends = CommentedSeq([DoubleQuotedScalarString(a), DoubleQuotedScalarString(b)])
+        ends.fa.set_flow_style()
+        links.append(CommentedMap([("endpoints", ends)]))
+        have.add(frozenset((a, b)))
+
+    out = io.StringIO()
+    yaml.dump(data, out)
+    return out.getvalue()

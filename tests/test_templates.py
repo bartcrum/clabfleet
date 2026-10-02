@@ -181,3 +181,70 @@ def test_cli_new_prints_and_lists(capsys):
     for name in (*TEMPLATES, *KINDS, "--spines", "--access"):
         assert name in listing
     assert cli.main(["new"]) == 2
+
+
+# --- configs for a graph drawn in the GUI builder ------------------------------------
+
+from clabfleet.templates import generate_configs, port_index  # noqa: E402
+
+DRAWN_NODES = {"R1": "arista_ceos", "R2": "cisco_iol", "R3": "arista_ceos", "H1": "linux",
+               "Sw": "nokia_srlinux"}
+DRAWN_LINKS = [("R1", "eth1", "R2", "Ethernet0/1"), ("R2", "Ethernet0/2", "R3", "eth1"),
+               ("R1", "eth3", "R3", "eth2"), ("R1", "eth4", "H1", "eth1"),
+               ("R3", "eth5", "Sw", "e1-1")]
+
+
+def test_port_index_inverts_the_namers():
+    assert port_index("cisco_iol", "Ethernet1/2") == 6 and port_index("cisco_iol", "eth1") is None
+    assert port_index("arista_ceos", "eth12") == 12 and port_index("linux", "Ethernet1") is None
+    for kind, spec in KINDS.items():
+        assert all(port_index(kind, spec.interface(i)[0]) == i for i in range(1, 20))
+
+
+def test_drawn_graph_gets_working_bgp_configs(tmp_path):
+    configs, skipped = generate_configs(DRAWN_NODES, DRAWN_LINKS, "bgp", asn=65100)
+    assert skipped == ["Sw"] and set(configs) == {"R1", "R2", "R3", "H1"}
+    r1 = configs["R1"]["startup-config"]
+    # Its own AS, sessions only with routers, the host's subnet announced
+    assert "router bgp 65100" in r1 and "interface Ethernet3\n" in r1 and "interface Ethernet4\n" in r1
+    assert r1.count("remote-as") == 2 and "remote-as 65101" in r1 and "remote-as 65102" in r1
+    h1 = configs["H1"]["exec"]
+    gw = next(c.split()[-1] for c in h1 if c.startswith("ip route replace default via"))
+    host_net = next(line.split()[1] for line in r1.splitlines() if line.startswith(" network ")
+                    and not line.endswith("/32"))
+    assert ipaddress.ip_address(gw) in ipaddress.ip_network(host_net)
+    assert "router bgp 65101" in configs["R2"]["startup-config"]  # IOL
+
+    # Written into a topology with the builder, the routing view finds it all paired
+    from clabfleet.gui.editing import apply_graph
+    from clabfleet.routing import routing_view
+    from clabfleet.topology import load_topology
+    text = "name: drawn\ntopology:\n  nodes:\n" + "".join(
+        f"    {n}: {{kind: {k}, image: img}}\n" for n, k in DRAWN_NODES.items()) + "  links: []\n"
+    graph = {"nodes": [{"name": n, "kind": k, **({"config": configs[n]} if n in configs else {})}
+                       for n, k in DRAWN_NODES.items()],
+             "links": [{"a": f"{a}:{ai}", "b": f"{b}:{bi}"} for a, ai, b, bi in DRAWN_LINKS]}
+    (tmp_path / "drawn.clab.yml").write_text(apply_graph(text, graph))
+    view = routing_view(load_topology(tmp_path / "drawn.clab.yml"))
+    sessions = view["bgp"]["sessions"]
+    assert len(sessions) == 3 and all(s["configured"] == "both" for s in sessions)
+    assert view["problems"] == []
+
+
+def test_drawn_graph_gets_working_ospf_configs(tmp_path):
+    configs, _ = generate_configs(DRAWN_NODES, DRAWN_LINKS, "ospf")
+    r1 = configs["R1"]["startup-config"]
+    assert "router ospf 1" in r1 and r1.count(" area 0.0.0.0") == 4  # loopback + 3 links
+    assert "network 10.255.1.1" not in r1  # hosts sit in the next loopback tier
+    assert configs["H1"]["exec"][0] == "ip addr add 10.255.1.1/32 dev lo"
+
+
+@pytest.mark.parametrize("links, error", [
+    ([("R1", "Ethernet0/1", "R2", "Ethernet0/1")], "R1: Ethernet0/1 is not a arista_ceos data port"),
+    ([("R1", "eth1", "R2", "Ethernet0/1"), ("R1", "eth1", "H1", "eth1")], "used by two links"),
+])
+def test_drawn_graph_errors(links, error):
+    with pytest.raises(TemplateError, match=error):
+        generate_configs(DRAWN_NODES, links, "bgp")
+    with pytest.raises(TemplateError, match="ospf or bgp"):
+        generate_configs(DRAWN_NODES, [], "rip")
