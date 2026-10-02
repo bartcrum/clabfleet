@@ -393,6 +393,7 @@ function yamlDirty() {
 
 // Ask before throwing away unsaved editor changes
 async function confirmDiscard() {
+  if (window.Builder?.dirty() && !(await window.Builder.confirmLeave())) return false;
   return !yamlDirty() || confirmDialog({
     title: "Discard unsaved changes?",
     body: `Your edits to ${S.selected.id} in the YAML tab have not been saved.`,
@@ -527,6 +528,7 @@ function setupEditor() {
 async function selectTopology(id) {
   if (S.selected?.type === "topo" && S.selected.id === id) { reloadDetail(); return; }
   if (!(await confirmDiscard())) return;
+  window.Builder?.reset();
   S.selected = { type: "topo", id };
   S.selectedNode = null;
   try {
@@ -577,6 +579,7 @@ async function reloadDetail(discardEdits) {
 
 async function selectOtherLab(lab) {
   if (!(await confirmDiscard())) return;
+  window.Builder?.reset();
   S.selected = { type: "lab", lab };
   S.detail = null;
   S.live = null;
@@ -639,7 +642,8 @@ function renderLabStats(lab, st, isTopo) {
   const items = [];
   const toNodes = () => showView("nodes");
   if (!st.deployed) {
-    items.push(stat("", isTopo ? `${st.total ?? 0} nodes` : "no containers", "", toNodes));
+    const total = st.total ?? 0;
+    items.push(stat("", isTopo ? `${total} node${total === 1 ? "" : "s"}` : "no containers", "", toNodes));
   } else if (st.booting) {
     items.push(stat("warn", [h("b", {}, `${st.ready}/${st.total}`), " ready"], `${st.booting} booting`, toNodes));
   } else {
@@ -977,11 +981,17 @@ function savePositions() {
   try { localStorage.setItem(`clab-pos:${S.selected.id}`, JSON.stringify(S.positions)); } catch { /* private mode */ }
 }
 
+// The topology the Diagram draws: the builder's draft while editing, else the file
+function diagramDetail() {
+  return window.Builder?.detail() || S.detail;
+}
+
 function graphModel() {
-  const nodes = S.detail.nodes.map((n) => ({ id: n.name, node: n, pseudo: false }));
+  const D = diagramDetail();
+  const nodes = D.nodes.map((n) => ({ id: n.name, node: n, pseudo: false }));
   const links = [];
   let pseudoCount = 0;
-  for (const l of S.detail.links) {
+  for (const l of D.links) {
     const ends = [l.a, l.b].map((e) => {
       if (e.node) return { id: e.node, iface: e.iface };
       const id = `~${e.special}:${pseudoCount++}`;
@@ -1294,6 +1304,7 @@ function renderDiagram(fit) {
       }) : null,
       s("title", {}, `${nd.id} (${nd.node.kind}) — ${nodeStateText(rt)}` +
         (usage ? `\nCPU ${fmtCpu(res.cpu)} · memory ${fmtBytes(res.mem)}` : "")));
+    window.Builder?.decorateNode(el, nd.id);
     g.append(el);
   }
 
@@ -1394,7 +1405,7 @@ function nodeClicked(id) {
   const isDouble = lastClick.id === id && now - lastClick.t < 400;
   lastClick = { id, t: isDouble ? 0 : now };
   selectNode(id);
-  if (!isDouble) return;
+  if (!isDouble || window.Builder?.editing) return;
   const node = S.detail.nodes.find((n) => n.name === id);
   const rt = nodeRuntime(S.detail.name, id);
   if (rt?.state === "running" && node?.modes.length && canOperate()) openTerminal(S.detail.name, id, node.modes[0]);
@@ -1409,6 +1420,7 @@ function selectNode(id) {
 }
 
 function renderNodeCard() {
+  if (window.Builder?.renderInspector()) { syncInspector(); return; }  // editing: its forms
   renderLinkCard();  // the link card refreshes at the same points
   const card = $("#node-card");
   const node = S.detail?.nodes?.find((n) => n.name === S.selectedNode);
@@ -1496,7 +1508,7 @@ let linkCardKey = null;
 function selectedLink() {
   const sel = S.selectedLink;
   if (!sel || S.selected?.type !== "topo" || S.selected.id !== sel.topo) return null;
-  return S.detail?.links?.find((l) => l.id === sel.id) || null;
+  return diagramDetail()?.links?.find((l) => l.id === sel.id) || null;
 }
 
 function selectLink(id) {

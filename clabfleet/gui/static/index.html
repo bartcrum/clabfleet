@@ -26,7 +26,10 @@
   <div class="layout">
     <aside class="sidebar">
       <section>
-        <h2>Topologies</h2>
+        <div class="side-head">
+          <h2>Topologies</h2>
+          <button id="new-lab" class="btn ghost small operator-only" title="Draw a new lab, or start from a template">+ New lab</button>
+        </div>
         <ul id="topo-list" class="lab-list"></ul>
       </section>
       <section id="others-section" hidden>
@@ -79,7 +82,22 @@
           <div class="views">
             <section id="view-diagram" class="view">
               <svg id="diagram" class="diagram" aria-label="Topology diagram"></svg>
+              <!-- Builder: palette and edit bar, shown while editing -->
+              <div id="builder-bar" class="builder-bar" hidden>
+                <span id="builder-status" class="small"></span>
+                <span class="grow"></span>
+                <button id="builder-preview" class="btn small" title="Show the YAML the drawing would write">Preview YAML</button>
+                <button id="builder-discard" class="btn small">Discard</button>
+                <button id="builder-save" class="btn small primary">Save</button>
+              </div>
+              <div id="builder-palette" class="builder-palette" hidden>
+                <div class="palette-title">Drag onto the canvas</div>
+                <div id="palette-items"></div>
+                <p class="muted palette-hint">Drag from a node's ● handle to another node to link them.
+                  Click to edit, Delete to remove.</p>
+              </div>
               <div class="diagram-tools">
+                <button id="edit-topo" class="btn ghost small operator-only" title="Add, link and remove nodes by drawing">Edit</button>
                 <button id="save-layout" class="btn ghost small operator-only" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
                 <button id="relayout" class="btn ghost small" title="Discard manual positions">Auto layout</button>
                 <button id="fit" class="btn ghost small">Fit</button>
@@ -229,6 +247,36 @@
     </div>
   </dialog>
 
+  <!-- New lab: blank or from a template -->
+  <dialog id="newlab-dlg" class="confirm" aria-labelledby="newlab-title">
+    <form id="newlab-form" method="dialog" class="newlab">
+      <h2 id="newlab-title">New lab</h2>
+      <label>Lab name <input id="newlab-name" class="sans" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]*"
+             autocomplete="off" spellcheck="false" placeholder="my-lab"></label>
+      <label>File <input id="newlab-file" class="mono" required autocomplete="off" spellcheck="false"
+             placeholder="my-lab.clab.yml"></label>
+      <label>Start from <select id="newlab-template"></select></label>
+      <div id="newlab-params" class="newlab-params"></div>
+      <label>Kind <select id="newlab-kind"></select></label>
+      <p id="newlab-hint" class="muted small"></p>
+      <p id="newlab-error" class="login-error small" role="alert" hidden></p>
+      <div class="confirm-actions">
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button id="newlab-ok" class="btn primary" value="ok">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Builder: the YAML a drawing would write -->
+  <dialog id="preview-dlg" class="confirm preview-dlg" aria-labelledby="preview-title">
+    <form method="dialog">
+      <h2 id="preview-title">YAML preview</h2>
+      <p id="preview-summary" class="small"></p>
+      <pre id="preview-yaml" class="preview-yaml mono"></pre>
+      <div class="confirm-actions"><button class="btn" value="close">Close</button></div>
+    </form>
+  </dialog>
+
   <dialog id="confirm" class="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-body">
     <form method="dialog">
       <h2 id="confirm-title"></h2>
@@ -250,5 +298,6 @@
   <script src="/static/vendor/addon-fit.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/routing.js"></script>
+  <script src="/static/builder.js"></script>
 </body>
 </html>
