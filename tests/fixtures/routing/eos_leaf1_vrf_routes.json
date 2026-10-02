@@ -1,0 +1,65 @@
+{
+ "vrfs": {
+  "TENANT": {
+   "routes": {
+    "10.10.10.0/24": {
+     "routeType": "connected",
+     "vias": [
+      {
+       "interface": "Vlan10"
+      }
+     ]
+    },
+    "10.20.20.12/32": {
+     "routeType": "eBGP",
+     "vias": [
+      {
+       "nexthopAddr": "",
+       "vtepAddr": "10.255.2.2",
+       "vni": 50001,
+       "routerMac": "00:1c:73:6a:a4:94",
+       "localInterface": "Vxlan1"
+      }
+     ]
+    },
+    "10.20.20.0/24": {
+     "routeType": "eBGP",
+     "vias": [
+      {
+       "vtepAddr": "10.255.2.4",
+       "vni": 50001,
+       "routerMac": "00:1c:73:87:29:26",
+       "localInterface": "Vxlan1"
+      },
+      {
+       "vtepAddr": "10.255.2.2",
+       "vni": 50001,
+       "routerMac": "00:1c:73:6a:a4:94",
+       "localInterface": "Vxlan1"
+      }
+     ]
+    }
+   }
+  },
+  "default": {
+   "routes": {
+    "10.0.1.0/31": {
+     "routeType": "connected",
+     "vias": [
+      {
+       "interface": "Ethernet1"
+      }
+     ]
+    },
+    "10.0.2.0/31": {
+     "routeType": "connected",
+     "vias": [
+      {
+       "interface": "Ethernet2"
+      }
+     ]
+    }
+   }
+  }
+ }
+}

@@ -12,6 +12,7 @@ from clabfleet.routing.parse import parse_config
 from clabfleet.topology import load_topology, topology_from_dict
 
 TOPOLOGIES = Path(__file__).resolve().parent.parent / "topologies"
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "routing"
 
 
 def _topo(nodes: dict, links: list, kind: str = "arista_ceos"):
@@ -119,11 +120,28 @@ def test_triangle_ospf_adjacencies_follow_the_links():
 
 
 def test_spine_leaf_bgp_sessions_are_paired():
-    view = routing_view(load_topology(TOPOLOGIES / "spine_leaf.clab.yml"))
+    view = routing_view(load_topology(FIXTURES / "spine_leaf_underlay.clab.yml"))
     sessions = view["bgp"]["sessions"]
     assert len(sessions) == 8
     assert all(s["configured"] == "both" and s["type"] == "ebgp" and s["link"] for s in sessions)
     assert view["problems"] == []
+
+
+def test_spine_leaf_with_its_evpn_layer():
+    # The example topology: the same underlay, with EVPN on top (leaves share an AS)
+    view = routing_view(load_topology(TOPOLOGIES / "spine_leaf.clab.yml"))
+    assert view["protocols"] == ["bgp", "evpn"] and view["problems"] == []
+    sessions = view["bgp"]["sessions"]
+    underlay = [s for s in sessions if s["families"] == ["ipv4"]]
+    overlay = [s for s in sessions if s["families"] == ["evpn"]]
+    assert len(underlay) == 8 and all(s["link"] for s in underlay)
+    assert len(overlay) == 8 and all(s["multihop"] for s in overlay)
+    assert all(s["configured"] == "both" for s in sessions)
+    evpn = view["evpn"]
+    vnis = {v["vni"]: v["members"] for v in evpn["vnis"]}
+    assert vnis == {10010: ["Leaf-1", "Leaf-3"], 10020: ["Leaf-2", "Leaf-4"],
+                    50001: ["Leaf-1", "Leaf-2", "Leaf-3", "Leaf-4"]}
+    assert len(evpn["tunnels"]) == 6 and len(evpn["sessions"]) == 8
 
 
 def test_evpn_fabric_overlay():

@@ -26,7 +26,7 @@ TOPOLOGIES = Path(__file__).resolve().parent.parent / "topologies"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "routing"
 NOW = 1790910000.0
 
-# Recorded from a running cEOS 4.35 spine (spine_leaf.clab.yml)
+# Recorded from a running cEOS 4.35 spine (fixtures/routing/spine_leaf_underlay.clab.yml)
 EOS_SPINE1 = (FIXTURES / "eos_spine1.txt").read_text()
 
 EOS_OSPF = json.dumps({"vrfs": {"default": {"instList": {"1": {"ospfNeighborEntries": [
@@ -116,7 +116,8 @@ def test_ios_durations():
 
 def test_wanted_topics_follow_the_configs():
     evpn = routing_view(load_topology(TOPOLOGIES / "evpn_fabric.clab.yml"))
-    assert wanted_topics(evpn, "Leaf-1") == ["bgp", "evpn", "vxlan"]
+    # Leaf-1 has an L3 VNI: its VRF routes name the VTEPs behind it
+    assert wanted_topics(evpn, "Leaf-1") == ["bgp", "evpn", "vxlan", "vrf_vteps"]
     assert wanted_topics(evpn, "Spine-1") == ["bgp", "evpn"]
     assert wanted_topics(evpn, "Host-1") == []
     tri = routing_view(load_topology(TOPOLOGIES / "three_router_triangle.clab.yml"))
@@ -185,7 +186,7 @@ def _bgp_peer(ip, asn, state="Established", pfx=3):
 
 
 def test_overlay_bgp_states_extras_and_drift():
-    view = routing_view(load_topology(TOPOLOGIES / "spine_leaf.clab.yml"))
+    view = routing_view(load_topology(FIXTURES / "spine_leaf_underlay.clab.yml"))
     sessions = {(s["a"]["node"], s["b"]["node"]): s for s in view["bgp"]["sessions"]}
     s1l1, s1l2, s2l1 = (sessions[("Spine-1", "Leaf-1")], sessions[("Spine-1", "Leaf-2")],
                         sessions[("Spine-2", "Leaf-1")])
@@ -218,7 +219,7 @@ def test_overlay_bgp_states_extras_and_drift():
 
 
 def test_overlay_flags_a_running_neighbor_missing_from_the_startup_config():
-    text = (TOPOLOGIES / "spine_leaf.clab.yml").read_text().replace(
+    text = (FIXTURES / "spine_leaf_underlay.clab.yml").read_text().replace(
         "         neighbor 10.0.2.0 peer group SPINES\n         network 10.255.1.1/32",
         "         network 10.255.1.1/32", 1)
     path = TOPOLOGIES.parent / "tests" / "fixtures" / "routing"
@@ -266,10 +267,38 @@ def test_overlay_vxlan_tunnels():
     assert tunnels[("Leaf-3", "Leaf-4")]["state"] == "down"   # Leaf-3 read, has not learned Leaf-4
 
 
+def test_eos_vrf_routes_name_the_l3_vni_vteps():
+    # Recorded from Leaf-1 of topologies/spine_leaf.clab.yml (cEOS 4.35):
+    # Leaf-2 and Leaf-4 share only the L3 VNI with it, so `show vxlan vtep`
+    # does not list them, but routes in VRF TENANT go "via VTEP" to them
+    text = (FIXTURES / "eos_leaf1_vrf_routes.json").read_text()
+    st = parse_outputs("eos", {"vrf_vteps": text}, NOW)
+    assert st.collected == ["vrf_vteps"] and st.vrf_vteps == {"10.255.2.2": True, "10.255.2.4": True}
+    assert "show ip route vrf all | json" in eos_script(["vrf_vteps"])
+
+    view = routing_view(load_topology(TOPOLOGIES / "spine_leaf.clab.yml"))
+    states = {"Leaf-1": NodeState("eos", ["vxlan", "vrf_vteps"], vxlan={"10.255.2.3": True},
+                                  vrf_vteps=st.vrf_vteps),
+              "Leaf-2": NodeState("eos", ["vxlan", "vrf_vteps"], vxlan={"10.255.2.4": True},
+                                  vrf_vteps={"10.255.2.1": True})}
+    ov = overlay(view, states, {f"Leaf-{i}": True for i in range(1, 5)}, NOW)
+    tunnels = {(t["a"]["node"], t["b"]["node"]): ov["vxlan"][t["id"]] for t in view["evpn"]["tunnels"]}
+    assert tunnels[("Leaf-1", "Leaf-2")]["state"] == "up"      # L3 VNI only
+    assert tunnels[("Leaf-1", "Leaf-3")]["a"]["state"] == "up"  # L2 VNI: from show vxlan vtep
+
+
+def test_ios_skips_eos_only_topics():
+    runner = FakeRunner()
+    asked = []
+    st = collect_node("ios", ["vxlan", "vrf_vteps"], {"container": "c"}, runner, False,
+                      lambda cmd: (asked.append(cmd), (0, IOS_NVE))[1], NOW)
+    assert asked == ["show nve peers"] and "vrf_vteps" not in st.errors
+
+
 # --- CLI and GUI -------------------------------------------------------------------
 
 def test_cli_routing_live(monkeypatch, capsys):
-    view_path = TOPOLOGIES / "spine_leaf.clab.yml"
+    view_path = FIXTURES / "spine_leaf_underlay.clab.yml"
     view = routing_view(load_topology(view_path))
     first = view["bgp"]["sessions"][0]
 
@@ -299,7 +328,7 @@ def test_gui_routing_live_endpoint(tmp_path, monkeypatch):
     from clabfleet.gui import server
     from clabfleet.gui.state import Workspace
 
-    (tmp_path / "sl.clab.yml").write_text((TOPOLOGIES / "spine_leaf.clab.yml").read_text())
+    (tmp_path / "sl.clab.yml").write_text((FIXTURES / "spine_leaf_underlay.clab.yml").read_text())
     ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
     monkeypatch.setattr(Workspace, "runtime", lambda self, *a, **k: [])
     calls = []
@@ -332,7 +361,7 @@ def test_workspace_collects_protocols_from_running_containers(tmp_path, monkeypa
     from clabfleet.cluster import ClusterConfig, HostInfo
     from clabfleet.gui.state import HostState, Workspace
 
-    (tmp_path / "sl.clab.yml").write_text((TOPOLOGIES / "spine_leaf.clab.yml").read_text())
+    (tmp_path / "sl.clab.yml").write_text((FIXTURES / "spine_leaf_underlay.clab.yml").read_text())
     ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
     containers = [{"lab": "spine-leaf-fabric", "node": "Spine-1", "kind": "arista_ceos",
                    "state": "running", "container": "clab-spine-leaf-fabric-Spine-1",

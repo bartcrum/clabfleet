@@ -34,7 +34,7 @@ from ..topology import KIND_ALIASES
 
 logger = logging.getLogger(__name__)
 
-TOPICS = ("ospf", "bgp", "evpn", "vxlan")
+TOPICS = ("ospf", "bgp", "evpn", "vxlan", "vrf_vteps")
 COLLECT_TIMEOUT = 20  # seconds per node
 
 EOS_KINDS = {"arista_ceos", "ceos"}
@@ -45,6 +45,9 @@ EOS_COMMANDS = {
     "bgp": "show ip bgp summary vrf all",
     "evpn": "show bgp evpn summary",
     "vxlan": "show vxlan vtep",
+    # EOS lists only VTEPs it shares an L2 VNI with; peers reached only over
+    # an L3 VNI show up as next hops ("via VTEP ...") of the VRFs' routes
+    "vrf_vteps": "show ip route vrf all",
 }
 IOS_COMMANDS = {
     "ospf": "show ip ospf neighbor",
@@ -80,8 +83,11 @@ def wanted_topics(view: dict, node: str) -> list[str]:
             topics.append("bgp")
         if "evpn" in families:
             topics.append("evpn")
-    if node in ((view.get("evpn") or {}).get("vteps") or {}):
+    vtep = ((view.get("evpn") or {}).get("vteps") or {}).get(node)
+    if vtep:
         topics.append("vxlan")
+        if vtep.get("l3_vnis"):
+            topics.append("vrf_vteps")  # EOS only; IOS's NVE peers include them
     return topics
 
 
@@ -118,6 +124,7 @@ class NodeState:
     bgp: dict[str, dict] = field(default_factory=dict)     # peer address -> session
     evpn: dict[str, dict] = field(default_factory=dict)
     vxlan: dict[str, bool] = field(default_factory=dict)   # remote VTEP -> up
+    vrf_vteps: dict[str, bool] = field(default_factory=dict)  # VTEPs next hop of VRF routes
 
     def view(self) -> dict:
         return {"family": self.family, "collected": self.collected, "errors": self.errors}
@@ -152,6 +159,7 @@ def collect_node(fam: str, topics: list[str], container: dict, runner, host_sudo
             return NodeState(fam, errors={t: msg for t in topics})
         outputs = {k: v for k, v in split_markers(res.stdout).items() if k in topics}
     else:
+        topics = [t for t in topics if t in IOS_COMMANDS]
         for topic in topics:
             try:
                 code, out = ssh(IOS_COMMANDS[topic])
@@ -294,7 +302,29 @@ def _eos_vxlan(text: str, now: float) -> dict[str, bool]:
     return found
 
 
-EOS_PARSERS = {"ospf": _eos_ospf, "bgp": _eos_bgp, "evpn": _eos_bgp, "vxlan": _eos_vxlan}
+def _eos_vrf_vteps(text: str, now: float) -> dict[str, bool]:
+    """VTEPs that VRF routes point at (``vtepAddr`` of their next hops) in
+    ``show ip route vrf all``: the far ends of L3 VNI tunnels."""
+    data = _json(text)
+    found: dict[str, bool] = {}
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            addr = obj.get("vtepAddr")
+            if isinstance(addr, str) and _ipv4(addr):
+                found[addr] = True
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(data)
+    return found
+
+
+EOS_PARSERS = {"ospf": _eos_ospf, "bgp": _eos_bgp, "evpn": _eos_bgp, "vxlan": _eos_vxlan,
+               "vrf_vteps": _eos_vrf_vteps}
 
 
 # --- Parsing: Cisco IOS (text) ------------------------------------------------------
@@ -517,8 +547,8 @@ def overlay(view: dict, states: dict[str, NodeState], running: dict[str, bool],
             st, why = _side(states, me["node"], "vxlan", running)
             if st is None:
                 sides.append({"state": "unknown", "detail": why})
-            elif other["ip"] in st.vxlan:
-                up = st.vxlan[other["ip"]]
+            elif other["ip"] in st.vxlan or other["ip"] in st.vrf_vteps:
+                up = st.vxlan.get(other["ip"], st.vrf_vteps.get(other["ip"]))
                 sides.append({"state": "up" if up else "down",
                               "detail": "" if up else f"{other['ip']} down"})
             else:
