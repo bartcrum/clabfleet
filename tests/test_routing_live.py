@@ -26,7 +26,7 @@ TOPOLOGIES = Path(__file__).resolve().parent.parent / "topologies"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "routing"
 NOW = 1790910000.0
 
-# Recorded from a running cEOS 4.35 spine (spine_leaf.clab.yml)
+# Recorded from a running cEOS 4.35 spine (fixtures/routing/spine_leaf_underlay.clab.yml)
 EOS_SPINE1 = (FIXTURES / "eos_spine1.txt").read_text()
 
 EOS_OSPF = json.dumps({"vrfs": {"default": {"instList": {"1": {"ospfNeighborEntries": [
@@ -185,7 +185,7 @@ def _bgp_peer(ip, asn, state="Established", pfx=3):
 
 
 def test_overlay_bgp_states_extras_and_drift():
-    view = routing_view(load_topology(TOPOLOGIES / "spine_leaf.clab.yml"))
+    view = routing_view(load_topology(FIXTURES / "spine_leaf_underlay.clab.yml"))
     sessions = {(s["a"]["node"], s["b"]["node"]): s for s in view["bgp"]["sessions"]}
     s1l1, s1l2, s2l1 = (sessions[("Spine-1", "Leaf-1")], sessions[("Spine-1", "Leaf-2")],
                         sessions[("Spine-2", "Leaf-1")])
@@ -218,7 +218,7 @@ def test_overlay_bgp_states_extras_and_drift():
 
 
 def test_overlay_flags_a_running_neighbor_missing_from_the_startup_config():
-    text = (TOPOLOGIES / "spine_leaf.clab.yml").read_text().replace(
+    text = (FIXTURES / "spine_leaf_underlay.clab.yml").read_text().replace(
         "         neighbor 10.0.2.0 peer group SPINES\n         network 10.255.1.1/32",
         "         network 10.255.1.1/32", 1)
     path = TOPOLOGIES.parent / "tests" / "fixtures" / "routing"
@@ -269,7 +269,7 @@ def test_overlay_vxlan_tunnels():
 # --- CLI and GUI -------------------------------------------------------------------
 
 def test_cli_routing_live(monkeypatch, capsys):
-    view_path = TOPOLOGIES / "spine_leaf.clab.yml"
+    view_path = FIXTURES / "spine_leaf_underlay.clab.yml"
     view = routing_view(load_topology(view_path))
     first = view["bgp"]["sessions"][0]
 
@@ -299,7 +299,7 @@ def test_gui_routing_live_endpoint(tmp_path, monkeypatch):
     from clabfleet.gui import server
     from clabfleet.gui.state import Workspace
 
-    (tmp_path / "sl.clab.yml").write_text((TOPOLOGIES / "spine_leaf.clab.yml").read_text())
+    (tmp_path / "sl.clab.yml").write_text((FIXTURES / "spine_leaf_underlay.clab.yml").read_text())
     ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
     monkeypatch.setattr(Workspace, "runtime", lambda self, *a, **k: [])
     calls = []
@@ -332,7 +332,7 @@ def test_workspace_collects_protocols_from_running_containers(tmp_path, monkeypa
     from clabfleet.cluster import ClusterConfig, HostInfo
     from clabfleet.gui.state import HostState, Workspace
 
-    (tmp_path / "sl.clab.yml").write_text((TOPOLOGIES / "spine_leaf.clab.yml").read_text())
+    (tmp_path / "sl.clab.yml").write_text((FIXTURES / "spine_leaf_underlay.clab.yml").read_text())
     ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
     containers = [{"lab": "spine-leaf-fabric", "node": "Spine-1", "kind": "arista_ceos",
                    "state": "running", "container": "clab-spine-leaf-fabric-Spine-1",

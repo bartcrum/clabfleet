@@ -1,0 +1,241 @@
+# Test fixture: the eBGP-only spine-leaf fabric (2 spines + 4 leaves, cEOS).
+# topologies/spine_leaf.clab.yml was this before it gained an EVPN layer; the
+# recorded EOS output in these tests comes from this version.
+# cEOS images are not public: download cEOS-lab from arista.com and import it:
+#   docker import cEOS64-lab-4.35.6M.tar.xz ceos:4.35.6M
+#
+# Link endpoints use eth1, eth2, ... — EOS shows them as Ethernet1, Ethernet2.
+# Each config creates the admin/admin login, which a custom startup-config
+# would otherwise drop (needed for SSH).
+#
+# Deploy:
+#   clabfleet deploy topologies/spine_leaf.clab.yml
+
+name: spine-leaf-fabric
+
+topology:
+  kinds:
+    arista_ceos:
+      image: ceos:4.35.6M
+
+  nodes:
+    # -- Spines --
+    Spine-1:
+      kind: arista_ceos
+      startup-config: |
+        hostname Spine-1
+        !
+        username admin privilege 15 secret admin
+        !
+        ip routing
+        !
+        interface Loopback0
+         ip address 10.255.0.1/32
+        !
+        interface Ethernet1
+         description to-Leaf-1
+         no switchport
+         ip address 10.0.1.0/31
+        !
+        interface Ethernet2
+         description to-Leaf-2
+         no switchport
+         ip address 10.0.1.2/31
+        !
+        interface Ethernet3
+         description to-Leaf-3
+         no switchport
+         ip address 10.0.1.4/31
+        !
+        interface Ethernet4
+         description to-Leaf-4
+         no switchport
+         ip address 10.0.1.6/31
+        !
+        router bgp 65000
+         router-id 10.255.0.1
+         network 10.255.0.1/32
+         neighbor LEAVES peer group
+         neighbor LEAVES remote-as 65001
+         neighbor 10.0.1.1 peer group LEAVES
+         neighbor 10.0.1.3 peer group LEAVES
+         neighbor 10.0.1.5 peer group LEAVES
+         neighbor 10.0.1.7 peer group LEAVES
+
+    Spine-2:
+      kind: arista_ceos
+      startup-config: |
+        hostname Spine-2
+        !
+        username admin privilege 15 secret admin
+        !
+        ip routing
+        !
+        interface Loopback0
+         ip address 10.255.0.2/32
+        !
+        interface Ethernet1
+         description to-Leaf-1
+         no switchport
+         ip address 10.0.2.0/31
+        !
+        interface Ethernet2
+         description to-Leaf-2
+         no switchport
+         ip address 10.0.2.2/31
+        !
+        interface Ethernet3
+         description to-Leaf-3
+         no switchport
+         ip address 10.0.2.4/31
+        !
+        interface Ethernet4
+         description to-Leaf-4
+         no switchport
+         ip address 10.0.2.6/31
+        !
+        router bgp 65000
+         router-id 10.255.0.2
+         network 10.255.0.2/32
+         neighbor LEAVES peer group
+         neighbor LEAVES remote-as 65001
+         neighbor 10.0.2.1 peer group LEAVES
+         neighbor 10.0.2.3 peer group LEAVES
+         neighbor 10.0.2.5 peer group LEAVES
+         neighbor 10.0.2.7 peer group LEAVES
+
+    # -- Leaves --
+    Leaf-1:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-1
+        !
+        username admin privilege 15 secret admin
+        !
+        ip routing
+        !
+        interface Loopback0
+         ip address 10.255.1.1/32
+        !
+        interface Ethernet1
+         description to-Spine-1
+         no switchport
+         ip address 10.0.1.1/31
+        !
+        interface Ethernet2
+         description to-Spine-2
+         no switchport
+         ip address 10.0.2.1/31
+        !
+        router bgp 65001
+         router-id 10.255.1.1
+         neighbor SPINES peer group
+         neighbor SPINES remote-as 65000
+         neighbor SPINES allowas-in 1
+         neighbor 10.0.1.0 peer group SPINES
+         neighbor 10.0.2.0 peer group SPINES
+         network 10.255.1.1/32
+
+    Leaf-2:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-2
+        !
+        username admin privilege 15 secret admin
+        !
+        ip routing
+        !
+        interface Loopback0
+         ip address 10.255.1.2/32
+        !
+        interface Ethernet1
+         description to-Spine-1
+         no switchport
+         ip address 10.0.1.3/31
+        !
+        interface Ethernet2
+         description to-Spine-2
+         no switchport
+         ip address 10.0.2.3/31
+        !
+        router bgp 65001
+         router-id 10.255.1.2
+         neighbor SPINES peer group
+         neighbor SPINES remote-as 65000
+         neighbor SPINES allowas-in 1
+         neighbor 10.0.1.2 peer group SPINES
+         neighbor 10.0.2.2 peer group SPINES
+         network 10.255.1.2/32
+
+    Leaf-3:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-3
+        !
+        username admin privilege 15 secret admin
+        !
+        ip routing
+        !
+        interface Loopback0
+         ip address 10.255.1.3/32
+        !
+        interface Ethernet1
+         description to-Spine-1
+         no switchport
+         ip address 10.0.1.5/31
+        !
+        interface Ethernet2
+         description to-Spine-2
+         no switchport
+         ip address 10.0.2.5/31
+        !
+        router bgp 65001
+         router-id 10.255.1.3
+         neighbor SPINES peer group
+         neighbor SPINES remote-as 65000
+         neighbor SPINES allowas-in 1
+         neighbor 10.0.1.4 peer group SPINES
+         neighbor 10.0.2.4 peer group SPINES
+         network 10.255.1.3/32
+
+    Leaf-4:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-4
+        !
+        username admin privilege 15 secret admin
+        !
+        ip routing
+        !
+        interface Loopback0
+         ip address 10.255.1.4/32
+        !
+        interface Ethernet1
+         description to-Spine-1
+         no switchport
+         ip address 10.0.1.7/31
+        !
+        interface Ethernet2
+         description to-Spine-2
+         no switchport
+         ip address 10.0.2.7/31
+        !
+        router bgp 65001
+         router-id 10.255.1.4
+         neighbor SPINES peer group
+         neighbor SPINES remote-as 65000
+         neighbor SPINES allowas-in 1
+         neighbor 10.0.1.6 peer group SPINES
+         neighbor 10.0.2.6 peer group SPINES
+         network 10.255.1.4/32
+
+  # Spine-to-leaf links
+  links:
+    - endpoints: ["Spine-1:eth1", "Leaf-1:eth1"]
+    - endpoints: ["Spine-1:eth2", "Leaf-2:eth1"]
+    - endpoints: ["Spine-1:eth3", "Leaf-3:eth1"]
+    - endpoints: ["Spine-1:eth4", "Leaf-4:eth1"]
+    - endpoints: ["Spine-2:eth1", "Leaf-1:eth2"]
+    - endpoints: ["Spine-2:eth2", "Leaf-2:eth2"]
+    - endpoints: ["Spine-2:eth3", "Leaf-3:eth2"]
+    - endpoints: ["Spine-2:eth4", "Leaf-4:eth2"]

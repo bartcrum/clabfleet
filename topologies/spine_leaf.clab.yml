@@ -1,5 +1,20 @@
-# Spine-Leaf data center fabric
-# 2 spines + 4 leaves using Arista cEOS.
+# Spine-Leaf data center fabric with an EVPN / VXLAN layer
+# 2 spines + 4 leaves on Arista cEOS, and 4 Linux hosts.
+#
+# Underlay (as before): eBGP on the point-to-point links. Spines are
+# AS 65000, the leaves share AS 65001 (allowas-in 1 lets them accept each
+# other's routes through the spines). Each node advertises Loopback0.
+#
+# EVPN layer on top: BGP EVPN from each leaf's Loopback0 to both spines'
+# Loopback0 (the spines are route servers and keep the next hop). Each
+# leaf is a VTEP sourcing VXLAN from Loopback1, also in the underlay.
+#
+#   VLAN 10 -> VNI 10010 on Leaf-1 and Leaf-3   (Host-1, Host-3: 10.10.10.0/24)
+#   VLAN 20 -> VNI 10020 on Leaf-2 and Leaf-4   (Host-2, Host-4: 10.20.20.0/24)
+#   VRF TENANT -> L3 VNI 50001 on every leaf    (symmetric IRB, anycast gateway .1)
+#
+# So Host-1 reaches Host-3 over VNI 10010 (bridged), and Host-2 over the
+# L3 VNI 50001 (routed in VRF TENANT).
 #
 # cEOS images are not public: download cEOS-lab from arista.com and import it:
 #   docker import cEOS64-lab-4.35.6M.tar.xz ceos:4.35.6M
@@ -10,6 +25,12 @@
 #
 # Deploy:
 #   clabfleet deploy topologies/spine_leaf.clab.yml
+#
+# Try it:
+#   docker exec clab-spine-leaf-fabric-Host-1 ping -c3 10.10.10.13   # bridged, VNI 10010
+#   docker exec clab-spine-leaf-fabric-Host-1 ping -c3 10.20.20.12   # routed, VNI 50001
+# The GUI's Routing tab shows BGP (underlay and EVPN sessions) and EVPN
+# (sessions and VXLAN tunnels per VNI); Live mode shows their state.
 
 name: spine-leaf-fabric
 
@@ -17,9 +38,11 @@ topology:
   kinds:
     arista_ceos:
       image: ceos:4.35.6M
+    linux:
+      image: alpine:3.20
 
   nodes:
-    # -- Spines --
+    # -- Spines (underlay + EVPN route servers) --
     Spine-1:
       kind: arista_ceos
       startup-config: |
@@ -27,40 +50,60 @@ topology:
         !
         username admin privilege 15 secret admin
         !
+        service routing protocols model multi-agent
+        !
         ip routing
         !
         interface Loopback0
-         ip address 10.255.0.1/32
+           ip address 10.255.0.1/32
         !
         interface Ethernet1
-         description to-Leaf-1
-         no switchport
-         ip address 10.0.1.0/31
+           description to-Leaf-1
+           no switchport
+           ip address 10.0.1.0/31
         !
         interface Ethernet2
-         description to-Leaf-2
-         no switchport
-         ip address 10.0.1.2/31
+           description to-Leaf-2
+           no switchport
+           ip address 10.0.1.2/31
         !
         interface Ethernet3
-         description to-Leaf-3
-         no switchport
-         ip address 10.0.1.4/31
+           description to-Leaf-3
+           no switchport
+           ip address 10.0.1.4/31
         !
         interface Ethernet4
-         description to-Leaf-4
-         no switchport
-         ip address 10.0.1.6/31
+           description to-Leaf-4
+           no switchport
+           ip address 10.0.1.6/31
         !
         router bgp 65000
-         router-id 10.255.0.1
-         network 10.255.0.1/32
-         neighbor LEAVES peer group
-         neighbor LEAVES remote-as 65001
-         neighbor 10.0.1.1 peer group LEAVES
-         neighbor 10.0.1.3 peer group LEAVES
-         neighbor 10.0.1.5 peer group LEAVES
-         neighbor 10.0.1.7 peer group LEAVES
+           router-id 10.255.0.1
+           network 10.255.0.1/32
+           ! -- underlay: eBGP to each leaf on the point-to-point links --
+           neighbor LEAVES peer group
+           neighbor LEAVES remote-as 65001
+           neighbor 10.0.1.1 peer group LEAVES
+           neighbor 10.0.1.3 peer group LEAVES
+           neighbor 10.0.1.5 peer group LEAVES
+           neighbor 10.0.1.7 peer group LEAVES
+           ! -- EVPN layer: route server for the leaves' loopbacks --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65001
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN next-hop-unchanged
+           neighbor EVPN send-community extended
+           neighbor 10.255.1.1 peer group EVPN
+           neighbor 10.255.1.2 peer group EVPN
+           neighbor 10.255.1.3 peer group EVPN
+           neighbor 10.255.1.4 peer group EVPN
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
 
     Spine-2:
       kind: arista_ceos
@@ -69,42 +112,62 @@ topology:
         !
         username admin privilege 15 secret admin
         !
+        service routing protocols model multi-agent
+        !
         ip routing
         !
         interface Loopback0
-         ip address 10.255.0.2/32
+           ip address 10.255.0.2/32
         !
         interface Ethernet1
-         description to-Leaf-1
-         no switchport
-         ip address 10.0.2.0/31
+           description to-Leaf-1
+           no switchport
+           ip address 10.0.2.0/31
         !
         interface Ethernet2
-         description to-Leaf-2
-         no switchport
-         ip address 10.0.2.2/31
+           description to-Leaf-2
+           no switchport
+           ip address 10.0.2.2/31
         !
         interface Ethernet3
-         description to-Leaf-3
-         no switchport
-         ip address 10.0.2.4/31
+           description to-Leaf-3
+           no switchport
+           ip address 10.0.2.4/31
         !
         interface Ethernet4
-         description to-Leaf-4
-         no switchport
-         ip address 10.0.2.6/31
+           description to-Leaf-4
+           no switchport
+           ip address 10.0.2.6/31
         !
         router bgp 65000
-         router-id 10.255.0.2
-         network 10.255.0.2/32
-         neighbor LEAVES peer group
-         neighbor LEAVES remote-as 65001
-         neighbor 10.0.2.1 peer group LEAVES
-         neighbor 10.0.2.3 peer group LEAVES
-         neighbor 10.0.2.5 peer group LEAVES
-         neighbor 10.0.2.7 peer group LEAVES
+           router-id 10.255.0.2
+           network 10.255.0.2/32
+           ! -- underlay: eBGP to each leaf on the point-to-point links --
+           neighbor LEAVES peer group
+           neighbor LEAVES remote-as 65001
+           neighbor 10.0.2.1 peer group LEAVES
+           neighbor 10.0.2.3 peer group LEAVES
+           neighbor 10.0.2.5 peer group LEAVES
+           neighbor 10.0.2.7 peer group LEAVES
+           ! -- EVPN layer: route server for the leaves' loopbacks --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65001
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN next-hop-unchanged
+           neighbor EVPN send-community extended
+           neighbor 10.255.1.1 peer group EVPN
+           neighbor 10.255.1.2 peer group EVPN
+           neighbor 10.255.1.3 peer group EVPN
+           neighbor 10.255.1.4 peer group EVPN
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
 
-    # -- Leaves --
+    # -- Leaves (underlay + VTEPs) --
     Leaf-1:
       kind: arista_ceos
       startup-config: |
@@ -112,29 +175,88 @@ topology:
         !
         username admin privilege 15 secret admin
         !
+        service routing protocols model multi-agent
+        !
+        vlan 10
+           name Tenant-10
+        !
+        vrf instance TENANT
+        !
         ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
         !
         interface Loopback0
-         ip address 10.255.1.1/32
+           description router-id / EVPN peering
+           ip address 10.255.1.1/32
+        !
+        interface Loopback1
+           description VTEP source
+           ip address 10.255.2.1/32
         !
         interface Ethernet1
-         description to-Spine-1
-         no switchport
-         ip address 10.0.1.1/31
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.1/31
         !
         interface Ethernet2
-         description to-Spine-2
-         no switchport
-         ip address 10.0.2.1/31
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.1/31
+        !
+        interface Ethernet3
+           description to-Host-1
+           switchport access vlan 10
+        !
+        interface Vlan10
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.10.10.1/24
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan udp-port 4789
+           vxlan vlan 10 vni 10010
+           vxlan vrf TENANT vni 50001
         !
         router bgp 65001
-         router-id 10.255.1.1
-         neighbor SPINES peer group
-         neighbor SPINES remote-as 65000
-         neighbor SPINES allowas-in 1
-         neighbor 10.0.1.0 peer group SPINES
-         neighbor 10.0.2.0 peer group SPINES
-         network 10.255.1.1/32
+           router-id 10.255.1.1
+           maximum-paths 2
+           network 10.255.1.1/32
+           network 10.255.2.1/32
+           ! -- underlay: eBGP to both spines on the point-to-point links --
+           neighbor SPINES peer group
+           neighbor SPINES remote-as 65000
+           neighbor SPINES allowas-in 1
+           neighbor 10.0.1.0 peer group SPINES
+           neighbor 10.0.2.0 peer group SPINES
+           ! -- EVPN layer: loopback to loopback with both spines --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN allowas-in 1
+           neighbor EVPN send-community extended
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 10
+              rd 10.255.1.1:10010
+              route-target both 10:10010
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+           !
+           vrf TENANT
+              rd 10.255.1.1:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
 
     Leaf-2:
       kind: arista_ceos
@@ -143,29 +265,88 @@ topology:
         !
         username admin privilege 15 secret admin
         !
+        service routing protocols model multi-agent
+        !
+        vlan 20
+           name Tenant-20
+        !
+        vrf instance TENANT
+        !
         ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
         !
         interface Loopback0
-         ip address 10.255.1.2/32
+           description router-id / EVPN peering
+           ip address 10.255.1.2/32
+        !
+        interface Loopback1
+           description VTEP source
+           ip address 10.255.2.2/32
         !
         interface Ethernet1
-         description to-Spine-1
-         no switchport
-         ip address 10.0.1.3/31
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.3/31
         !
         interface Ethernet2
-         description to-Spine-2
-         no switchport
-         ip address 10.0.2.3/31
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.3/31
+        !
+        interface Ethernet3
+           description to-Host-2
+           switchport access vlan 20
+        !
+        interface Vlan20
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.20.20.1/24
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan udp-port 4789
+           vxlan vlan 20 vni 10020
+           vxlan vrf TENANT vni 50001
         !
         router bgp 65001
-         router-id 10.255.1.2
-         neighbor SPINES peer group
-         neighbor SPINES remote-as 65000
-         neighbor SPINES allowas-in 1
-         neighbor 10.0.1.2 peer group SPINES
-         neighbor 10.0.2.2 peer group SPINES
-         network 10.255.1.2/32
+           router-id 10.255.1.2
+           maximum-paths 2
+           network 10.255.1.2/32
+           network 10.255.2.2/32
+           ! -- underlay: eBGP to both spines on the point-to-point links --
+           neighbor SPINES peer group
+           neighbor SPINES remote-as 65000
+           neighbor SPINES allowas-in 1
+           neighbor 10.0.1.2 peer group SPINES
+           neighbor 10.0.2.2 peer group SPINES
+           ! -- EVPN layer: loopback to loopback with both spines --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN allowas-in 1
+           neighbor EVPN send-community extended
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 20
+              rd 10.255.1.2:10020
+              route-target both 20:10020
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+           !
+           vrf TENANT
+              rd 10.255.1.2:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
 
     Leaf-3:
       kind: arista_ceos
@@ -174,29 +355,88 @@ topology:
         !
         username admin privilege 15 secret admin
         !
+        service routing protocols model multi-agent
+        !
+        vlan 10
+           name Tenant-10
+        !
+        vrf instance TENANT
+        !
         ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
         !
         interface Loopback0
-         ip address 10.255.1.3/32
+           description router-id / EVPN peering
+           ip address 10.255.1.3/32
+        !
+        interface Loopback1
+           description VTEP source
+           ip address 10.255.2.3/32
         !
         interface Ethernet1
-         description to-Spine-1
-         no switchport
-         ip address 10.0.1.5/31
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.5/31
         !
         interface Ethernet2
-         description to-Spine-2
-         no switchport
-         ip address 10.0.2.5/31
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.5/31
+        !
+        interface Ethernet3
+           description to-Host-3
+           switchport access vlan 10
+        !
+        interface Vlan10
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.10.10.1/24
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan udp-port 4789
+           vxlan vlan 10 vni 10010
+           vxlan vrf TENANT vni 50001
         !
         router bgp 65001
-         router-id 10.255.1.3
-         neighbor SPINES peer group
-         neighbor SPINES remote-as 65000
-         neighbor SPINES allowas-in 1
-         neighbor 10.0.1.4 peer group SPINES
-         neighbor 10.0.2.4 peer group SPINES
-         network 10.255.1.3/32
+           router-id 10.255.1.3
+           maximum-paths 2
+           network 10.255.1.3/32
+           network 10.255.2.3/32
+           ! -- underlay: eBGP to both spines on the point-to-point links --
+           neighbor SPINES peer group
+           neighbor SPINES remote-as 65000
+           neighbor SPINES allowas-in 1
+           neighbor 10.0.1.4 peer group SPINES
+           neighbor 10.0.2.4 peer group SPINES
+           ! -- EVPN layer: loopback to loopback with both spines --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN allowas-in 1
+           neighbor EVPN send-community extended
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 10
+              rd 10.255.1.3:10010
+              route-target both 10:10010
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+           !
+           vrf TENANT
+              rd 10.255.1.3:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
 
     Leaf-4:
       kind: arista_ceos
@@ -205,32 +445,116 @@ topology:
         !
         username admin privilege 15 secret admin
         !
+        service routing protocols model multi-agent
+        !
+        vlan 20
+           name Tenant-20
+        !
+        vrf instance TENANT
+        !
         ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
         !
         interface Loopback0
-         ip address 10.255.1.4/32
+           description router-id / EVPN peering
+           ip address 10.255.1.4/32
+        !
+        interface Loopback1
+           description VTEP source
+           ip address 10.255.2.4/32
         !
         interface Ethernet1
-         description to-Spine-1
-         no switchport
-         ip address 10.0.1.7/31
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.7/31
         !
         interface Ethernet2
-         description to-Spine-2
-         no switchport
-         ip address 10.0.2.7/31
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.7/31
+        !
+        interface Ethernet3
+           description to-Host-4
+           switchport access vlan 20
+        !
+        interface Vlan20
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.20.20.1/24
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan udp-port 4789
+           vxlan vlan 20 vni 10020
+           vxlan vrf TENANT vni 50001
         !
         router bgp 65001
-         router-id 10.255.1.4
-         neighbor SPINES peer group
-         neighbor SPINES remote-as 65000
-         neighbor SPINES allowas-in 1
-         neighbor 10.0.1.6 peer group SPINES
-         neighbor 10.0.2.6 peer group SPINES
-         network 10.255.1.4/32
+           router-id 10.255.1.4
+           maximum-paths 2
+           network 10.255.1.4/32
+           network 10.255.2.4/32
+           ! -- underlay: eBGP to both spines on the point-to-point links --
+           neighbor SPINES peer group
+           neighbor SPINES remote-as 65000
+           neighbor SPINES allowas-in 1
+           neighbor 10.0.1.6 peer group SPINES
+           neighbor 10.0.2.6 peer group SPINES
+           ! -- EVPN layer: loopback to loopback with both spines --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN allowas-in 1
+           neighbor EVPN send-community extended
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 20
+              rd 10.255.1.4:10020
+              route-target both 20:10020
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+           !
+           vrf TENANT
+              rd 10.255.1.4:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
 
-  # Spine-to-leaf links
+    # -- Hosts --
+    Host-1:
+      kind: linux
+      exec:
+        - ip addr add 10.10.10.11/24 dev eth1
+        - ip route replace default via 10.10.10.1
+
+    Host-2:
+      kind: linux
+      exec:
+        - ip addr add 10.20.20.12/24 dev eth1
+        - ip route replace default via 10.20.20.1
+
+    Host-3:
+      kind: linux
+      exec:
+        - ip addr add 10.10.10.13/24 dev eth1
+        - ip route replace default via 10.10.10.1
+
+    Host-4:
+      kind: linux
+      exec:
+        - ip addr add 10.20.20.14/24 dev eth1
+        - ip route replace default via 10.20.20.1
+
   links:
+    # Spine-to-leaf
     - endpoints: ["Spine-1:eth1", "Leaf-1:eth1"]
     - endpoints: ["Spine-1:eth2", "Leaf-2:eth1"]
     - endpoints: ["Spine-1:eth3", "Leaf-3:eth1"]
@@ -239,3 +563,8 @@ topology:
     - endpoints: ["Spine-2:eth2", "Leaf-2:eth2"]
     - endpoints: ["Spine-2:eth3", "Leaf-3:eth2"]
     - endpoints: ["Spine-2:eth4", "Leaf-4:eth2"]
+    # Leaf-to-host
+    - endpoints: ["Leaf-1:eth3", "Host-1:eth1"]
+    - endpoints: ["Leaf-2:eth3", "Host-2:eth1"]
+    - endpoints: ["Leaf-3:eth3", "Host-3:eth1"]
+    - endpoints: ["Leaf-4:eth3", "Host-4:eth1"]
