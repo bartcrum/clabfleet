@@ -19,7 +19,6 @@ const RT = {
   vni: "all",           // EVPN: "all" or a VNI number
   layer: "both",        // EVPN: "control" | "data" | "both"
   underlay: true,       // draw the physical links faintly
-  showProblems: false,
   sel: null,            // {type: "node"|"edge", id}
   view: { x: 0, y: 0, k: 1 },
   fitted: false,
@@ -66,13 +65,14 @@ async function rtLoad() {
     RT.data = data;
     if (first || !data.protocols?.includes(RT.proto)) RT.proto = data.protocols?.[0] || null;
     if (RT.vni !== "all" && !data.evpn?.vnis?.some((v) => String(v.vni) === String(RT.vni))) RT.vni = "all";
-    if (first) { RT.sel = null; RT.fitted = false; RT.showProblems = false; }
+    if (first) { RT.sel = null; RT.fitted = false; }
   } catch (e) {
     toast(`Could not read the routing configs: ${e.message}`);
   } finally {
     RT.loading = false;
   }
   rtRender();
+  renderLabHead();
 }
 
 function rtDeployed() {
@@ -89,9 +89,9 @@ function rtLiveData() {
 
 // The server probes at most every few seconds whoever asks; the first
 // answer for a lab is empty while its probes run
-async function rtLoadLive() {
+async function rtLoadLive(force = false) {
   const id = rtTopoId();
-  if (!id || RT.liveLoading || !rtLiveOn()) return;
+  if (!id || RT.liveLoading || !(rtLiveOn() || (force && rtDeployed()))) return;
   RT.liveLoading = true;
   try {
     const data = await api(`/api/routing-live/${encodeURIComponent(id).replace(/%2F/g, "/")}`);
@@ -105,7 +105,7 @@ async function rtLoadLive() {
   rtRender();
   renderLabHead();
   clearTimeout(RT.liveRetry);
-  if (!RT.live.updated || RT.live.refreshing) RT.liveRetry = setTimeout(rtLoadLive, 2000);
+  if (!RT.live.updated || RT.live.refreshing) RT.liveRetry = setTimeout(() => rtLoadLive(force), 2000);
 }
 
 // --- geometry ----------------------------------------------------------------
@@ -392,7 +392,6 @@ function rtRender() {
     msg.replaceChildren(...text);
     $("#routing-card").hidden = true;
     $("#routing-legend").hidden = true;
-    $("#routing-problems").hidden = true;
   };
   if (!S.detail || S.detail.error) return fail([`This topology could not be loaded${S.detail?.error ? `: ${S.detail.error}` : ""}.`]);
   if (!d || RT.topo !== rtTopoId()) { fail(["Reading configs…"]); rtLoad(); return; }
@@ -498,7 +497,6 @@ function rtRender() {
     { swatch: "line", cls: "live-unknown", text: "not known (node not running or not readable)" },
     { swatch: "line", cls: "extra", text: "running, not in startup config" },
   ] : model.legend);
-  rtRenderProblems();
   rtRenderCard();
   if (!RT.fitted) { rtFit(P); RT.fitted = true; }
 }
@@ -567,51 +565,83 @@ function rtRenderBar() {
   }
   filters.replaceChildren(...parts);
 
-  const problems = rtProblems();
+  // This protocol's problems; the button opens them in the Health panel
+  const problems = rtHealth().filter((p) => p.proto === RT.proto || !p.proto);
   const btn = $("#routing-problems-btn");
-  const real = problems.filter((p) => p.severity !== "info").length;
+  const real = problems.filter((p) => p.sev !== "info").length;
   btn.hidden = !problems.length;
   btn.textContent = real ? `⚠ ${real} problem${real === 1 ? "" : "s"}` : `${problems.length} note${problems.length === 1 ? "" : "s"}`;
+  btn.title = "Show in the Health panel";
   btn.classList.toggle("warn", real > 0);
 }
 
-function rtProblems() {
-  if (!RT.data?.problems || !RT.proto) return [];
-  const out = RT.data.problems.filter((p) => p.protocol === RT.proto || p.protocol === "ip");
-  const L = rtLiveData();
+// Live state of the open lab whatever the mode, while its last read is recent
+function rtFreshLive() {
+  const L = RT.live;
+  if (!L?.updated || L.id !== rtTopoId() || !rtDeployed()) return null;
+  return Date.now() / 1000 - L.updated <= 60 ? L : null;
+}
+
+// Show an item on the Routing tab: its protocol, the edge or node selected
+function rtFocus(proto, sel, live) {
+  if (RT.data?.protocols?.includes(proto)) RT.proto = proto;
+  RT.sel = sel;
+  if (live) { RT.mode = "live"; rtPrefsSave(); }
+  showView("routing");
+}
+
+// Config problems of every protocol, and with recent live data the
+// sessions down, drift, unintended neighbours and nodes that could not be
+// read. Items for the Health panel: {sev, proto, tag, msg, go}.
+function rtHealth() {
+  const d = RT.data;
+  if (!d || RT.topo !== rtTopoId()) return [];
+  if (d.error) return [{ sev: "warn", proto: null, tag: "Routing", msg: `Could not read the routing configs: ${d.error}` }];
+  const out = [];
+  const firstProto = d.protocols?.[0];
+  for (const p of d.problems || []) {
+    const proto = RT_PROTO_LABEL[p.protocol] ? p.protocol : firstProto;
+    out.push({
+      sev: p.severity === "info" ? "info" : "warn", proto, tag: RT_PROTO_LABEL[p.protocol] || p.protocol.toUpperCase(),
+      msg: p.message, go: proto && (() => rtFocus(proto, { type: "node", id: p.node }, false)),
+    });
+  }
+  const L = rtFreshLive();
   if (!L) return out;
   const live = [];
-  const label = (e) => `${e.a} ↔ ${e.b}`;
-  for (const e of Object.values(RT.edges)) {
-    const st = rtLiveEntry(e.id);
-    if (st && (st.state === "down" || st.state === "partial")) {
-      live.push({ node: e.a, severity: "live", message: `${label(e)} is ${RT_LIVE_TEXT[st.state]}${st.detail ? `: ${st.detail}` : ""}` });
+  if (L.error) live.push({ sev: "warn", proto: null, tag: "Live", msg: `Could not read the protocol state: ${L.error}` });
+  const ends = {};
+  for (const a of d.ospf?.adjacencies || []) ends[a.id] = ["ospf", "OSPF", a.a.node, a.b.node];
+  for (const x of d.bgp?.sessions || []) ends[x.id] = ["bgp", "BGP", x.a.node.replace(/^ext:/, ""), x.b.node.replace(/^ext:/, "")];
+  for (const x of d.evpn?.tunnels || []) ends[x.id] = ["evpn", "VXLAN", x.a.node, x.b.node];
+  for (const [id, st] of [...Object.entries(L.ospf || {}), ...Object.entries(L.bgp || {}), ...Object.entries(L.vxlan || {})]) {
+    const e = ends[id];
+    if (!e) continue;
+    const [proto, tag, a, b] = e;
+    const go = () => rtFocus(proto, { type: "edge", id }, true);
+    if (["down", "missing", "partial"].includes(st.state)) {
+      live.push({ sev: st.state === "partial" ? "warn" : "error", proto, tag,
+                  msg: `${a} ↔ ${b} is ${RT_LIVE_TEXT[st.state]}${st.detail ? `: ${st.detail}` : ""}`, go });
     }
+    if (st.drift) live.push({ sev: "warn", proto, tag, msg: st.drift, go });
   }
-  for (const e of Object.values(RT.edges)) {
-    const drift = rtLiveEntry(e.id)?.drift;
-    if (drift) live.push({ node: e.b, severity: "live", message: drift });
-  }
-  for (const x of rtExtras()) {
-    live.push({ node: x.node, severity: "live", message: `${x.node} runs a ${x.kind.toUpperCase()} neighbor ${x.ip}${x.peer ? ` (${x.peer})` : ""} that is not in its startup config` });
+  for (const kind of ["ospf", "bgp", "evpn"]) {
+    (L.extra?.[kind] || []).forEach((x, i) => {
+      const proto = kind === "evpn" && !d.protocols?.includes("evpn") ? "bgp" : kind;
+      live.push({
+        sev: "warn", proto, tag: kind.toUpperCase(),
+        msg: `${x.node} runs a ${kind.toUpperCase()} neighbor ${x.ip}${x.peer ? ` (${x.peer})` : ""} that is not in its startup config`,
+        go: () => rtFocus(proto, { type: "edge", id: `extra-${kind}-${i}` }, true),
+      });
+    });
   }
   for (const [node, n] of Object.entries(L.nodes || {})) {
     for (const [topic, err] of Object.entries(n.errors || {})) {
-      live.push({ node, severity: "live", message: `${node}: could not read ${topic || "its state"}: ${err}` });
+      live.push({ sev: "warn", proto: null, tag: "Live", msg: `${node}: could not read ${topic || "its state"}: ${err}`,
+                  go: () => rtFocus(RT.proto, { type: "node", id: node }, true) });
     }
   }
   return [...live, ...out];
-}
-
-function rtRenderProblems() {
-  const list = $("#routing-problems");
-  const problems = rtProblems();
-  list.hidden = !RT.showProblems || !problems.length;
-  if (list.hidden) return;
-  list.replaceChildren(...problems.map((p) => h("li", {
-    class: p.severity === "info" ? "info" : p.severity === "live" ? "live" : "warn",
-    onclick: () => { RT.sel = { type: "node", id: p.node }; rtRender(); },
-  }, p.message)));
 }
 
 function rtRenderLegend(items) {
@@ -885,10 +915,7 @@ function rtSetup() {
 
   $("#routing-fit").addEventListener("click", () => rtFit());
   $("#routing-reload").addEventListener("click", () => rtLoad());
-  $("#routing-problems-btn").addEventListener("click", () => {
-    RT.showProblems = !RT.showProblems;
-    rtRenderProblems();
-  });
+  $("#routing-problems-btn").addEventListener("click", () => openHealth("routing"));
 }
 
 // Double click opens the node's CLI, as in the Diagram tab
@@ -911,8 +938,24 @@ window.Routing = {
   show() { rtRender(); if (rtLiveOn()) rtLoadLive(); },
   // Another topology was selected
   reset() { RT.topo = null; RT.data = null; RT.live = null; RT.sel = null; RT.extPos = {}; RT.vni = "all"; },
-  // The topology file changed (saved YAML, finished job): re-read the configs
-  changed() { if (rtVisible()) rtLoad(); else RT.topo = null; },
+  // The topology file changed (saved YAML, finished job): re-read the
+  // configs (the Health panel lists their problems on every tab)
+  changed() { rtLoad(); },
+  // A topology was opened: read its configs for the Health panel
+  prefetch() { if (RT.topo !== rtTopoId()) rtLoad(); },
+  loaded() { return !!RT.data && RT.topo === rtTopoId() && !RT.data.error; },
+  health: rtHealth,
+  // Keep the live state fresh while the Health panel is open (called on
+  // every render, so at most one request per few seconds)
+  pollLive() {
+    if (Date.now() - (RT.livePolled || 0) < 4000) return;
+    RT.livePolled = Date.now();
+    rtLoadLive(true);
+  },
+  liveAge() {
+    const L = rtFreshLive();
+    return L ? Math.max(0, Math.round(Date.now() / 1000 - L.updated)) : null;
+  },
   // Container states changed: refresh the status dots
   runtime() {
     if (!rtVisible() || !RT.data) return;
@@ -923,10 +966,9 @@ window.Routing = {
   // OSPF and BGP sessions up / total for the lab header, while the last
   // live read is recent; null otherwise
   liveSummary() {
-    const L = RT.live;
-    if (!L?.updated || L.id !== rtTopoId() || !rtDeployed()) return null;
+    const L = rtFreshLive();
+    if (!L) return null;
     const age = Math.max(0, Math.round(Date.now() / 1000 - L.updated));
-    if (age > 60) return null;
     const entries = [...Object.values(L.ospf || {}), ...Object.values(L.bgp || {})];
     return { up: entries.filter((e) => e.state === "up").length, total: entries.length, age };
   },

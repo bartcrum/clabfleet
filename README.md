@@ -430,8 +430,8 @@ printed in the terminal). Stop it with Ctrl+C.
   EVPN sessions (control plane) and the VXLAN tunnels between VTEPs (data
   plane), either or both, for all VNIs or one. Click a node for its
   router-id, interfaces, sessions or VNIs, or an edge for both ends.
-  Problems found in the configs are listed under the button at the top
-  right; click one to select its node. Nodes without the protocol are
+  The button at the top right counts the problems found in the configs
+  and opens them in the Health panel. Nodes without the protocol are
   dimmed. **Cabling** shows the physical links faintly behind.
   Switch to **Live** on a deployed lab to colour every adjacency, session
   and tunnel by its running state (as `clabfleet routing --live`): green
@@ -439,13 +439,20 @@ printed in the terminal). Stop it with Ctrl+C.
   neighbours running but not in the startup config. Cards show uptime and
   prefix counts, and sessions that are down join the problem list. The
   GUI asks the nodes in the background about every 10 seconds, only for
-  labs someone has open on this tab.
+  labs someone has open on this tab or in the Health panel.
 - **YAML editor:** edit the topology file in the YAML tab. Problems are
   listed as you type, using the same checks as `clabfleet validate`.
   Save with the button or Ctrl+S. Text that is not a loadable topology
   cannot be saved, but other errors, such as a startup config file that
   does not exist yet, do not block saving. Saving is refused while a job
   runs for the lab, or if the file changed on disk since you opened it.
+- **Health:** the Health tab next to Activity lists everything wrong
+  with the open lab: validation errors and warnings in the saved file,
+  unreachable hosts, nodes not running or booting for more than five
+  minutes, links down, routing config problems, and (while the panel is
+  open) sessions, adjacencies and tunnels down, drift and neighbours not
+  in the startup config. Filter by severity or source; click a row to
+  select its node, link or session. The header's problem count opens it.
 - **Lab header:** under the lab's name a status strip shows the nodes
   running (or ready, while booting), the hosts used, and the OSPF and BGP
   sessions up once the Routing tab has read them in Live mode. Click a

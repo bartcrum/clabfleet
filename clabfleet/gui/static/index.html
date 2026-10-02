@@ -104,7 +104,6 @@
               <button id="routing-reload" class="btn ghost small" title="Read the startup configs again">Reload</button>
               <button id="routing-fit" class="btn ghost small">Fit</button>
             </div>
-            <ul id="routing-problems" class="routing-problems" hidden></ul>
             <div id="routing-legend" class="routing-legend" hidden></div>
             <div id="routing-card" class="node-card routing-card" hidden></div>
             <div id="routing-empty" class="diagram-error routing-empty" hidden></div>
@@ -129,6 +128,7 @@
     <div class="dock-bar">
       <div id="dock-tabs" class="dock-tabs">
         <button class="dock-tab active" data-pane="activity"><span id="activity-dot" class="dot"></span>Activity</button>
+        <button class="dock-tab" data-pane="health"><span id="health-dot" class="dot"></span>Health<span id="health-count" class="tab-count"></span></button>
       </div>
       <button id="dock-toggle" class="btn ghost small" title="Show/hide panel">▴</button>
     </div>
@@ -139,6 +139,14 @@
           <span id="job-meta" class="muted small mono"></span>
         </div>
         <pre id="activity" class="activity mono">No jobs yet.</pre>
+      </div>
+      <div class="pane health-pane" data-pane="health">
+        <div class="activity-bar">
+          <div id="health-sev" class="seg" role="group" aria-label="Severity"></div>
+          <select id="health-source" class="small" aria-label="Source"></select>
+          <span id="health-checks" class="muted small"></span>
+        </div>
+        <ul id="health-list" class="health-list"></ul>
       </div>
     </div>
   </section>
