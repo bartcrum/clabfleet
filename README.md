@@ -144,6 +144,8 @@ Snapshots go to `snapshots/<lab>/` next to the topology, or
 give `--name`. Configs are read with `cat` on each node's host, from the
 placement record, so nodes on remote hosts work too. If the file is not
 readable and the host uses `sudo`, clabfleet retries with `sudo`.
+Snapshots hold whole device configs (password hashes, keys), so their
+folders are created mode 0700 and the files 0600.
 
 | Kind | Saved config |
 |------|--------------|
@@ -158,7 +160,8 @@ save.
 `diff` prints a unified diff per node of a snapshot (`--from`, default
 the latest) against `previous` (the snapshot before it, the default),
 `startup` (the node's `startup-config` in the topology, inline or a
-file), `latest` or a snapshot name. Lines that change on every save, such
+file inside the topology's folder; a path that leads outside it, also
+through a symlink, is skipped), `latest` or a snapshot name. Lines that change on every save, such
 as cEOS's `! Startup-config last modified at` comment, are ignored. Expect
 a diff against `startup` even without changes: the saved config is the
 whole running config, including defaults and the management interface
@@ -393,7 +396,10 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   named logins instead of the start-up token. Only SHA-256 hashes of the
   tokens are stored. `user add` and `user rotate` print the token once,
   with a login link (`--url https://lab.example.com:8650` sets its
-  address). Changes apply to a running GUI right away.
+  address). Changes apply to a running GUI right away. A users file that
+  other users could change (group/world-writable, owned by someone else,
+  or in such a directory) is refused and nobody can log in until it is
+  fixed.
 - **Login:** each user opens `https://<server>:8650/?token=<their token>`.
   The token is swapped for a session cookie (HttpOnly, SameSite=Strict,
   Secure over HTTPS) that ends after 12 hours idle, on **Log out**, or
@@ -403,7 +409,11 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   - `operator`: deploy, redeploy, save and destroy, terminals, YAML edits
     and layout saves
   - `viewer`: topologies, diagrams, YAML, node state, job output and node
-    logs (the Logs tab). Controls they cannot use are hidden. The server
+    logs (the Logs tab) of the labs defined by the workspace's topologies.
+    Viewers cannot see config diffs (configs hold password hashes), open
+    terminals or follow logs of other labs on the hosts, and topology
+    files that are symlinks to somewhere outside the workspace are not
+    shown at all. Controls they cannot use are hidden. The server
     refuses everything else with 403. Any route that is not a plain GET
     is operator-only unless the code marks it otherwise, so new features
     are protected by default.
@@ -428,9 +438,12 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   `127.0.0.1` and pass `--public-url https://lab.example.com` so the
   origin check and secure cookies match the address browsers use.
 
-Security notes: an operator can open shells on every node and, through
-`docker exec`, act as the account the GUI runs as on each lab host, so
-make only trusted people operators. Tokens are bearer secrets: anyone with
+Security notes: operators are effectively root on the lab hosts, by
+design. containerlab runs as root, and a topology can bind-mount any host
+path, run privileged containers or point at any file, so editing a
+topology and deploying it is root access; operators can also open shells
+on every node and, through `docker exec`, act as the account the GUI runs
+as on each lab host. Make only trusted people operators. Tokens are bearer secrets: anyone with
 a login link is that user until you rotate it. Terminals that are already
 open stay open when a user is removed or rotated; close their tabs (or
 restart the GUI) to cut them off.
