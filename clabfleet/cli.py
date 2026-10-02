@@ -7,6 +7,10 @@ Usage:
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
+    clabfleet snapshot <topology.clab.yml> [--nodes GLOB] [--dir DIR] [--no-save] [--name NAME]
+    clabfleet snapshot <topology.clab.yml> --list [--dir DIR]
+    clabfleet diff <topology.clab.yml> [--nodes GLOB] [--from SNAPSHOT]
+                   [--against previous|startup|latest|SNAPSHOT] [--json]
     clabfleet inspect [<topology.clab.yml>] [--cluster <cluster.yaml>]
     clabfleet exec <topology.clab.yml> <command> [--nodes GLOB] [--mode auto|cli|shell|ssh] [--json]
     clabfleet status [--cluster <cluster.yaml>]
@@ -52,7 +56,8 @@ from .templates import (
     generate,
     render,
 )
-from .topology import dump_yaml
+from .snapshots import SnapshotError, Snapshotter, diff_lab, list_snapshots
+from .topology import dump_yaml, load_topology
 from .validate import validate_topology
 
 
@@ -122,6 +127,50 @@ def _build_parser() -> argparse.ArgumentParser:
     p_save = sub.add_parser("save", help="Save running configs of all lab nodes")
     p_save.add_argument("topology", help="Path to the topology file")
     add_cluster_arg(p_save)
+
+    def add_nodes_arg(p):
+        p.add_argument("--nodes", action="append", metavar="GLOB",
+                       help="Only nodes matching this glob (repeatable or "
+                            "comma-separated, e.g. 'leaf*,spine1')")
+
+    def add_snapshot_dir_arg(p):
+        p.add_argument("--dir", dest="snapshot_dir", metavar="DIR",
+                       help="Snapshot folder; each lab gets DIR/<lab>/ "
+                            "(default: snapshots/ next to the topology)")
+
+    # --- snapshot ---
+    p_snap = sub.add_parser(
+        "snapshot", help="Save the lab's configs and copy them to a local snapshot",
+        description="Run save, then copy each node's saved config to "
+                    "<dir>/<lab>/<UTC time>/<node>.cfg (dir defaults to "
+                    "snapshots/ next to the topology).")
+    p_snap.add_argument("topology", help="Topology file the lab was deployed from")
+    add_cluster_arg(p_snap)
+    add_nodes_arg(p_snap)
+    add_snapshot_dir_arg(p_snap)
+    p_snap.add_argument("--no-save", action="store_true",
+                        help="Copy the configs saved last time without saving again")
+    p_snap.add_argument("--name", help="Snapshot name (default: the UTC time)")
+    p_snap.add_argument("--list", action="store_true",
+                        help="List the lab's snapshots instead of taking one")
+    p_snap.add_argument("--json", action="store_true", help="Print the result as JSON")
+
+    # --- diff ---
+    p_diff = sub.add_parser(
+        "diff", help="Diff a config snapshot against another or the startup-config",
+        description="Unified diff of a snapshot's configs. Exit code: 0 no "
+                    "differences, 1 differences, 2 error.")
+    p_diff.add_argument("topology", help="Topology file of the lab")
+    add_nodes_arg(p_diff)
+    add_snapshot_dir_arg(p_diff)
+    p_diff.add_argument("--from", dest="from_snapshot", default="latest", metavar="SNAPSHOT",
+                        help="Snapshot to look at (default: latest)")
+    p_diff.add_argument("--against", default="previous",
+                        metavar="previous|startup|latest|SNAPSHOT",
+                        help="What to compare it with: the snapshot before it "
+                             "(default), the topology's startup-config, the latest "
+                             "snapshot or a named one")
+    p_diff.add_argument("--json", action="store_true", help="Print results as JSON")
 
     # --- inspect ---
     p_inspect = sub.add_parser("inspect", help="Show running lab containers")
@@ -284,6 +333,12 @@ def _dispatch(args: argparse.Namespace) -> int:
     if cmd == "new":
         return _new(args)
 
+    if cmd == "diff":
+        return _diff(args)
+
+    if cmd == "snapshot" and args.list:
+        return _list_snapshots(args)
+
     cluster = _cluster_from_args(args)
 
     if cmd == "gui":
@@ -297,6 +352,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "exec":
         return _exec(args, cluster)
+
+    if cmd == "snapshot":
+        return _snapshot(args, cluster)
 
     deployer = LabDeployer(cluster)
     if cmd == "deploy":
@@ -350,10 +408,9 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
 
 
 def _exec(args: argparse.Namespace, cluster: ClusterConfig) -> int:
-    patterns = [p.strip() for arg in args.nodes or [] for p in arg.split(",") if p.strip()]
     executor = LabExecutor(cluster, ssh_user=args.node_user, ssh_password=args.node_password,
                            parallel=args.parallel, timeout=args.timeout)
-    out = executor.run(args.topology, " ".join(args.cmd), nodes=patterns or None,
+    out = executor.run(args.topology, " ".join(args.cmd), nodes=_node_patterns(args),
                        mode=args.mode)
     results = out["results"]
     failed = [r for r in results if r["error"] or r["exit_code"] != 0]
@@ -406,6 +463,73 @@ def _new(args: argparse.Namespace) -> int:
     print(f"Wrote {out}: lab '{data['name']}', {len(topo['nodes'])} {args.kind} nodes, "
           f"{len(topo['links'])} links")
     return 0
+
+
+def _node_patterns(args: argparse.Namespace) -> list[str] | None:
+    return [p.strip() for arg in args.nodes or [] for p in arg.split(",") if p.strip()] or None
+
+
+def _snapshot(args: argparse.Namespace, cluster: ClusterConfig) -> int:
+    out = Snapshotter(cluster).take(
+        args.topology, nodes=_node_patterns(args), directory=args.snapshot_dir,
+        save=not args.no_save, name=args.name,
+    )
+    save_failed = {h: r["error"] for h, r in out["hosts"].items() if "error" in r}
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return 1 if save_failed else 0
+
+    for host, err in save_failed.items():
+        print(f"warning: save failed on {host}: {err}", file=sys.stderr)
+    multi = len(cluster.hosts) > 1
+    print(f"Snapshot {out['snapshot']} of lab '{out['lab']}': {out['path']}")
+    for node, info in out["nodes"].items():
+        print(f"  {node:<20} {info['file']}" + (f"  ({info['host']})" if multi else ""))
+    for node, reason in out["skipped"].items():
+        print(f"  {node:<20} skipped: {reason}")
+    return 1 if save_failed else 0
+
+
+def _list_snapshots(args: argparse.Namespace) -> int:
+    topo = load_topology(args.topology)
+    snapshots = list_snapshots(topo, args.snapshot_dir)
+    if args.json:
+        print(json.dumps(snapshots, indent=2))
+        return 0
+    if not snapshots:
+        print(f"Lab '{topo.name}' has no snapshots.")
+        return 0
+    for snap in snapshots:
+        skipped = len(snap.get("skipped") or {})
+        print(f"{snap['name']:<24} {snap.get('taken_at', '?'):<26} "
+              f"{len(snap['nodes'])} nodes" + (f", {skipped} skipped" if skipped else ""))
+    return 0
+
+
+def _diff(args: argparse.Namespace) -> int:
+    """Exit 0 when nothing differs, 1 on differences, 2 on errors."""
+    try:
+        out = diff_lab(args.topology, nodes=_node_patterns(args), against=args.against,
+                       from_snapshot=args.from_snapshot, directory=args.snapshot_dir)
+    except Exception as exc:  # noqa: BLE001 - 2, not main()'s 1, so 1 means "differs"
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    rc = 1 if out["changed"] else 0
+    if args.json:
+        print(json.dumps(out, indent=2))
+        return rc
+
+    for r in out["nodes"]:
+        if r["diff"]:
+            sys.stdout.write(r["diff"])
+    sys.stdout.flush()  # diffs before the summary when both go to a terminal
+    for r in out["nodes"]:
+        if r["status"] == "skipped":
+            print(f"skipped {r['node']}: {r['reason']}", file=sys.stderr)
+    compared = [r for r in out["nodes"] if r["status"] != "skipped"]
+    print(f"{out['from']} vs {out['against']}: {out['changed']} of {len(compared)} "
+          "nodes differ", file=sys.stderr)
+    return rc
 
 
 def _validate(args: argparse.Namespace) -> int:

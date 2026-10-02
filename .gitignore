@@ -9,3 +9,4 @@ build/
 clab-*/
 *.placement.json
 .clabfleet/
+snapshots/

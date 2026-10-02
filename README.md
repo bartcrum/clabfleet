@@ -27,6 +27,8 @@ deploys with plain `containerlab deploy`.
   each kind's CLI, SSH or a shell
 - **Lab templates** — generate a spine-leaf, ring or campus lab with
   addressing and routing configs for cEOS, IOL or plain Linux nodes
+- **Config snapshots** — copy saved node configs into dated local folders
+  and diff them against each other or the topology's `startup-config`
 - **Validate** — check topology files (and placement labels against a
   cluster) without touching any host, e.g. in CI
 - **Web GUI** — browse topologies, see live node state on a diagram,
@@ -108,6 +110,55 @@ joined with spaces, as `ssh` does, so quote the command or put it after
 `--` when it has options of its own. Like the GUI terminals, the CLI and
 shell modes need Docker access on the host. If Docker refuses and the
 host uses `sudo`, clabfleet retries with `sudo`.
+
+### Snapshot and diff configs
+
+```bash
+clabfleet --sudo snapshot topologies/spine_leaf.clab.yml
+clabfleet --sudo snapshot topologies/spine_leaf.clab.yml --nodes 'leaf*' --name before-bgp
+clabfleet snapshot topologies/spine_leaf.clab.yml --list
+
+clabfleet diff topologies/spine_leaf.clab.yml                     # latest vs the one before
+clabfleet diff topologies/spine_leaf.clab.yml --against startup   # latest vs the topology
+clabfleet diff topologies/spine_leaf.clab.yml --from before-bgp --against latest
+```
+
+`snapshot` runs `save` (skip it with `--no-save`), then copies each
+node's saved config from the lab directory into a local folder:
+
+```
+topologies/snapshots/spine-leaf-fabric/20261002T004701Z/
+  snapshot.json     # when, and each node's host, kind and source file
+  Spine-1.cfg
+  Leaf-1.cfg
+  ...
+```
+
+Snapshots go to `snapshots/<lab>/` next to the topology, or
+`DIR/<lab>/` with `--dir`, and are named after the UTC time unless you
+give `--name`. Configs are read with `cat` on each node's host, from the
+placement record, so nodes on remote hosts work too. If the file is not
+readable and the host uses `sudo`, clabfleet retries with `sudo`.
+
+| Kind | Saved config |
+|------|--------------|
+| cEOS | `clab-<lab>/<node>/flash/startup-config` → `<node>.cfg` |
+| SR Linux | `clab-<lab>/<node>/config/config.json` → `<node>.json` |
+| cRPD | `clab-<lab>/<node>/config/juniper.conf` → `<node>.conf` |
+
+Other kinds are listed as skipped. Cisco IOL saves into its binary NVRAM
+file, which a snapshot cannot read, and `linux` nodes have nothing to
+save.
+
+`diff` prints a unified diff per node of a snapshot (`--from`, default
+the latest) against `previous` (the snapshot before it, the default),
+`startup` (the node's `startup-config` in the topology, inline or a
+file), `latest` or a snapshot name. Lines that change on every save, such
+as cEOS's `! Startup-config last modified at` comment, are ignored. Expect
+a diff against `startup` even without changes: the saved config is the
+whole running config, including defaults and the management interface
+containerlab sets up. The exit code is 0 with no differences, 1 with
+differences and 2 on errors. Add `--json` for machine-readable output.
 
 ### Check a topology before deploying
 
@@ -230,13 +281,16 @@ printed in the terminal). Stop it with Ctrl+C.
   cannot be saved, but other errors, such as a startup config file that
   does not exist yet, do not block saving. Saving is refused while a job
   runs for the lab, or if the file changed on disk since you opened it.
-- **Deploy / Redeploy / Save configs / Destroy** with containerlab's output
+- **Deploy / Redeploy / Save configs / Snapshot / Destroy** with containerlab's output
   streamed into the Activity panel. Different labs can run jobs at the
   same time, up to four, with one job per lab. Pick any job, running or
   past, from the Activity panel's list to see its output, how long it
   took, and the time each host took. The last 50 jobs are kept in
   `.clabfleet/jobs/` under the first workspace directory, so they survive
   a restart of the GUI.
+- **Config diff:** the node card's button opens a tab with the node's
+  config in the latest snapshot against its `startup-config` or the
+  previous snapshot
 - **Terminals** in tabs at the bottom:
   - **CLI**: the node's own CLI via `docker exec` (`Cli` on cEOS, `sr_cli`
     on SR Linux, `cli` on cRPD)
@@ -487,6 +541,7 @@ clabfleet/
   runner.py        # Run commands locally or over SSH
   exporter.py      # Build a topology from live devices (NAPALM)
   execute.py       # Run a command on lab nodes (clabfleet exec)
+  snapshots.py     # Config snapshots and diffs (clabfleet snapshot/diff)
   nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
   validate.py      # Topology checks (clabfleet validate)
   templates.py     # Lab templates (clabfleet new)

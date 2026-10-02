@@ -18,6 +18,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from ..nodes import access_modes, terminal_command
+from ..snapshots import SnapshotError
 from .editing import EditConflict
 from .state import JobManager, UnloadableTopology, Workspace
 from .terminals import LocalTerminal, SSHTerminal
@@ -45,6 +46,7 @@ def create_app(workspace: Workspace, token: str) -> web.Application:
     app.router.add_put("/api/topologies/{id:.+}", _save_topology)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
+    app.router.add_get("/api/diff/{id:.+}", _node_diff)
     app.router.add_get("/api/jobs", _jobs)
     app.router.add_post("/api/jobs", _start_job)
     app.router.add_get("/api/jobs/{id}", _job)
@@ -212,6 +214,20 @@ async def _save_positions(request):
     except RuntimeError as exc:  # ruamel.yaml missing
         raise web.HTTPNotImplemented(text=str(exc))
     return web.json_response(detail)
+
+
+async def _node_diff(request):
+    """?node=X&against=previous|startup: the node's latest snapshot diff."""
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        result = await asyncio.to_thread(
+            ws.node_diff, request.match_info["id"], request.query.get("node", ""),
+            request.query.get("against", "startup"))
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc))
+    except (SnapshotError, ValueError) as exc:  # no snapshots yet, unknown node
+        raise web.HTTPBadRequest(text=str(exc))
+    return web.json_response(result)
 
 
 async def _start_job(request):
