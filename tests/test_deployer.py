@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from clabfleet import cli, deployer
-from clabfleet.cluster import ClusterConfig, HostInfo, load_cluster_config
+from clabfleet.cluster import ClusterConfig, HostInfo, load_cluster_config, probe_host_resources
 from clabfleet.deployer import (
     DeploymentError,
     LabDeployer,
@@ -13,7 +13,7 @@ from clabfleet.deployer import (
     scan_used_vnis,
     split_topology,
 )
-from clabfleet.runner import CommandResult
+from clabfleet.runner import CommandError, CommandResult
 from clabfleet.placement import NodePlacement, PlacementPlan
 from clabfleet.topology import topology_from_dict
 
@@ -198,6 +198,34 @@ def test_vni_scan_failure_is_not_fatal(monkeypatch, caplog):
     summary = LabDeployer(cluster).deploy("t.clab.yml", dry_run=True)
     assert summary["vni_range"] == [1000, 1000]
     assert "Could not check VNIs in use on h1" in caplog.text
+
+
+def test_probe_raises_when_host_unreachable():
+    host = HostInfo("h1", "10.0.0.1")
+    with pytest.raises(OSError):
+        probe_host_resources(FakeRunner(exc=OSError("timed out")), host)
+
+
+def test_probe_tolerates_failing_commands(caplog):
+    host = HostInfo("h1", "10.0.0.1", max_cpu=4)
+    runner = FakeRunner(exc=CommandError("nproc", 127, "not found"))
+    assert probe_host_resources(runner, host) == {}
+    assert host.max_cpu == 4
+    assert "Could not probe resources on h1" in caplog.text
+    assert probe_host_resources(FakeRunner("garbage"), host) == {}
+
+
+def test_unreachable_host_fails_planning_at_once(monkeypatch):
+    # The first failed connection ends the deploy; no further hosts or
+    # steps (running labs, VNI scan) wait out their own SSH timeouts
+    cluster = ClusterConfig(hosts=[HostInfo("h1", "10.0.0.1", max_cpu=4, max_ram=8192),
+                                   HostInfo("h2", "10.0.0.2", max_cpu=4, max_ram=8192)])
+    runner = FakeRunner(exc=OSError("timed out"))
+    monkeypatch.setattr(deployer, "create_runner", lambda host: runner)
+    monkeypatch.setattr(deployer, "load_topology", lambda path: _topo())
+    with pytest.raises(DeploymentError, match=r"h1 \(10.0.0.1\) unreachable: timed out"):
+        LabDeployer(cluster).deploy("t.clab.yml", dry_run=True)
+    assert runner.calls == [["nproc"]]
 
 
 def _running(lab, *nodes):

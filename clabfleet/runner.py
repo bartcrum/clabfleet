@@ -234,8 +234,8 @@ class SSHRunner(Runner):
             result = CommandResult(
                 exit_code, stdout.read().decode(), stderr.read().decode()
             )
-        if check and exit_code != 0:
-            raise CommandError(f"[{self.name}] {cmd}", exit_code, result.stderr)
+        if check and result.exit_code != 0:
+            raise CommandError(f"[{self.name}] {cmd}", result.exit_code, result.stderr)
         return result
 
     def makedirs(self, path):
