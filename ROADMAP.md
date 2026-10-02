@@ -182,6 +182,9 @@ different labs, and show elapsed time per host in the Activity panel.
 
 ### 3.1 Config snapshots and diffs — M
 
+**Done.** cEOS, SR Linux and cRPD; IOL saves to binary NVRAM and is
+skipped. Also a Snapshot job and a per-node diff tab in the GUI.
+
 `save` writes configs into the lab directory but nothing reads them back.
 Add `snapshot` (pull configs to a local dated folder) and `diff` against
 the previous snapshot or the committed `startup-config`.

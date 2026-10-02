@@ -342,7 +342,7 @@ class LabDeployer:
 
     def _in_place(self, host: HostInfo, topo: Topology) -> bool:
         """Single local host: run containerlab directly on the user's file."""
-        return not self._multi_host and host.is_local and topo.path is not None
+        return runs_in_place(self.cluster, host, topo)
 
     def _plan(self, topo: Topology, strategy: str) -> PlacementPlan:
         if not self._multi_host:
@@ -691,6 +691,22 @@ class LabDeployer:
         for runner in self._runners.values():
             runner.close()
         self._runners.clear()
+
+
+def runs_in_place(cluster: ClusterConfig, host: HostInfo, topo: Topology) -> bool:
+    """Single local host: containerlab runs directly on the user's file."""
+    return len(cluster.hosts) == 1 and host.is_local and topo.path is not None
+
+
+def clab_dir(cluster: ClusterConfig, host: HostInfo, topo: Topology) -> str:
+    """The ``clab-<lab>`` directory containerlab creates for the lab on a host.
+
+    It holds one directory per node, where ``containerlab save`` leaves the
+    node's config.
+    """
+    if runs_in_place(cluster, host, topo):
+        return str(topo.base_dir.resolve() / f"clab-{topo.name}")
+    return f"{host.lab_dir(topo.name)}/clab-{topo.name}"
 
 
 def placement_record_path(topo: Topology) -> Optional[Path]:

@@ -21,6 +21,7 @@ from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runn
 from ..deployer import LabDeployer, read_placement_record
 from ..nodes import InspectError, access_modes, inspect_all, parse_inspect
 from ..readiness import ReadinessCache, check_ready
+from ..snapshots import Snapshotter, diff_lab
 from ..validate import validate_text
 from .editing import EditConflict, set_positions, text_hash, write_if_unchanged
 from ..runner import Runner
@@ -219,6 +220,13 @@ class Workspace:
             detail["error"] = str(exc)
         return detail
 
+    def node_diff(self, topo_id: str, node: str, against: str) -> dict:
+        """One node's config in the latest snapshot against ``previous`` or ``startup``."""
+        if against not in ("previous", "startup"):
+            raise ValueError("against must be 'previous' or 'startup'")
+        out = diff_lab(self.topology_path(topo_id), nodes=[node], against=against)
+        return {**out, **out["nodes"][0]}
+
     # --- editing ---
 
     def validate_yaml(self, topo_id: str, text: str) -> dict:
@@ -340,7 +348,7 @@ class Workspace:
 
 
 # ----------------------------------------------------------------------
-# Jobs (deploy / destroy / save): one per lab at a time, several labs at once
+# Jobs (deploy / destroy / save / snapshot): one per lab at a time, several labs at once
 # ----------------------------------------------------------------------
 
 @dataclass
@@ -466,7 +474,7 @@ class _JobLogHandler(logging.Handler):
 
 
 class JobManager:
-    ACTIONS = {"deploy", "redeploy", "destroy", "save"}
+    ACTIONS = {"deploy", "redeploy", "destroy", "save", "snapshot"}
     OPTIONS = {"rollback"}  # deploy/redeploy only
     MAX_RUNNING = 4
 
@@ -532,6 +540,10 @@ class JobManager:
                                          rollback=job.options.get("rollback", False))
             elif job.action == "destroy":
                 result = deployer.destroy(path)
+            elif job.action == "snapshot":
+                result = Snapshotter(copy.deepcopy(self.workspace.cluster), on_output=job.add,
+                                     interactive_sudo=False).take(path)
+                job.add(f"» snapshot {result['snapshot']}: {result['path']}")
             else:
                 result = deployer.save(path)
             job.result = result

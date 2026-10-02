@@ -968,7 +968,13 @@ function renderNodeCard() {
       node.name,
       h("button", { class: "close", title: "Close", onclick: () => selectNode(null) }, "×")),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
-    openButtons(lab, node.name, node.modes, running, !!rt));
+    openButtons(lab, node.name, node.modes, running, !!rt),
+    S.selected?.type === "topo" && h("span", { class: "open diff-open" },
+      h("button", {
+        class: "btn small ghost",
+        title: `Diff ${node.name}'s config in the latest snapshot`,
+        onclick: () => openDiff(S.selected.id, node.name),
+      }, "Config diff")));
   card.hidden = false;
 }
 
@@ -1132,6 +1138,46 @@ function openTerminal(lab, node, mode) {
   ro.observe(pane);
 
   terms.set(id, { term, fit, ws, ro });
+}
+
+// A node's latest snapshot against its startup-config or the snapshot before
+function openDiff(topoId, node) {
+  const id = `diff-${++termSeq}`;
+  const select = h("select", { class: "small", "aria-label": "Compare with" },
+    h("option", { value: "startup" }, "vs startup-config"),
+    h("option", { value: "previous" }, "vs previous snapshot"));
+  const meta = h("span", { class: "muted small mono" });
+  const pre = h("pre", { class: "activity mono" }, "Loading…");
+  const pane = h("div", { class: "pane activity-pane", "data-pane": id },
+    h("div", { class: "activity-bar" }, select, meta), pre);
+  $("#dock-panes").append(pane);
+  $("#dock-tabs").append(h("button", { class: "dock-tab", "data-pane": id, onclick: () => activatePane(id) },
+    `${node} · Diff`,
+    h("span", {
+      class: "x", role: "button", title: "Close diff",
+      onclick: (ev) => { ev.stopPropagation(); closeTerminal(id); },
+    }, "×")));
+  activatePane(id, true);
+
+  const load = async () => {
+    pre.textContent = "Loading…";
+    meta.textContent = "";
+    try {
+      const qs = new URLSearchParams({ node, against: select.value });
+      const d = await api(`/api/diff/${topoPath(topoId)}?${qs}`);
+      meta.textContent = `${d.from} vs ${d.against}`;
+      if (d.status === "skipped") { pre.textContent = `Not compared: ${d.reason}`; return; }
+      if (!d.diff) { pre.textContent = "No differences."; return; }
+      pre.replaceChildren(...d.diff.split("\n").map((line) => {
+        const cls = /^(\+\+\+|---)/.test(line) ? "info" : line.startsWith("+") ? "ok" : line.startsWith("-") ? "err" : line.startsWith("@@") ? "info" : null;
+        return cls ? h("span", { class: cls }, line + "\n") : line + "\n";
+      }));
+    } catch (e) {
+      pre.textContent = e.message;
+    }
+  };
+  select.addEventListener("change", load);
+  load();
 }
 
 function closeTerminal(id) {
