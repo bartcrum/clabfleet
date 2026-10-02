@@ -17,6 +17,7 @@
     <div id="hosts" class="hosts" aria-label="Lab hosts"></div>
     <span id="whoami" class="whoami small" hidden></span>
     <button id="logout" class="btn ghost small" hidden>Log out</button>
+    <button id="theme" class="btn ghost small" title="Colour theme: follow the system, light or dark"></button>
     <button id="refresh" class="btn ghost small" title="Refresh now">Refresh</button>
   </header>
 
@@ -143,6 +144,21 @@
       <p id="login-error" class="login-error small" role="alert" hidden></p>
     </form>
   </div>
+
+  <dialog id="confirm" class="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <div id="confirm-body" class="confirm-body"></div>
+      <label id="confirm-type" class="confirm-type" hidden>
+        <span>Type <b id="confirm-name" class="mono"></b> to confirm</span>
+        <input id="confirm-input" class="mono" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="confirm-actions">
+        <button id="confirm-cancel" class="btn" value="cancel">Cancel</button>
+        <button id="confirm-ok" class="btn" value="ok"></button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="toast" class="toast" role="status" hidden></div>
 
