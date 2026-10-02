@@ -1,52 +1,92 @@
-# Example device inventory for export-live command.
-# Lists production devices to connect to via NAPALM,
-# pull running configs and LLDP neighbours, and generate
-# a containerlab topology that mirrors the live network. Running configs
-# are written to configs/<node>.cfg next to the output file.
-#
-# kind/image/type are optional: kind defaults from the NAPALM platform
-# (ios → cisco_iol, eos → arista_ceos, junos → juniper_vjunosrouter, ...).
+# Example device inventory for the export-live command.
+# Lists production devices to connect to via NAPALM, pull running configs
+# and LLDP neighbours, and generate a containerlab topology that mirrors the
+# live network. Running configs are written to configs/<node>.cfg next to
+# the output file, and a <name>.import-report.yaml lists interface renames,
+# image choices and what --sanitise changed.
 #
 # Usage:
 #   clabfleet export-live topologies/live_devices_example.yaml \
-#       -o imported/prod_mirror.clab.yml --lab-name "prod-mirror"
+#       -o imported/prod_mirror.clab.yml --lab-name prod-mirror --sanitise
+#
+# Run it again later to see what changed in the network (nothing is written
+# until you add --apply).
+
+# Shared by every device; a device's own keys win. Instead of a password in
+# the file, name an environment variable with password_env, or set
+# CLABFLEET_DEVICE_USERNAME / CLABFLEET_DEVICE_PASSWORD.
+defaults:
+  username: "admin"
+  password_env: "PROD_NET_PASSWORD"
 
 devices:
   - hostname: "core-rtr-01.example.com"
     platform: "ios"           # NAPALM driver
-    username: "admin"
-    password: "changeme"      # or use env vars / vault
-    kind: "cisco_iol"         # containerlab kind
-    image: "vrnetlab/cisco_iol:17.12.01"
 
   - hostname: "core-rtr-02.example.com"
     platform: "ios"
-    username: "admin"
-    password: "changeme"
-    kind: "cisco_iol"
-    image: "vrnetlab/cisco_iol:17.12.01"
 
   - hostname: "dist-sw-01.example.com"
     platform: "eos"
-    username: "admin"
-    password: "changeme"
-    kind: "arista_ceos"
-    image: "ceos:4.32.0F"
     optional_args:
       transport: "https"
 
   - hostname: "dist-sw-02.example.com"
     platform: "eos"
-    username: "admin"
-    password: "changeme"
-    kind: "arista_ceos"
-    image: "ceos:4.32.0F"
     optional_args:
       transport: "https"
 
   - hostname: "fw-01.example.com"
     platform: "panos"
-    username: "admin"
-    password: "changeme"
-    kind: "paloalto_panos"
+    username: "fwadmin"       # per-device credentials override defaults
+    kind: "paloalto_panos"    # containerlab kind, skipping the rules below
     image: "vrnetlab/paloalto_pan:11.1.0"
+
+# Containerlab kind per device: the device's own kind, else the first rule
+# that matches, else the NAPALM platform default (ios → cisco_iol, eos →
+# arista_ceos, junos → juniper_vjunosrouter, ...). Match fields are regexes
+# on the whole value, case-insensitive: platform, vendor, model, version
+# (from the device's facts), role, site, tag (NetBox/Nautobot), group (Ansible),
+# hostname, name.
+kinds:
+  - platform: "ios"
+    model: "C9[23]00.*"       # Catalyst switches → IOL in L2 mode
+    kind: "cisco_iol"
+    type: "L2"
+
+# Image per node: the device's own image, else the first matching rule (the
+# same fields plus kind), else REPLACE-ME/<kind>:latest with a warning.
+images:
+  - kind: "cisco_iol"
+    type: "L2"
+    image: "vrnetlab/cisco_iol:L2-17.12.01"
+  - kind: "cisco_iol"
+    version: "17\\.12\\..*"
+    image: "vrnetlab/cisco_iol:17.12.01"
+  - kind: "cisco_iol"
+    image: "vrnetlab/cisco_iol:17.9.1"
+  - kind: "arista_ceos"
+    image: "ceos:4.32.0F"
+
+# Optional: take the device list from NetBox, Nautobot or an Ansible
+# inventory instead (devices above are added to it). The CLI flags
+# --netbox URL / --nautobot URL / --ansible FILE and --filter KEY=VALUE do
+# the same without a file.
+#
+# source:
+#   type: netbox                     # or nautobot
+#   url: "https://netbox.example.com"
+#   token_env: "NETBOX_TOKEN"        # default NETBOX_TOKEN / NAUTOBOT_TOKEN
+#   filters:                         # passed to /api/dcim/devices/
+#     site: "dc1"                    # Nautobot: location
+#     role: ["spine", "leaf"]
+#     tag: "lab-import"
+#   platform_map:                    # platform slug (Nautobot: name) → NAPALM driver
+#     cisco-ios-xe: "ios"
+#   verify_tls: true
+#
+# source:
+#   type: ansible
+#   path: "hosts.ini"                # relative to this file; YAML or INI
+#   filters:
+#     group: "datacenter"
