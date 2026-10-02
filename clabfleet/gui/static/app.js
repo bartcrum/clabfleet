@@ -66,7 +66,9 @@ async function api(path, opts = {}) {
     ...opts,
     headers: opts.body ? { "Content-Type": "application/json" } : undefined,
   });
-  if (res.status === 401) showLogin("Your session has ended. Log in again.");
+  if (res.status === 401) {
+    showLogin("Your session has ended. Log in again.", res.headers.get("X-Clabfleet-Login"));
+  }
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
   return res.json();
 }
@@ -1967,67 +1969,138 @@ async function loadMe() {
   who.hidden = !S.me.multi_user;
   who.replaceChildren(h("b", {}, S.me.user || ""), ` · ${S.me.role}`);
   $("#logout").hidden = false;  // ends the session in both modes
+  $("#password").hidden = !S.me.has_password;
   renderRuntimeOverlays();
 }
 
-// Login links carry the token in the URL fragment (#token=...), which the
-// browser does not send to the server. It is posted to /login instead and
-// dropped from the address bar.
-async function postLogin(token, switchUser = false) {
+// ``creds`` is {username, password} or {token}. Login links carry the
+// token in the URL fragment (#token=...), which the browser does not send
+// to the server. It is posted to /login instead and dropped from the
+// address bar.
+async function postLogin(creds, switchUser = false) {
   const res = await fetch("/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token, switch: switchUser }),
+    body: JSON.stringify({ ...creds, switch: switchUser }),
   });
   if (res.status === 409) {
     // Logged in as someone else: only switch if the user says so
     const { user } = await res.json();
     if (await confirmDialog({
       title: "Switch user?",
-      body: `You are logged in as ${user}. Log in as the user of this link instead?`,
+      body: `You are logged in as ${user}. ` +
+        `Log in as ${creds.username || "the user of this link"} instead?`,
       ok: "Switch user",
     })) {
-      await postLogin(token, true);
+      await postLogin(creds, true);
     }
     return;
   }
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
 }
 
-function showLogin(message) {
+// The login form asks for a name and password when the GUI has named users
+// ("password"), else for the start-up token ("token"); named users can
+// switch to a token too
+const login = { mode: "token", useToken: false };
+
+function renderLoginForm() {
+  const token = login.mode === "token" || login.useToken;
+  $("#login-fields").hidden = token;
+  $("#login-token").hidden = !token;
+  $("#login-user").required = $("#login-pass").required = !token;
+  $("#login-token").required = token;
+  $("#login-hint").textContent = token
+    ? "Open the GUI with your login link, or paste your token."
+    : "Log in with your user name and password.";
+  const sw = $("#login-switch");
+  sw.hidden = login.mode !== "password";
+  sw.textContent = login.useToken ? "Use a name and password" : "Use a login token instead";
+}
+
+function showLogin(message, mode) {
+  if (mode) login.mode = mode;
+  renderLoginForm();
   $("#login").hidden = false;
   const err = $("#login-error");
   err.textContent = message || "";
   err.hidden = !message;
-  $("#login-token").focus();
+  (login.mode === "token" || login.useToken ? $("#login-token")
+    : $("#login-user").value ? $("#login-pass") : $("#login-user")).focus();
 }
 
 async function boot() {
+  $("#pw-form").addEventListener("submit", submitPassword);
+  $("#pw-cancel").addEventListener("click", () => { $("#pwchange").hidden = true; });
   $("#login-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    const creds = login.mode === "token" || login.useToken
+      ? { token: $("#login-token").value.trim() }
+      : { username: $("#login-user").value.trim(), password: $("#login-pass").value };
     try {
-      await postLogin($("#login-token").value.trim());
+      await postLogin(creds);
       location.replace("/");
     } catch (e) {
+      $("#login-pass").value = "";
       showLogin(e.message);
     }
   });
+  $("#login-switch").addEventListener("click", () => {
+    login.useToken = !login.useToken;
+    showLogin();
+  });
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
+  let linkError = null;
   if (token !== null) {
     history.replaceState(null, "", location.pathname + location.search);
     try {
-      await postLogin(token);
+      await postLogin({ token });
     } catch (e) {
-      showLogin(e.message);
-      return;
+      linkError = e.message;
     }
   }
   const res = await fetch("/api/me");
   if (res.status === 401) {
-    showLogin();
+    showLogin(linkError, res.headers.get("X-Clabfleet-Login"));
+    return;
+  }
+  // First login (admin / admin): a new password before anything else
+  if ((await res.json()).must_change) {
+    showPasswordForm(true);
     return;
   }
   setup();
+}
+
+// Change your own password. ``forced``: the first login, which may do
+// nothing else (the server refuses everything but this until it is done).
+function showPasswordForm(forced) {
+  $("#pwchange").hidden = false;
+  $("#pw-title").textContent = forced ? "Set a new password" : "Change your password";
+  $("#pw-hint").textContent = forced
+    ? "This is the first login with the default password. Choose your own to continue."
+    : "Your other browsers are logged out when the password changes.";
+  $("#pw-cancel").hidden = forced;
+  $("#pw-form").dataset.forced = forced ? "1" : "";
+  for (const id of ["#pw-current", "#pw-new", "#pw-again"]) $(id).value = "";
+  $("#pw-error").hidden = true;
+  $("#pw-current").focus();
+}
+
+async function submitPassword(ev) {
+  ev.preventDefault();
+  const err = $("#pw-error");
+  const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+  if ($("#pw-new").value !== $("#pw-again").value) return fail("The new passwords do not match.");
+  const res = await fetch("/api/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ current: $("#pw-current").value, new: $("#pw-new").value }),
+  });
+  if (!res.ok) return fail((await res.text()) || res.statusText);
+  if ($("#pw-form").dataset.forced) { location.replace("/"); return; }
+  $("#pwchange").hidden = true;
+  toast("Password changed");
 }
 
 async function logout() {
@@ -2055,6 +2128,7 @@ function setup() {
     applyTheme(next);
   });
   $("#logout").addEventListener("click", logout);
+  $("#password").addEventListener("click", () => showPasswordForm(false));
   const rollback = $("#opt-rollback");
   try { rollback.checked = localStorage.getItem("clab-rollback") === "1"; } catch { /* private mode */ }
   rollback.addEventListener("change", () => {

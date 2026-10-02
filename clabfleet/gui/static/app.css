@@ -453,6 +453,15 @@ table.nodes td .open { display: flex; gap: 6px; }
   border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px;
 }
 .login-error { color: var(--danger); }
+.login-fields { display: grid; gap: 10px; }
+.login-card input.sans { font-family: var(--sans); }
+.login-fields[hidden], .login-card input[hidden] { display: none; }
+.link-btn {
+  border: 0; background: none; padding: 0; color: var(--muted); cursor: pointer;
+  justify-self: start; text-decoration: underline;
+}
+.link-btn:hover { color: var(--text); }
+.link-btn[hidden] { display: none; }
 
 @media (max-width: 760px) {
   .sidebar { width: 200px; }

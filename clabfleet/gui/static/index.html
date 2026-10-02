@@ -16,6 +16,7 @@
     </div>
     <div id="hosts" class="hosts" aria-label="Lab hosts"></div>
     <span id="whoami" class="whoami small" hidden></span>
+    <button id="password" class="btn ghost small" hidden title="Change your password">Password</button>
     <button id="logout" class="btn ghost small" hidden>Log out</button>
     <button id="theme" class="btn ghost small" title="Colour theme: follow the system, light or dark"></button>
     <button id="refresh" class="btn ghost small" title="Refresh now">Refresh</button>
@@ -160,11 +161,35 @@
   <div id="login" class="login" hidden>
     <form id="login-form" class="login-card">
       <h1>clabfleet</h1>
-      <p class="muted small">Open the GUI with your login link, or paste your token.</p>
+      <p id="login-hint" class="muted small"></p>
+      <div id="login-fields" class="login-fields" hidden>
+        <input id="login-user" class="sans" autocomplete="username" autocapitalize="off"
+               spellcheck="false" aria-label="User name" placeholder="User name">
+        <input id="login-pass" class="sans" type="password" autocomplete="current-password"
+               aria-label="Password" placeholder="Password">
+      </div>
       <input id="login-token" class="mono" type="password" autocomplete="off"
-             aria-label="Login token" placeholder="Token" required>
+             aria-label="Login token" placeholder="Token">
       <button class="btn primary" type="submit">Log in</button>
+      <button id="login-switch" class="link-btn small" type="button" hidden></button>
       <p id="login-error" class="login-error small" role="alert" hidden></p>
+    </form>
+  </div>
+
+  <!-- Set a new password: required after the first login (admin / admin) -->
+  <div id="pwchange" class="login" hidden>
+    <form id="pw-form" class="login-card">
+      <h1 id="pw-title">Set a new password</h1>
+      <p id="pw-hint" class="muted small"></p>
+      <input id="pw-current" class="sans" type="password" autocomplete="current-password"
+             aria-label="Current password" placeholder="Current password" required>
+      <input id="pw-new" class="sans" type="password" autocomplete="new-password" minlength="12"
+             aria-label="New password" placeholder="New password (12 characters or more)" required>
+      <input id="pw-again" class="sans" type="password" autocomplete="new-password"
+             aria-label="New password again" placeholder="New password again" required>
+      <button class="btn primary" type="submit">Set password</button>
+      <button id="pw-cancel" class="link-btn small" type="button">Cancel</button>
+      <p id="pw-error" class="login-error small" role="alert" hidden></p>
     </form>
   </div>
 

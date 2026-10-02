@@ -3,10 +3,19 @@
 Users live in a YAML file (``~/.clabfleet/users.yaml`` by default, mode
 0600) managed with ``clabfleet user``. A users file that another user could
 change (group/world-writable, or owned by someone else, or in such a
-directory) is refused: whoever can write it can make themselves an operator. Each user has a role and the SHA-256
-of a random token; the token itself is shown once and never stored. A
-plain hash is enough because tokens are 256-bit random strings, not
-passwords.
+directory) is refused: whoever can write it can make themselves an operator.
+
+Each user has a role and logs in with a password, a token, or either:
+
+- Password: stored as scrypt with a random salt and the cost parameters
+  (``scrypt$n$r$p$salt$hash``), so the cost can be raised later without
+  breaking stored passwords.
+- Token: a random string shown once; only its SHA-256 is stored. A plain
+  hash is enough because tokens are 256-bit random strings, not passwords.
+
+A new install starts with ``admin`` / ``admin`` (``UserStore.bootstrap``),
+marked ``must_change``: until that user sets a new password, the server
+lets their session do nothing else.
 
 Roles:
 
@@ -21,6 +30,7 @@ default.
 Nothing here imports aiohttp, so the CLI can manage users without it.
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -48,6 +58,12 @@ DEFAULT_USERS_FILE = Path("~/.clabfleet/users.yaml")
 AUDIT_FILE_NAME = "audit.jsonl"  # default: next to the users file
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
+
+MIN_PASSWORD = 12                # characters
+BOOTSTRAP_USER = BOOTSTRAP_PASSWORD = "admin"  # first login of a new install; must be changed
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 17, 8, 1   # about 128 MiB and 0.25 s per check
+SCRYPT_MAXMEM = 256 * 1024 * 1024
+PASSWORD_RE = re.compile(r"scrypt\$(\d+)\$(\d+)\$(\d+)\$([A-Za-z0-9+/=]+)\$([A-Za-z0-9+/=]+)")
 
 # Route access markers, set on handler functions
 ACCESS_ATTR = "_clabfleet_access"
@@ -78,6 +94,45 @@ def new_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def hash_password(password: str) -> str:
+    """``scrypt$n$r$p$salt$hash`` for a new password."""
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P,
+                            maxmem=SCRYPT_MAXMEM, dklen=32)
+    b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
+    return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${b64(salt)}${b64(digest)}"
+
+
+def verify_password(stored: str, password: str) -> bool:
+    m = PASSWORD_RE.fullmatch(stored or "")
+    if not m or not isinstance(password, str):
+        return False
+    n, r, p = (int(x) for x in m.group(1, 2, 3))
+    try:
+        digest = hashlib.scrypt(password.encode(), salt=base64.b64decode(m.group(4)), n=n, r=r,
+                                p=p, maxmem=SCRYPT_MAXMEM, dklen=32)
+    except (ValueError, UnicodeEncodeError):  # bad parameters, a lone surrogate
+        return False
+    return hmac.compare_digest(digest, base64.b64decode(m.group(5)))
+
+
+def check_new_password(password: str) -> None:
+    if len(password) < MIN_PASSWORD:
+        raise ValueError(f"Passwords need at least {MIN_PASSWORD} characters")
+
+
+# Checked when the user name does not exist, so a failed login takes the
+# same time either way and does not tell which names are real
+_DUMMY_PASSWORD: Optional[str] = None
+
+
+def _dummy_password() -> str:
+    global _DUMMY_PASSWORD
+    if _DUMMY_PASSWORD is None or not _DUMMY_PASSWORD.startswith(f"scrypt${SCRYPT_N}$"):
+        _DUMMY_PASSWORD = hash_password(secrets.token_urlsafe(16))
+    return _DUMMY_PASSWORD
+
+
 def login_link(base: str, token: str) -> str:
     """A login link. The token goes in the fragment, which browsers do not
     send to the server, so it stays out of access logs and proxies; the
@@ -89,15 +144,31 @@ def login_link(base: str, token: str) -> str:
 class User:
     name: str  # "" for the single-token mode's anonymous operator
     role: str
-    token_sha256: str = ""
+    token_sha256: str = ""  # "" for a user without a token
     created: str = ""
+    password: str = ""      # scrypt string; "" for a user without a password
+    must_change: bool = False  # may only set a new password (the first admin)
 
     @property
     def is_operator(self) -> bool:
         return self.role == OPERATOR
 
+    @property
+    def credential(self) -> str:
+        """Changes when the user's token or password does: sessions keep it
+        and end when it no longer matches."""
+        return hashlib.sha256(f"{self.token_sha256}|{self.password}".encode()).hexdigest()
+
     def to_dict(self) -> dict:
-        return {"role": self.role, "token_sha256": self.token_sha256, "created": self.created}
+        out = {"role": self.role}
+        if self.password:
+            out["password"] = self.password
+        if self.token_sha256:
+            out["token_sha256"] = self.token_sha256
+        if self.must_change:
+            out["must_change"] = True
+        out["created"] = self.created
+        return out
 
 
 class UserStore:
@@ -144,10 +215,16 @@ class UserStore:
             role = entry.get("role")
             if role not in ROLES:
                 raise ValueError(f"user '{name}': role must be one of {', '.join(ROLES)}")
-            digest = str(entry.get("token_sha256", ""))
-            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            digest = str(entry.get("token_sha256", "") or "")
+            if digest and not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError(f"user '{name}': token_sha256 is not a SHA-256 hex digest")
-            users[str(name)] = User(str(name), role, digest, str(entry.get("created", "")))
+            password = str(entry.get("password", "") or "")
+            if password and not PASSWORD_RE.fullmatch(password):
+                raise ValueError(f"user '{name}': password is not an scrypt hash")
+            if not digest and not password:
+                raise ValueError(f"user '{name}': has neither a password nor a token")
+            users[str(name)] = User(str(name), role, digest, str(entry.get("created", "")),
+                                    password, entry.get("must_change") is True)
         return users
 
     def _check_ownership(self) -> None:
@@ -169,25 +246,60 @@ class UserStore:
         digest = hash_token(token)
         found = None
         for user in self.users().values():  # no early exit: constant work per user
-            if hmac.compare_digest(digest, user.token_sha256):
+            if user.token_sha256 and hmac.compare_digest(digest, user.token_sha256):
                 found = user
         return found
 
+    def check_password(self, name: str, password: str) -> Optional[User]:
+        """The user if ``password`` is theirs. Slow on purpose (scrypt): call
+        it off the event loop. Unknown names cost as much as known ones."""
+        user = self.users().get(name) if isinstance(name, str) else None
+        stored = user.password if user and user.password else _dummy_password()
+        ok = verify_password(stored, password)
+        return user if ok and user and user.password else None
+
     # --- changes (CLI) ---
 
-    def add(self, name: str, role: str = OPERATOR) -> str:
-        """Create a user; returns its token (shown once, not stored)."""
+    def add(self, name: str, role: str = OPERATOR, password: Optional[str] = None) -> Optional[str]:
+        """Create a user with ``password``, or without one with a token,
+        which is returned (shown once, not stored)."""
         if not NAME_RE.match(name):
             raise ValueError("User names are 1-32 letters, digits, '.', '_' or '-'")
         if role not in ROLES:
             raise ValueError(f"Role must be one of {', '.join(ROLES)}")
+        if password is not None:
+            check_new_password(password)
         users = self._load_for_update()
         if name in users:
-            raise ValueError(f"User '{name}' already exists (use 'clabfleet user rotate')")
-        token = new_token()
-        users[name] = User(name, role, hash_token(token), now_iso())
+            raise ValueError(f"User '{name}' already exists (use 'clabfleet user passwd')")
+        if password is not None:
+            users[name] = User(name, role, "", now_iso(), hash_password(password))
+            token = None
+        else:
+            token = new_token()
+            users[name] = User(name, role, hash_token(token), now_iso())
         self._write(users)
         return token
+
+    def set_password(self, name: str, password: str) -> None:
+        """Set a user's password; their sessions end."""
+        check_new_password(password)
+        users = self._load_for_update()
+        if name not in users:
+            raise KeyError(f"No user '{name}'")
+        users[name].password = hash_password(password)
+        users[name].must_change = False
+        self._write(users)
+
+    def bootstrap(self) -> bool:
+        """Create the first user, admin / admin, who must set a new password
+        at the first login. Only when there is no users file yet; True if
+        it was created."""
+        if self.path.exists():
+            return False
+        self._write({BOOTSTRAP_USER: User(BOOTSTRAP_USER, OPERATOR, "", now_iso(),
+                                          hash_password(BOOTSTRAP_PASSWORD), True)})
+        return True
 
     def rotate(self, name: str) -> str:
         """Give a user a new token; the old one (and its sessions) stop working."""
@@ -248,8 +360,8 @@ class SessionFile:
 
     Holds the SHA-256 of each session id, never the id itself: reading the
     file does not let anyone use a session. Each entry also has the user
-    name, the hash of the token the session came from (rotating the token
-    ends it) and its creation and last-use times (Unix seconds). A file
+    name, the user's ``credential`` at login (a new token or password ends
+    the session) and its creation and last-use times (Unix seconds). A file
     other users could change is not used, as for the users file.
     """
 
@@ -258,7 +370,7 @@ class SessionFile:
         self.usable = True
 
     def load(self) -> dict[str, dict]:
-        """Session hash -> {name, token_sha256, created, last_seen}."""
+        """Session hash -> {name, credential, created, last_seen}."""
         try:
             check_private(self.path, "Sessions file")
             data = json.loads(self.path.read_text())
@@ -269,7 +381,7 @@ class SessionFile:
             for key, s in sessions.items():
                 if re.fullmatch(r"[0-9a-f]{64}", str(key)) and isinstance(s, dict):
                     out[key] = {"name": str(s.get("name", "")),
-                                "token_sha256": str(s.get("token_sha256", "")),
+                                "credential": str(s.get("credential", "")),
                                 "created": float(s.get("created", 0)),
                                 "last_seen": float(s.get("last_seen", 0))}
             return out

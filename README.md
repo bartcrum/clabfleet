@@ -388,8 +388,13 @@ clabfleet --sudo gui                     # this machine
 clabfleet gui --cluster topologies/cluster.yaml   # all cluster hosts
 ```
 
-It opens your browser at a `http://localhost:8650/#token=...` link (also
-printed in the terminal). Stop it with Ctrl+C.
+It prints its address (`http://localhost:8650/`); log in there. The first
+time, the users file `~/.clabfleet/users.yaml` is created with one user,
+**admin / admin**: the first login asks for a new password (12 characters
+or more) and allows nothing else until it is set. Stop the GUI with
+Ctrl+C. `--single-token` skips users altogether: the GUI prints a random
+token link instead, opens it in your browser, and whoever has the token is
+an operator.
 
 - **Look:** the **◐ System / ☀ Light / ☾ Dark** button in the top bar
   picks the colour theme (remembered per browser). Status is shown by
@@ -512,10 +517,10 @@ printed in the terminal). Stop it with Ctrl+C.
   SSH user there needs Docker access (the `docker` group)
 
 Security: terminals are shell access, so the GUI listens on `127.0.0.1`
-only and needs the random token from its start-up URL. Requests from other
-websites are refused. Use `--bind` with care. See
-[Login and sessions](#login-and-sessions) below; they work the same way
-with a single token.
+only and every request needs a login. Requests from other websites are
+refused. Use `--bind` with care, and set the admin password before you
+do: until then anyone who reaches the GUI can log in as admin / admin and
+choose the password. See [Login and sessions](#login-and-sessions) below.
 
 ### Several users on a shared lab server
 
@@ -523,27 +528,33 @@ To let several people reach one GUI remotely, give each a named login
 and serve it over TLS:
 
 ```bash
-clabfleet user add alice                  # operator: everything
+clabfleet user add alice                  # operator: everything; asks for a password
 clabfleet user add bob --role viewer      # read-only
+clabfleet user add ci --token             # a login token instead of a password
+clabfleet user passwd alice               # new password, ends alice's sessions
+clabfleet user rotate ci                  # new token, ends ci's sessions
 clabfleet user list
-clabfleet user rotate alice               # new token, ends alice's sessions
 clabfleet user remove bob                 # ends bob's sessions
 
 clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
 ```
 
 - **Users file:** `~/.clabfleet/users.yaml` (mode 0600; another file with
-  `--users FILE` on both `gui` and `user`). When it exists, the GUI uses
-  named logins instead of the start-up token. Only SHA-256 hashes of the
-  tokens are stored. `user add` and `user rotate` print the token once,
-  with a login link (`--url https://lab.example.com:8650` sets its
-  address). Changes apply to a running GUI right away. A users file that
+  `--users FILE` on both `gui` and `user`; only the default one is created
+  with admin / admin when missing). Passwords are stored as scrypt hashes
+  with a random salt, tokens as SHA-256 hashes. `user add` and `user
+  passwd` ask for the password twice (`--password-stdin` reads one line
+  from stdin, for scripts); `user add --token` and `user rotate` print a
+  token once, with a login link (`--url https://lab.example.com:8650`
+  sets its address). `user list` shows how each user logs in. Changes
+  apply to a running GUI right away. A users file that
   other users could change (group/world-writable, owned by someone else,
   or in such a directory) is refused and nobody can log in until it is
   fixed.
-- **Login:** each user opens `https://<server>:8650/#token=<their token>`
-  or pastes their token into the login form, once per browser: the login
-  lasts up to 30 days and survives GUI restarts. See
+- **Login:** each user logs in at `https://<server>:8650/` with their name
+  and password (or opens their token link), once per browser: the login
+  lasts up to 30 days and survives GUI restarts. **Password** in the top
+  bar changes your own password and logs out your other browsers. See
   [Login and sessions](#login-and-sessions). The header shows who you are
   and your role.
 - **Roles:**
@@ -561,8 +572,10 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
 - **Audit log:** `audit.jsonl` next to the users file (or `--audit-log
   FILE`; in single-token mode only with `--audit-log`). One JSON object
   per line with `ts`, `user`, `role`, `remote`, `event` and `details`.
-  Events: `login`, `login_failed`, `login_throttled` (once per address
-  and minute after 5 failed logins), `logout`, `denied`, `job_started`
+  Events: `login` (method: password or token), `login_failed` (with the
+  user name tried), `login_throttled` (once per address or user name and
+  minute after 5 failed logins), `logout`, `password_changed`,
+  `password_change_failed`, `denied`, `job_started`
   (action, topology, options), `job_finished` (status, seconds),
   `topology_saved`, `positions_saved`, `terminal_opened` and
   `terminal_closed` (lab, node, mode, host, seconds, exit code),
@@ -586,6 +599,12 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
 
 ### Login and sessions
 
+- Named users log in with their name and password. Checking a password
+  takes about a quarter of a second (scrypt), the same for names that do
+  not exist, so failures do not tell which names are real. Passwords need
+  12 characters or more. A user marked to change their password (the
+  first admin) can only change it: the server refuses every other
+  request from that login until it is done.
 - Login links put the token after `#` (`/#token=...`). Browsers do not
   send that part to the server, so it stays out of access logs and proxy
   logs; the page posts the token to `/login` and removes it from the
@@ -597,8 +616,8 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   cannot log your browser in. A login link of a different user does not
   replace your session unless you confirm the switch.
 - A login gives the browser a random session id in a cookie (HttpOnly,
-  SameSite=Strict; over HTTPS Secure with the `__Host-` prefix). The token
-  itself is never stored in the browser. The cookie name includes the
+  SameSite=Strict; over HTTPS Secure with the `__Host-` prefix). The
+  password or token itself is never stored in the browser. The cookie name includes the
   GUI's port, because browsers send a host's cookies to all of its ports.
 - Logins survive a GUI restart on the same port, and closing the browser:
   open your link once per browser. The sessions are kept in
@@ -609,11 +628,14 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   single-token mode each start prints a new token, but browsers already
   logged in stay logged in; delete the file to log every browser out.
 - A session ends after 7 days idle, 30 days after login, on **Log out**,
-  or when the user is removed or rotated. Each user keeps at most 20
-  sessions; another login ends the oldest.
+  when the user's password or token changes, or when the user is
+  removed. Each user keeps at most 20 sessions; another login ends the
+  oldest.
 - After 5 failed logins from one address within a minute, logins from it
-  are refused (429) for the rest of that minute. Behind a reverse proxy
-  every client shares the proxy's address.
+  are refused (429) for the rest of that minute; likewise after 5 wrong
+  passwords for one user name, from any address (so one account can be
+  locked out for a minute at a time by someone guessing at it). Behind a
+  reverse proxy every client shares the proxy's address.
 - Responses carry a Content-Security-Policy (no inline scripts, no
   framing) and `Cache-Control: no-store` for everything but static files.
 
@@ -624,7 +646,10 @@ containers. They can also open shells on every node and, through
 `docker exec`, act as the account the GUI runs as on each lab host. Make
 only trusted people operators; `viewer` is the role for anyone else.
 Tokens are bearer secrets: anyone with a login link is that user until you
-rotate it. Terminals and captures that are already open are closed
+rotate it. Passwords are only as strong as people make them; for a team,
+plan to put the GUI behind your directory (LDAP / Active Directory, or
+OAuth / OIDC through a reverse proxy) rather than rely on them.
+Terminals and captures that are already open are closed
 within a few seconds when their user is removed, rotated, demoted from
 operator or logs out.
 
