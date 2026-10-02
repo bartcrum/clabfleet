@@ -43,17 +43,26 @@
           <div class="lab-title">
             <h1 id="lab-name"></h1>
             <span id="lab-state" class="badge"></span>
-            <div id="lab-path" class="muted mono small"></div>
+            <button id="lab-path" class="icon-btn" hidden>⧉</button>
+            <div id="lab-stats" class="lab-stats"></div>
           </div>
           <div id="lab-actions" class="actions operator-only">
-            <label class="opt" title="If a host fails during Deploy or Redeploy, destroy the lab on every host instead of leaving it partly running">
-              <input type="checkbox" id="opt-rollback"> Roll back on failure
-            </label>
             <button class="btn primary" data-action="deploy">Deploy</button>
-            <button class="btn" data-action="redeploy" title="Destroy and recreate all nodes (discards node state)">Redeploy</button>
-            <button class="btn" data-action="save" title="Save running configs into the lab directory">Save configs</button>
-            <button class="btn" data-action="snapshot" title="Save configs and copy them to a dated folder in snapshots/ next to the topology">Snapshot</button>
-            <button class="btn danger" data-action="destroy">Destroy</button>
+            <div id="lab-secondary" class="btn-group">
+              <button class="btn" data-action="redeploy" title="Destroy and recreate all nodes (discards node state)">Redeploy</button>
+              <button class="btn" data-action="save" title="Save running configs into the lab directory">Save configs</button>
+              <button class="btn" data-action="snapshot" title="Save configs and copy them to a dated folder in snapshots/ next to the topology">Snapshot</button>
+            </div>
+            <div class="menu-wrap">
+              <button id="lab-more" class="btn" aria-haspopup="menu" aria-expanded="false" aria-controls="lab-menu" title="More actions">⋯</button>
+              <div id="lab-menu" class="menu" role="menu" hidden>
+                <label class="menu-item" title="If a host fails during Deploy or Redeploy, destroy the lab on every host instead of leaving it partly running">
+                  <input type="checkbox" id="opt-rollback"> Roll back on failure
+                </label>
+                <hr>
+                <button class="menu-item danger" role="menuitem" data-action="destroy">Destroy lab…</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -64,52 +73,57 @@
           <button class="tab" data-view="yaml" role="tab">YAML</button>
         </nav>
 
-        <div class="views">
-          <section id="view-diagram" class="view">
-            <svg id="diagram" class="diagram" aria-label="Topology diagram"></svg>
-            <div class="diagram-tools">
-              <button id="save-layout" class="btn ghost small operator-only" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
-              <button id="relayout" class="btn ghost small" title="Discard manual positions">Auto layout</button>
-              <button id="fit" class="btn ghost small">Fit</button>
-            </div>
-            <div id="node-card" class="node-card" hidden></div>
-            <div id="link-card" class="node-card link-card operator-only" hidden></div>
-            <div id="diagram-error" class="diagram-error" hidden></div>
-          </section>
-          <section id="view-nodes" class="view" hidden>
-            <table class="nodes">
-              <thead><tr><th>Node</th><th>Kind</th><th>Image</th><th id="host-col">Host</th><th>State</th><th>Mgmt IPv4</th><th>Open</th></tr></thead>
-              <tbody id="node-rows"></tbody>
-            </table>
-          </section>
-          <section id="view-routing" class="view" hidden>
-            <svg id="routing" class="diagram routing" aria-label="Routing protocol diagram"></svg>
-            <div class="routing-bar">
-              <div id="routing-modes" class="seg" role="group" aria-label="Intended or live"></div>
-              <div id="routing-protos" class="seg" role="group" aria-label="Protocol"></div>
-              <div id="routing-filters" class="routing-filters"></div>
-              <span id="routing-live-status" class="routing-live-status small" hidden></span>
-            </div>
-            <div class="diagram-tools">
-              <button id="routing-problems-btn" class="btn ghost small" hidden></button>
-              <button id="routing-reload" class="btn ghost small" title="Read the startup configs again">Reload</button>
-              <button id="routing-fit" class="btn ghost small">Fit</button>
-            </div>
-            <ul id="routing-problems" class="routing-problems" hidden></ul>
-            <div id="routing-legend" class="routing-legend" hidden></div>
-            <div id="routing-card" class="node-card routing-card" hidden></div>
-            <div id="routing-empty" class="diagram-error routing-empty" hidden></div>
-          </section>
-          <section id="view-yaml" class="view yaml-view" hidden>
-            <div class="editor-bar operator-only">
-              <button id="yaml-save" class="btn small primary" disabled title="Save (Ctrl+S)">Save</button>
-              <button id="yaml-revert" class="btn small" disabled title="Discard changes and reload the file">Revert</button>
-              <span id="yaml-status" class="muted small"></span>
-            </div>
-            <textarea id="yaml" class="yaml mono" spellcheck="false" autocomplete="off"
-                      autocapitalize="off" aria-label="Topology YAML"></textarea>
-            <ul id="yaml-problems" class="problems" hidden></ul>
-          </section>
+        <div class="lab-body">
+          <div class="views">
+            <section id="view-diagram" class="view">
+              <svg id="diagram" class="diagram" aria-label="Topology diagram"></svg>
+              <div class="diagram-tools">
+                <button id="save-layout" class="btn ghost small operator-only" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
+                <button id="relayout" class="btn ghost small" title="Discard manual positions">Auto layout</button>
+                <button id="fit" class="btn ghost small">Fit</button>
+              </div>
+              <div id="diagram-error" class="diagram-error" hidden></div>
+            </section>
+            <section id="view-nodes" class="view" hidden>
+              <table class="nodes">
+                <thead><tr><th>Node</th><th>Kind</th><th>Image</th><th id="host-col">Host</th><th>State</th><th>Mgmt IPv4</th><th>Open</th></tr></thead>
+                <tbody id="node-rows"></tbody>
+              </table>
+            </section>
+            <section id="view-routing" class="view" hidden>
+              <svg id="routing" class="diagram routing" aria-label="Routing protocol diagram"></svg>
+              <div class="routing-bar">
+                <div id="routing-modes" class="seg" role="group" aria-label="Intended or live"></div>
+                <div id="routing-protos" class="seg" role="group" aria-label="Protocol"></div>
+                <div id="routing-filters" class="routing-filters"></div>
+                <span id="routing-live-status" class="routing-live-status small" hidden></span>
+              </div>
+              <div class="diagram-tools">
+                <button id="routing-problems-btn" class="btn ghost small" hidden></button>
+                <button id="routing-reload" class="btn ghost small" title="Read the startup configs again">Reload</button>
+                <button id="routing-fit" class="btn ghost small">Fit</button>
+              </div>
+              <div id="routing-legend" class="routing-legend" hidden></div>
+              <div id="routing-empty" class="diagram-error routing-empty" hidden></div>
+            </section>
+            <section id="view-yaml" class="view yaml-view" hidden>
+              <div class="editor-bar operator-only">
+                <button id="yaml-save" class="btn small primary" disabled title="Save (Ctrl+S)">Save</button>
+                <button id="yaml-revert" class="btn small" disabled title="Discard changes and reload the file">Revert</button>
+                <span id="yaml-status" class="muted small"></span>
+              </div>
+              <textarea id="yaml" class="yaml mono" spellcheck="false" autocomplete="off"
+                        autocapitalize="off" aria-label="Topology YAML"></textarea>
+              <ul id="yaml-problems" class="problems" hidden></ul>
+            </section>
+          </div>
+          <!-- Details of the selection, shared by the Diagram, Nodes and Routing tabs -->
+          <aside id="inspector" class="inspector" aria-label="Selection details" hidden>
+            <div id="inspector-resize" class="inspector-resize" title="Drag to resize"></div>
+            <div id="node-card" class="insp-card" data-views="diagram nodes" hidden></div>
+            <div id="link-card" class="insp-card link-card operator-only" data-views="diagram" hidden></div>
+            <div id="routing-card" class="insp-card routing-card" data-views="routing" hidden></div>
+          </aside>
         </div>
       </div>
     </main>
@@ -120,6 +134,7 @@
     <div class="dock-bar">
       <div id="dock-tabs" class="dock-tabs">
         <button class="dock-tab active" data-pane="activity"><span id="activity-dot" class="dot"></span>Activity</button>
+        <button class="dock-tab" data-pane="health"><span id="health-dot" class="dot"></span>Health<span id="health-count" class="tab-count"></span></button>
       </div>
       <button id="dock-toggle" class="btn ghost small" title="Show/hide panel">▴</button>
     </div>
@@ -130,6 +145,14 @@
           <span id="job-meta" class="muted small mono"></span>
         </div>
         <pre id="activity" class="activity mono">No jobs yet.</pre>
+      </div>
+      <div class="pane health-pane" data-pane="health">
+        <div class="activity-bar">
+          <div id="health-sev" class="seg" role="group" aria-label="Severity"></div>
+          <select id="health-source" class="small" aria-label="Source"></select>
+          <span id="health-checks" class="muted small"></span>
+        </div>
+        <ul id="health-list" class="health-list"></ul>
       </div>
     </div>
   </section>

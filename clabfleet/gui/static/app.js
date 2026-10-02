@@ -289,7 +289,7 @@ async function refreshHosts() {
 async function refreshLive() {
   const id = S.selected?.type === "topo" ? S.selected.id : null;
   if (!id || !S.detail || S.detail.error || !labStatus(S.detail.name).deployed) {
-    if (S.live) { S.live = null; renderDiagram(false); renderNodeCard(); }
+    if (S.live) { S.live = null; renderDiagram(false); renderNodeCard(); renderLabHead(); }
     return;
   }
   let data;
@@ -302,6 +302,7 @@ async function refreshLive() {
   S.live = { ...data, id };
   renderDiagram(false);
   renderNodeCard();
+  renderLabHead();
   // First request for this lab: its probes are still running
   clearTimeout(S.liveRetry);
   if (!data.updated) S.liveRetry = setTimeout(refreshLive, 2500);
@@ -464,6 +465,7 @@ async function saveYaml() {
       if (S.selected?.id === id) {
         S.detail = detail;
         S.validation = validation;
+        S.fileValidation = { id, hash: detail.hash, report: validation };
         renderDiagram(false);
         renderNodesTable();
         renderNodeCard();
@@ -544,6 +546,8 @@ async function selectTopology(id) {
   renderNodesTable();
   renderNodeCard();
   refreshLive();
+  validateSaved();
+  window.Routing?.prefetch();
 }
 
 // Re-fetch the selected topology (e.g. after a job changed its placement
@@ -566,6 +570,7 @@ async function reloadDetail(discardEdits) {
   renderNodesTable();
   renderNodeCard();
   window.Routing?.changed();
+  validateSaved();
 }
 
 async function selectOtherLab(lab) {
@@ -597,22 +602,91 @@ function renderLabHead() {
   $("#lab-name").textContent = lab || "";
   const badge = $("#lab-state");
   badge.className = `badge ${st.state}`;
-  badge.textContent = st.state === "stopped" ? "not deployed"
-    : st.state === "booting" ? `booting · ${st.ready}/${st.total} ready`
-    : `${st.state} · ${st.running}/${st.total}`;
+  // Counts are in the status strip below
+  badge.textContent = st.state === "stopped" ? "not deployed" : st.state;
 
   const topoFile = labContainers(lab)[0]?.topo_file;
-  $("#lab-path").textContent = isTopo ? S.detail?.path || "" : topoFile ? `deployed from ${topoFile}` : "";
+  const path = isTopo ? S.detail?.path || "" : topoFile || "";
+  const pathBtn = $("#lab-path");
+  pathBtn.hidden = !path;
+  pathBtn.dataset.path = path;
+  pathBtn.title = `${isTopo ? "" : "Deployed from "}${path}\nClick to copy the path`;
+  pathBtn.setAttribute("aria-label", `Copy path ${path}`);
 
+  renderLabStats(lab, st, isTopo);
+
+  // One primary action: Deploy while nothing runs; the rest once it does
   const actions = $("#lab-actions");
   actions.hidden = !isTopo;
   const busy = isTopo && !!runningJob(S.selected.id);
   if (isTopo) renderEditorState();
-  for (const btn of actions.querySelectorAll("button")) {
+  actions.querySelector('[data-action="deploy"]').hidden = st.deployed > 0;
+  $("#lab-secondary").hidden = st.deployed === 0;
+  for (const btn of actions.querySelectorAll("[data-action]")) {
     const a = btn.dataset.action;
     const enabled = a === "deploy" ? st.deployed === 0 : st.deployed > 0;
     btn.disabled = busy || !enabled || !!S.detail?.error;
   }
+}
+
+// "6/6 running · 2 hosts · 8/8 sessions up"; each stat opens its source
+function renderLabStats(lab, st, isTopo) {
+  const stat = (cls, content, title, onclick) => onclick
+    ? h("button", { class: `stat ${cls}`, title, onclick }, content)
+    : h("span", { class: `stat ${cls}`, title }, content);
+  const items = [];
+  const toNodes = () => showView("nodes");
+  if (!st.deployed) {
+    items.push(stat("", isTopo ? `${st.total ?? 0} nodes` : "no containers", "", toNodes));
+  } else if (st.booting) {
+    items.push(stat("warn", [h("b", {}, `${st.ready}/${st.total}`), " ready"], `${st.booting} booting`, toNodes));
+  } else {
+    const down = st.total - st.running;
+    items.push(stat(down ? "warn" : "", [h("b", {}, `${st.running}/${st.total}`), " running"],
+      down ? `${down} node${down === 1 ? "" : "s"} not running` : "", toNodes));
+  }
+  if (S.state?.multi_host && st.deployed) {
+    const hosts = [...new Set(labContainers(lab).map((c) => c.host))].sort();
+    items.push(stat("", [h("b", {}, hosts.length), ` host${hosts.length === 1 ? "" : "s"}`], hosts.join(", ")));
+  }
+  const ses = isTopo ? window.Routing?.liveSummary() : null;
+  if (ses?.total) {
+    const down = ses.total - ses.up;
+    items.push(stat(down ? "bad" : "", [h("b", {}, `${ses.up}/${ses.total}`), " sessions up"],
+      `OSPF and BGP sessions, read ${ses.age}s ago`, () => window.Routing.showLive()));
+  }
+  const c = renderHealth();
+  const n = c.error + c.warn;
+  items.push(stat(c.error ? "bad" : c.warn ? "warn" : "", n ? [h("b", {}, n), ` problem${n === 1 ? "" : "s"}`] : "no problems",
+    "Open the Health panel", () => openHealth()));
+  $("#lab-stats").replaceChildren(...items.flatMap((el, i) => (i ? [h("span", { class: "sep", "aria-hidden": "true" }, "·"), el] : [el])));
+}
+
+async function copyLabPath() {
+  const path = $("#lab-path").dataset.path;
+  try {
+    await navigator.clipboard.writeText(path);
+    toast(`Copied ${path}`);
+  } catch {
+    toast(path);  // no clipboard (plain http): show it to copy by hand
+  }
+}
+
+function setupLabMenu() {
+  const btn = $("#lab-more"), menu = $("#lab-menu");
+  const setOpen = (open) => {
+    menu.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    if (open) menu.querySelector("input, button:not(:disabled)")?.focus();
+  };
+  btn.addEventListener("click", () => setOpen(menu.hidden));
+  document.addEventListener("pointerdown", (ev) => {
+    if (!menu.hidden && !ev.target.closest(".menu-wrap")) setOpen(false);
+  });
+  menu.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") { setOpen(false); btn.focus(); }
+  });
+  menu.querySelector("[data-action]").addEventListener("click", () => setOpen(false));
 }
 
 function setTabsAvailable(views) {
@@ -628,6 +702,49 @@ function showView(view) {
   for (const v of ["diagram", "nodes", "routing", "yaml"]) $(`#view-${v}`).hidden = v !== view;
   if (view === "diagram") renderDiagram(false);
   if (view === "routing") window.Routing?.show();
+  syncInspector();
+}
+
+function currentView() {
+  return document.querySelector(".tab.active")?.dataset.view;
+}
+
+// Show the inspector while the current tab has a selection to describe.
+// Each card says on which tabs it belongs (data-views).
+function syncInspector() {
+  const insp = $("#inspector");
+  const view = currentView();
+  let any = false;
+  for (const card of insp.querySelectorAll(".insp-card")) {
+    const here = card.dataset.views.split(" ").includes(view);
+    card.classList.toggle("off-view", !here);
+    if (here && !card.hidden && getComputedStyle(card).display !== "none") any = true;
+  }
+  insp.hidden = !any;
+}
+
+const INSPECTOR_MIN = 260;
+
+function setupInspector() {
+  const insp = $("#inspector"), handle = $("#inspector-resize");
+  try {
+    const w = Number(localStorage.getItem("clab-inspector-w"));
+    if (w >= INSPECTOR_MIN) insp.style.width = `${w}px`;
+  } catch { /* private mode */ }
+  handle.addEventListener("pointerdown", (ev) => {
+    handle.setPointerCapture(ev.pointerId);
+    handle.classList.add("dragging");
+    const startX = ev.clientX, startW = insp.offsetWidth;
+    const move = (e) => { insp.style.width = `${Math.max(INSPECTOR_MIN, startW + startX - e.clientX)}px`; };
+    const up = () => {
+      handle.classList.remove("dragging");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      try { localStorage.setItem("clab-inspector-w", String(insp.offsetWidth)); } catch { /* private mode */ }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  });
 }
 
 function renderRuntimeOverlays() {
@@ -638,6 +755,156 @@ function renderRuntimeOverlays() {
     window.Routing?.runtime();
   }
   renderNodesTable();
+}
+
+// ---------------------------------------------------------------------------
+// Health: everything wrong with the open lab in one list
+// ---------------------------------------------------------------------------
+
+const HEALTH_SOURCES = { topology: "Topology file", nodes: "Nodes", links: "Links", hosts: "Hosts", routing: "Routing" };
+const HEALTH_SEV_ORDER = { error: 0, warn: 1, info: 2 };
+const BOOT_SLOW_SEC = 300;           // booting longer than this is reported
+const bootSeen = new Map();          // "lab/node" -> when it was first seen booting (ms)
+const healthFilter = { sev: "all", source: "all" };
+
+// Checks of the saved topology file, for its validation errors and warnings
+async function validateSaved() {
+  if (S.selected?.type !== "topo" || !S.detail || S.detail.error) return;
+  const { id } = S.selected, { yaml, hash } = S.detail;
+  if (S.fileValidation?.id === id && S.fileValidation.hash === hash) return;
+  try {
+    const report = await api(`/api/validate/${topoPath(id)}`, { method: "POST", body: JSON.stringify({ yaml }) });
+    if (S.selected?.id === id && S.detail?.hash === hash) {
+      S.fileValidation = { id, hash, report };
+      renderLabHead();
+    }
+  } catch (e) { /* the next reload tries again */ }
+}
+
+// One item per problem: {sev: error|warn|info, source, tag, msg, go}
+function healthItems() {
+  const items = [];
+  const lab = currentLabName();
+  if (!lab) return items;
+  const add = (sev, source, msg, go, tag) => items.push({ sev, source, msg, go, tag: tag || HEALTH_SOURCES[source] });
+  const isTopo = S.selected.type === "topo";
+  const toYaml = () => showView("yaml");
+
+  if (isTopo && S.detail?.error) add("error", "topology", `The topology file could not be loaded: ${S.detail.error}`, toYaml);
+  const fv = isTopo && S.fileValidation?.id === S.selected.id && S.fileValidation.hash === S.detail?.hash
+    ? S.fileValidation.report : null;
+  for (const e of fv?.errors || []) add("error", "topology", e, toYaml);
+  for (const w of fv?.warnings || []) add("warn", "topology", w, toYaml);
+
+  // Hosts the lab runs on, or every host while it does not run
+  const used = new Set(labContainers(lab).map((c) => c.host));
+  for (const r of S.state?.runtime || []) {
+    if (!r.ok && (!used.size || used.has(r.host))) add("error", "hosts", `${r.host} cannot be reached: ${r.error || "no answer"}`);
+  }
+
+  const st = labStatus(lab);
+  if (st.deployed) {
+    const names = isTopo && S.detail?.nodes ? S.detail.nodes.map((n) => n.name) : labContainers(lab).map((c) => c.node);
+    const now = Date.now();
+    for (const name of names) {
+      const rt = nodeRuntime(lab, name);
+      const go = () => revealNode(name);
+      const key = `${lab}/${name}`;
+      if (rt?.state === "running" && rt.ready === false) {
+        if (!bootSeen.has(key)) bootSeen.set(key, now);
+        const sec = (now - bootSeen.get(key)) / 1000;
+        if (sec > BOOT_SLOW_SEC) add("warn", "nodes", `${name} has been booting for ${fmtDuration(sec)}${rt.ready_detail ? `: ${rt.ready_detail}` : ""}`, go);
+        continue;
+      }
+      bootSeen.delete(key);
+      if (!rt) add("warn", "nodes", `${name} is not deployed, but the rest of the lab is`, go);
+      else if (rt.state !== "running") add("error", "nodes", `${name} is not running: ${rt.status || rt.state}`, go);
+    }
+  }
+
+  const live = liveData();
+  for (const l of (isTopo && live && S.detail?.links) || []) {
+    const ls = live.links?.[l.id];
+    if (ls?.state === "down") {
+      add("error", "links", `${endpointLabel(l.a)} ↔ ${endpointLabel(l.b)} is down: ${downEnds(ls).join(", ")}`,
+        () => { showView("diagram"); selectLink(l.id); });
+    }
+  }
+
+  if (isTopo) {
+    for (const p of window.Routing?.health() || []) add(p.sev, "routing", p.msg, p.go, p.tag);
+  }
+  return items.sort((a, b) => HEALTH_SEV_ORDER[a.sev] - HEALTH_SEV_ORDER[b.sev]);
+}
+
+// Select a node on the Diagram (or the Nodes table for labs without a file)
+function revealNode(name) {
+  if (S.selected?.type === "topo" && S.detail?.nodes) {
+    showView("diagram");
+    selectNode(name);
+  } else {
+    showView("nodes");
+  }
+}
+
+function healthCounts(items) {
+  return { error: items.filter((i) => i.sev === "error").length, warn: items.filter((i) => i.sev === "warn").length };
+}
+
+function healthOpen() {
+  return document.querySelector('.pane[data-pane="health"]').classList.contains("active") &&
+    !$("#dock").classList.contains("collapsed");
+}
+
+function openHealth(source = "all") {
+  healthFilter.source = source;
+  healthFilter.sev = "all";
+  activatePane("health", true);
+  renderHealth();
+}
+
+// The Health tab, and the problem count for the header
+function renderHealth(items = healthItems()) {
+  const c = healthCounts(items);
+  $("#health-dot").className = `dot ${!currentLabName() ? "" : c.error ? "error" : c.warn ? "partial" : "running"}`;
+  $("#health-count").textContent = c.error + c.warn ? String(c.error + c.warn) : "";
+  if (healthOpen()) window.Routing?.pollLive();
+
+  $("#health-sev").replaceChildren(...[["all", "All", items.length], ["error", "Errors", c.error], ["warn", "Warnings", c.warn]]
+    .map(([k, label, n]) => h("button", {
+      class: `seg-btn${healthFilter.sev === k ? " active" : ""}`,
+      onclick: () => { healthFilter.sev = k; renderHealth(); },
+    }, `${label} ${n}`)));
+  const sel = $("#health-source");
+  sel.replaceChildren(h("option", { value: "all" }, "All sources"),
+    ...Object.entries(HEALTH_SOURCES).map(([k, label]) => h("option", { value: k }, label)));
+  sel.value = healthFilter.source;
+
+  const live = liveData(), rl = window.Routing?.liveAge();
+  const ago = (t) => `${Math.max(0, Math.round(Date.now() / 1000 - t))}s ago`;
+  $("#health-checks").textContent = !currentLabName() ? "" : [
+    "Checked: file, nodes, hosts",
+    live?.updated ? `links (read ${ago(live.updated)})` : null,
+    window.Routing?.loaded() ? "routing configs" : null,
+    rl != null ? `live routing (read ${rl}s ago)` : null,
+  ].filter(Boolean).join(" · ");
+
+  const shown = items.filter((i) => (healthFilter.sev === "all" || i.sev === healthFilter.sev) &&
+    (healthFilter.source === "all" || i.source === healthFilter.source));
+  const list = $("#health-list");
+  if (!currentLabName()) {
+    list.replaceChildren(h("li", { class: "health-empty" }, "Select a lab to check it."));
+  } else if (!shown.length) {
+    list.replaceChildren(h("li", { class: "health-empty" },
+      items.length ? "Nothing matches this filter." : `No problems found in ${currentLabName()}.`));
+  } else {
+    list.replaceChildren(...shown.map((i) => h("li", {},
+      h("button", { class: `health-row ${i.sev}`, onclick: i.go || null, disabled: !i.go },
+        h("span", { class: `sev ${i.sev}`, "aria-label": { error: "Error", warn: "Warning", info: "Note" }[i.sev] }),
+        h("span", { class: "tag" }, i.tag),
+        h("span", { class: "msg" }, i.msg)))));
+  }
+  return c;
 }
 
 // ---------------------------------------------------------------------------
@@ -676,9 +943,13 @@ function renderNodesTable() {
   } else {
     rows = labContainers(lab).map((c) => ({ name: c.node, kind: c.kind, image: c.image, modes: c.modes, rt: c }));
   }
+  const pick = S.selected.type === "topo";
   $("#node-rows").replaceChildren(...rows.map((n) => {
     const running = n.rt?.state === "running";
-    return h("tr", {},
+    return h("tr", {
+      class: pick ? `pick${S.selectedNode === n.name ? " selected" : ""}` : null,
+      onclick: pick ? (ev) => { if (!ev.target.closest("button")) selectNode(S.selectedNode === n.name ? null : n.name); } : null,
+    },
       h("td", {}, h("strong", {}, n.name)),
       h("td", { class: "mono small" }, n.kind + (n.type ? ` (${n.type})` : "")),
       h("td", { class: "img" }, n.rt?.image || n.image || ""),
@@ -1132,22 +1403,19 @@ function selectNode(id) {
   S.selectedLink = null;
   renderDiagram(false);
   renderNodeCard();
+  if (currentView() === "nodes") renderNodesTable();
 }
 
 function renderNodeCard() {
   renderLinkCard();  // the link card refreshes at the same points
   const card = $("#node-card");
   const node = S.detail?.nodes?.find((n) => n.name === S.selectedNode);
-  if (!node) { card.hidden = true; return; }
+  if (!node) { card.hidden = true; syncInspector(); return; }
   const lab = S.detail.name;
   const rt = nodeRuntime(lab, node.name);
   const running = rt?.state === "running";
   const live = liveData();
   const res = running ? live?.nodes?.[node.name] : null;
-  const down = Object.values(live?.links || {})
-    .flatMap((ls) => [ls.a, ls.b])
-    .filter((e) => e?.node === node.name && e.state === "down")
-    .map((e) => `${e.iface} (${e.detail})`);
   const rows = [
     ["Kind", node.kind + (node.type ? ` (${node.type})` : "")],
     ["Image", rt?.image || node.image],
@@ -1158,15 +1426,22 @@ function renderNodeCard() {
     res?.mem != null ? ["Memory", `${fmtBytes(res.mem)}` +
       (res.mem_limit ? ` of ${fmtBytes(res.mem_limit)}` : "") +
       (res.mem_percent != null ? ` (${res.mem_percent}%)` : "")] : null,
-    down.length ? ["Links down", down.join(", ")] : null,
     S.state?.multi_host ? ["Host", rt?.host || placedHost(node.name) || (node.host_pin && `${node.host_pin} (pinned)`) || (node.host_tags && `tags: ${node.host_tags}`)] : null,
   ].filter((r) => r && r[1]);
+  const protos = window.Routing?.nodeSummary(node.name) || [];
   card.replaceChildren(
     h("h3", {},
       h("span", { class: `dot ${nodeState(rt)}` }),
       node.name,
-      h("button", { class: "close", title: "Close", onclick: () => selectNode(null) }, "×")),
+      h("button", { class: "close", title: "Close", "aria-label": "Close", onclick: () => selectNode(null) }, "×")),
+    h("h4", {}, "Overview"),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
+    ...(nodeInterfaces(node.name, live) || []),
+    protos.length ? h("h4", {}, "Protocols") : null,
+    protos.length ? h("div", { class: "proto-list" }, protos.map((p) => h("button", {
+      class: "proto-row", title: `Show ${node.name} in the Routing tab (${p.label})`, onclick: p.go,
+    }, h("b", {}, p.label), h("span", { class: "mono" }, p.text), h("span", { class: "go-arrow", "aria-hidden": "true" }, "→")))) : null,
+    h("h4", {}, "Actions"),
     openButtons(lab, node.name, node.modes, running, !!rt),
     S.selected?.type === "topo" && canOperate() && h("span", { class: "open diff-open" },
       h("button", {
@@ -1175,6 +1450,34 @@ function renderNodeCard() {
         onclick: () => openDiff(S.selected.id, node.name),
       }, "Config diff")));
   card.hidden = false;
+  syncInspector();
+}
+
+// The node's links: interface, far end and (live) state; a row selects the link
+function nodeInterfaces(name, live) {
+  const rows = [];
+  for (const l of S.detail.links) {
+    for (const [mine, other, side] of [[l.a, l.b, "a"], [l.b, l.a, "b"]]) {
+      if (mine.node !== name) continue;
+      const end = live?.links?.[l.id]?.[side];
+      rows.push({ l, iface: mine.iface, peer: endpointLabel(other), state: end?.state, detail: end?.detail });
+    }
+  }
+  if (!rows.length) return null;
+  rows.sort((x, y) => naturalCmp(x.iface || "", y.iface || ""));
+  const showState = rows.some((r) => r.state);
+  return [
+    h("h4", {}, "Interfaces"),
+    h("table", { class: "rt-table" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Interface"), h("th", {}, "Peer"), showState ? h("th", {}, "State") : null)),
+      h("tbody", {}, rows.map((r) => h("tr", {
+        class: "go", title: `Select the link ${name}:${r.iface} ↔ ${r.peer}`,
+        onclick: () => { showView("diagram"); selectLink(r.l.id); },
+      },
+        h("td", {}, r.iface),
+        h("td", {}, r.peer),
+        showState ? h("td", { class: r.state || "", title: r.detail || "" }, r.state === "down" ? `down · ${r.detail}` : r.state || "") : null)))),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,8 +1533,11 @@ function buildLinkCard(card, l) {
     onkeydown: (ev) => { if (ev.key === "Enter") startCapture("live"); },
   });
   card.replaceChildren(
-    h("h3", {}, "Capture packets",
-      h("button", { class: "close", title: "Close", onclick: () => selectLink(null) }, "×")),
+    h("h3", {}, h("span", { class: "mono" }, `${endpointLabel(l.a)} ↔ ${endpointLabel(l.b)}`),
+      h("button", { class: "close", title: "Close", "aria-label": "Close", onclick: () => selectLink(null) }, "×")),
+    h("h4", {}, "Overview"),
+    h("dl", { class: "link-overview" }),
+    h("h4", {}, "Capture packets"),
     h("div", { class: "sides" }, ["a", "b"].map((k) =>
       h("label", { class: "side", "data-side": k },
         h("input", { type: "radio", name: "cap-side", value: k, onchange: () => { f.side = k; syncLinkCard(card, l); } }),
@@ -1253,6 +1559,19 @@ function buildLinkCard(card, l) {
 }
 
 function syncLinkCard(card, l) {
+  const ls = liveData()?.links?.[l.id];
+  const lab = S.detail.name;
+  const ha = l.a.node && nodeHost(lab, l.a.node), hb = l.b.node && nodeHost(lab, l.b.node);
+  const vni = crossLinkVnis()[`${endpointLabel(l.a)}|${endpointLabel(l.b)}`];
+  const endState = (e) => (e ? (e.state === "down" ? `down · ${e.detail}` : e.state) : "");
+  const rows = [
+    ["State", ls ? (ls.state === "down" ? "down" : ls.state) : "not known"],
+    ls?.a ? [endpointLabel(l.a), endState(ls.a)] : null,
+    ls?.b ? [endpointLabel(l.b), endState(ls.b)] : null,
+    l.type ? ["Type", l.type] : null,
+    S.state?.multi_host && ha && hb && ha !== hb ? ["VXLAN", `${ha} ↔ ${hb}${vni !== undefined ? `, VNI ${vni}` : ""}`] : null,
+  ].filter(Boolean);
+  card.querySelector(".link-overview").replaceChildren(...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
   const sides = { a: captureSide(l.a), b: captureSide(l.b) };
   if (!sides[captureForm.side].ok) {
     const other = captureForm.side === "a" ? "b" : "a";
@@ -1338,14 +1657,15 @@ function renderDownloads() {
   if (!list) return;
   list.replaceChildren(...[...downloads].map(([id, dl]) => h("li", {},
     h("span", { class: "dot busy" }),
-    h("span", { class: "mono small" }, `${dl.label} · ${fmtBytes(dl.bytes)}`),
+    h("span", { class: "mono small" }, `${dl.label} · ${fmtSize(dl.bytes)}`),
     h("button", {
       class: "btn small ghost", disabled: dl.stopped, title: "Stop capturing and save the file",
       onclick: () => { dl.stopped = true; dl.ctrl.abort(); },
     }, "Stop & save"))));
 }
 
-function fmtBytes(n) {
+// Capture download sizes (fmtBytes is for memory, in MiB / GiB)
+function fmtSize(n) {
   return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(0)} KB` : `${n} B`;
 }
 
@@ -1610,6 +1930,9 @@ function setupDock() {
     if (tab && dock.classList.contains("collapsed")) setDockCollapsed(false);
   });
   document.querySelector('.dock-tab[data-pane="activity"]').addEventListener("click", () => activatePane("activity"));
+  document.querySelector('.dock-tab[data-pane="health"]').addEventListener("click", () => { activatePane("health"); renderHealth(); });
+  $("#health-source").addEventListener("change", (ev) => { healthFilter.source = ev.target.value; renderHealth(); });
+  renderHealth();
 
   const handle = $("#dock-resize");
   handle.addEventListener("pointerdown", (ev) => {
@@ -1718,9 +2041,11 @@ function setup() {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.addEventListener("click", () => showView(tab.dataset.view));
   }
-  for (const btn of document.querySelectorAll("#lab-actions button")) {
+  for (const btn of document.querySelectorAll("#lab-actions [data-action]")) {
     btn.addEventListener("click", () => runAction(btn.dataset.action));
   }
+  setupLabMenu();
+  $("#lab-path").addEventListener("click", copyLabPath);
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
   applyTheme(currentTheme);
   $("#theme").addEventListener("click", () => {
@@ -1736,6 +2061,7 @@ function setup() {
     try { localStorage.setItem("clab-rollback", rollback.checked ? "1" : "0"); } catch { /* private mode */ }
   });
   setupDiagramInteraction();
+  setupInspector();
   setupEditor();
   setupDock();
   window.addEventListener("resize", () => { renderDiagram(false); window.Routing?.resize(); });

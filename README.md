@@ -408,6 +408,14 @@ printed in the terminal). Stop it with Ctrl+C.
   writes them into the topology file as `graph-posX`/`graph-posY` node
   labels, so the layout travels with the file. Only those labels change:
   comments, ordering, quoting and indentation are kept.
+- **Inspector:** clicking a node (on the Diagram, the Nodes table or the
+  Routing tab) or a link opens its details in a panel on the right, which
+  narrows the canvas instead of covering it. Drag its left edge to resize
+  it; on narrow screens it opens from the bottom. A node shows its state,
+  CPU and memory, its interfaces with their peers and live state (click
+  one to select the link), the protocols it runs (click one to see it on
+  the Routing tab), and its terminal and Config diff buttons. A link
+  shows the state of each end and the packet capture form.
 - **Live link and node state:** while a deployed lab is open, links with
   an end down are drawn red and dashed. The link's tooltip says which
   end is down: **admin down** is the end that was shut, **no carrier** is
@@ -430,8 +438,8 @@ printed in the terminal). Stop it with Ctrl+C.
   EVPN sessions (control plane) and the VXLAN tunnels between VTEPs (data
   plane), either or both, for all VNIs or one. Click a node for its
   router-id, interfaces, sessions or VNIs, or an edge for both ends.
-  Problems found in the configs are listed under the button at the top
-  right; click one to select its node. Nodes without the protocol are
+  The button at the top right counts the problems found in the configs
+  and opens them in the Health panel. Nodes without the protocol are
   dimmed. **Cabling** shows the physical links faintly behind.
   Switch to **Live** on a deployed lab to colour every adjacency, session
   and tunnel by its running state (as `clabfleet routing --live`): green
@@ -439,21 +447,34 @@ printed in the terminal). Stop it with Ctrl+C.
   neighbours running but not in the startup config. Cards show uptime and
   prefix counts, and sessions that are down join the problem list. The
   GUI asks the nodes in the background about every 10 seconds, only for
-  labs someone has open on this tab.
+  labs someone has open on this tab or in the Health panel.
 - **YAML editor:** edit the topology file in the YAML tab. Problems are
   listed as you type, using the same checks as `clabfleet validate`.
   Save with the button or Ctrl+S. Text that is not a loadable topology
   cannot be saved, but other errors, such as a startup config file that
   does not exist yet, do not block saving. Saving is refused while a job
   runs for the lab, or if the file changed on disk since you opened it.
-- **Deploy / Redeploy / Save configs / Snapshot / Destroy** with containerlab's output
-  streamed into the Activity panel. Different labs can run jobs at the
+- **Health:** the Health tab next to Activity lists everything wrong
+  with the open lab: validation errors and warnings in the saved file,
+  unreachable hosts, nodes not running or booting for more than five
+  minutes, links down, routing config problems, and (while the panel is
+  open) sessions, adjacencies and tunnels down, drift and neighbours not
+  in the startup config. Filter by severity or source; click a row to
+  select its node, link or session. The header's problem count opens it.
+- **Lab header:** under the lab's name a status strip shows the nodes
+  running (or ready, while booting), the hosts used, and the OSPF and BGP
+  sessions up once the Routing tab has read them in Live mode. Click a
+  stat to open the tab it comes from. The ⧉ button copies the topology
+  file's path.
+- **Deploy** while the lab is not deployed; **Redeploy / Save configs /
+  Snapshot** once it is, and **Destroy** in the ⋯ menu, with containerlab's
+  output streamed into the Activity panel. Different labs can run jobs at the
   same time, up to four, with one job per lab. Pick any job, running or
   past, from the Activity panel's list to see its output, how long it
   took, and the time each host took. The last 50 jobs are kept in
   `.clabfleet/jobs/` under the first workspace directory, so they survive
   a restart of the GUI.
-- **Config diff:** the node card's button opens a tab with the node's
+- **Config diff:** the inspector's button opens a tab with the node's
   config in the latest snapshot against its `startup-config` or the
   previous snapshot
 - **Terminals** in tabs at the bottom:
@@ -685,7 +706,7 @@ look at what went wrong, and the output's `status` is `partial`. With
 lab on every host it reached, including the failed one, which may hold
 partly created nodes. The status is then `rolled-back`, or
 `rollback-failed` if a host could not be cleaned up. The GUI has the same
-option as a "Roll back on failure" checkbox next to Deploy.
+option as a "Roll back on failure" checkbox in the lab header's ⋯ menu.
 
 Each deploy writes `<lab>.placement.json` next to the topology file. It
 records the host of every node, the VNI range, the cross-host links and
