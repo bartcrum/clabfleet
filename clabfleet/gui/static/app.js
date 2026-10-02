@@ -597,22 +597,87 @@ function renderLabHead() {
   $("#lab-name").textContent = lab || "";
   const badge = $("#lab-state");
   badge.className = `badge ${st.state}`;
-  badge.textContent = st.state === "stopped" ? "not deployed"
-    : st.state === "booting" ? `booting · ${st.ready}/${st.total} ready`
-    : `${st.state} · ${st.running}/${st.total}`;
+  // Counts are in the status strip below
+  badge.textContent = st.state === "stopped" ? "not deployed" : st.state;
 
   const topoFile = labContainers(lab)[0]?.topo_file;
-  $("#lab-path").textContent = isTopo ? S.detail?.path || "" : topoFile ? `deployed from ${topoFile}` : "";
+  const path = isTopo ? S.detail?.path || "" : topoFile || "";
+  const pathBtn = $("#lab-path");
+  pathBtn.hidden = !path;
+  pathBtn.dataset.path = path;
+  pathBtn.title = `${isTopo ? "" : "Deployed from "}${path}\nClick to copy the path`;
+  pathBtn.setAttribute("aria-label", `Copy path ${path}`);
 
+  renderLabStats(lab, st, isTopo);
+
+  // One primary action: Deploy while nothing runs; the rest once it does
   const actions = $("#lab-actions");
   actions.hidden = !isTopo;
   const busy = isTopo && !!runningJob(S.selected.id);
   if (isTopo) renderEditorState();
-  for (const btn of actions.querySelectorAll("button")) {
+  actions.querySelector('[data-action="deploy"]').hidden = st.deployed > 0;
+  $("#lab-secondary").hidden = st.deployed === 0;
+  for (const btn of actions.querySelectorAll("[data-action]")) {
     const a = btn.dataset.action;
     const enabled = a === "deploy" ? st.deployed === 0 : st.deployed > 0;
     btn.disabled = busy || !enabled || !!S.detail?.error;
   }
+}
+
+// "6/6 running · 2 hosts · 8/8 sessions up"; each stat opens its source
+function renderLabStats(lab, st, isTopo) {
+  const stat = (cls, content, title, onclick) => onclick
+    ? h("button", { class: `stat ${cls}`, title, onclick }, content)
+    : h("span", { class: `stat ${cls}`, title }, content);
+  const items = [];
+  const toNodes = () => showView("nodes");
+  if (!st.deployed) {
+    items.push(stat("", isTopo ? `${st.total ?? 0} nodes` : "no containers", "", toNodes));
+  } else if (st.booting) {
+    items.push(stat("warn", [h("b", {}, `${st.ready}/${st.total}`), " ready"], `${st.booting} booting`, toNodes));
+  } else {
+    const down = st.total - st.running;
+    items.push(stat(down ? "warn" : "", [h("b", {}, `${st.running}/${st.total}`), " running"],
+      down ? `${down} node${down === 1 ? "" : "s"} not running` : "", toNodes));
+  }
+  if (S.state?.multi_host && st.deployed) {
+    const hosts = [...new Set(labContainers(lab).map((c) => c.host))].sort();
+    items.push(stat("", [h("b", {}, hosts.length), ` host${hosts.length === 1 ? "" : "s"}`], hosts.join(", ")));
+  }
+  const ses = isTopo ? window.Routing?.liveSummary() : null;
+  if (ses?.total) {
+    const down = ses.total - ses.up;
+    items.push(stat(down ? "bad" : "", [h("b", {}, `${ses.up}/${ses.total}`), " sessions up"],
+      `OSPF and BGP sessions, read ${ses.age}s ago`, () => window.Routing.showLive()));
+  }
+  $("#lab-stats").replaceChildren(...items.flatMap((el, i) => (i ? [h("span", { class: "sep", "aria-hidden": "true" }, "·"), el] : [el])));
+}
+
+async function copyLabPath() {
+  const path = $("#lab-path").dataset.path;
+  try {
+    await navigator.clipboard.writeText(path);
+    toast(`Copied ${path}`);
+  } catch {
+    toast(path);  // no clipboard (plain http): show it to copy by hand
+  }
+}
+
+function setupLabMenu() {
+  const btn = $("#lab-more"), menu = $("#lab-menu");
+  const setOpen = (open) => {
+    menu.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    if (open) menu.querySelector("input, button:not(:disabled)")?.focus();
+  };
+  btn.addEventListener("click", () => setOpen(menu.hidden));
+  document.addEventListener("pointerdown", (ev) => {
+    if (!menu.hidden && !ev.target.closest(".menu-wrap")) setOpen(false);
+  });
+  menu.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") { setOpen(false); btn.focus(); }
+  });
+  menu.querySelector("[data-action]").addEventListener("click", () => setOpen(false));
 }
 
 function setTabsAvailable(views) {
@@ -1718,9 +1783,11 @@ function setup() {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.addEventListener("click", () => showView(tab.dataset.view));
   }
-  for (const btn of document.querySelectorAll("#lab-actions button")) {
+  for (const btn of document.querySelectorAll("#lab-actions [data-action]")) {
     btn.addEventListener("click", () => runAction(btn.dataset.action));
   }
+  setupLabMenu();
+  $("#lab-path").addEventListener("click", copyLabPath);
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
   applyTheme(currentTheme);
   $("#theme").addEventListener("click", () => {

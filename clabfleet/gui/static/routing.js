@@ -103,6 +103,7 @@ async function rtLoadLive() {
     RT.liveLoading = false;
   }
   rtRender();
+  renderLabHead();
   clearTimeout(RT.liveRetry);
   if (!RT.live.updated || RT.live.refreshing) RT.liveRetry = setTimeout(rtLoadLive, 2000);
 }
@@ -919,6 +920,22 @@ window.Routing = {
     rtRender();
   },
   resize() { if (rtVisible() && RT.data) rtRender(); },
+  // OSPF and BGP sessions up / total for the lab header, while the last
+  // live read is recent; null otherwise
+  liveSummary() {
+    const L = RT.live;
+    if (!L?.updated || L.id !== rtTopoId() || !rtDeployed()) return null;
+    const age = Math.max(0, Math.round(Date.now() / 1000 - L.updated));
+    if (age > 60) return null;
+    const entries = [...Object.values(L.ospf || {}), ...Object.values(L.bgp || {})];
+    return { up: entries.filter((e) => e.state === "up").length, total: entries.length, age };
+  },
+  // Open the Routing tab in Live mode
+  showLive() {
+    RT.mode = "live";
+    rtPrefsSave();
+    showView("routing");
+  },
 };
 
 rtSetup();

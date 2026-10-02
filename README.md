@@ -446,8 +446,14 @@ printed in the terminal). Stop it with Ctrl+C.
   cannot be saved, but other errors, such as a startup config file that
   does not exist yet, do not block saving. Saving is refused while a job
   runs for the lab, or if the file changed on disk since you opened it.
-- **Deploy / Redeploy / Save configs / Snapshot / Destroy** with containerlab's output
-  streamed into the Activity panel. Different labs can run jobs at the
+- **Lab header:** under the lab's name a status strip shows the nodes
+  running (or ready, while booting), the hosts used, and the OSPF and BGP
+  sessions up once the Routing tab has read them in Live mode. Click a
+  stat to open the tab it comes from. The ⧉ button copies the topology
+  file's path.
+- **Deploy** while the lab is not deployed; **Redeploy / Save configs /
+  Snapshot** once it is, and **Destroy** in the ⋯ menu, with containerlab's
+  output streamed into the Activity panel. Different labs can run jobs at the
   same time, up to four, with one job per lab. Pick any job, running or
   past, from the Activity panel's list to see its output, how long it
   took, and the time each host took. The last 50 jobs are kept in
@@ -685,7 +691,7 @@ look at what went wrong, and the output's `status` is `partial`. With
 lab on every host it reached, including the failed one, which may hold
 partly created nodes. The status is then `rolled-back`, or
 `rollback-failed` if a host could not be cleaned up. The GUI has the same
-option as a "Roll back on failure" checkbox next to Deploy.
+option as a "Roll back on failure" checkbox in the lab header's ⋯ menu.
 
 Each deploy writes `<lab>.placement.json` next to the topology file. It
 records the host of every node, the VNI range, the cross-host links and

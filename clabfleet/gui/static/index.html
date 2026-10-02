@@ -43,17 +43,26 @@
           <div class="lab-title">
             <h1 id="lab-name"></h1>
             <span id="lab-state" class="badge"></span>
-            <div id="lab-path" class="muted mono small"></div>
+            <button id="lab-path" class="icon-btn" hidden>⧉</button>
+            <div id="lab-stats" class="lab-stats"></div>
           </div>
           <div id="lab-actions" class="actions operator-only">
-            <label class="opt" title="If a host fails during Deploy or Redeploy, destroy the lab on every host instead of leaving it partly running">
-              <input type="checkbox" id="opt-rollback"> Roll back on failure
-            </label>
             <button class="btn primary" data-action="deploy">Deploy</button>
-            <button class="btn" data-action="redeploy" title="Destroy and recreate all nodes (discards node state)">Redeploy</button>
-            <button class="btn" data-action="save" title="Save running configs into the lab directory">Save configs</button>
-            <button class="btn" data-action="snapshot" title="Save configs and copy them to a dated folder in snapshots/ next to the topology">Snapshot</button>
-            <button class="btn danger" data-action="destroy">Destroy</button>
+            <div id="lab-secondary" class="btn-group">
+              <button class="btn" data-action="redeploy" title="Destroy and recreate all nodes (discards node state)">Redeploy</button>
+              <button class="btn" data-action="save" title="Save running configs into the lab directory">Save configs</button>
+              <button class="btn" data-action="snapshot" title="Save configs and copy them to a dated folder in snapshots/ next to the topology">Snapshot</button>
+            </div>
+            <div class="menu-wrap">
+              <button id="lab-more" class="btn" aria-haspopup="menu" aria-expanded="false" aria-controls="lab-menu" title="More actions">⋯</button>
+              <div id="lab-menu" class="menu" role="menu" hidden>
+                <label class="menu-item" title="If a host fails during Deploy or Redeploy, destroy the lab on every host instead of leaving it partly running">
+                  <input type="checkbox" id="opt-rollback"> Roll back on failure
+                </label>
+                <hr>
+                <button class="menu-item danger" role="menuitem" data-action="destroy">Destroy lab…</button>
+              </div>
+            </div>
           </div>
         </div>
 
