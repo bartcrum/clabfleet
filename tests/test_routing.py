@@ -302,6 +302,7 @@ def test_gui_routing_endpoint(tmp_path, monkeypatch):
             assert view["protocols"] == ["ospf"] and len(view["ospf"]["adjacencies"]) == 3
             assert "error" in await (await client.get("/api/routing/bad.clab.yml")).json()
             assert (await client.get("/api/routing/missing.clab.yml")).status == 404
-            assert (await client.get("/static/routing.js")).status == 200
+            resp = await client.get("/static/routing.js")
+            assert resp.status == 200 and resp.headers["Cache-Control"] == "no-cache"
 
     asyncio.run(scenario())

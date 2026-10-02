@@ -431,6 +431,10 @@ async def _security_headers(request, response):
         headers.setdefault("Strict-Transport-Security", "max-age=31536000")
     if not request.path.startswith("/static/"):
         headers.setdefault("Cache-Control", "no-store")
+    else:
+        # Revalidate (a cheap 304 via the ETag) so an upgraded GUI never runs
+        # a cached app.js against the new page
+        headers.setdefault("Cache-Control", "no-cache")
 
 
 async def _login(request):
