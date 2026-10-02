@@ -159,7 +159,9 @@ button { font: inherit; color: inherit; }
 .diagram .link { stroke: var(--link); stroke-width: 1.6; fill: none; }
 .diagram .link.special { stroke-dasharray: 4 4; }
 .diagram .link.cross { stroke: var(--blue); stroke-dasharray: 6 3; }
+.diagram .link.down { stroke: var(--danger); stroke-dasharray: 5 4; stroke-width: 2; }
 .diagram .iface { font: 10px var(--mono); fill: var(--muted); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+.diagram .iface.down { fill: var(--danger); }
 .diagram .node { cursor: pointer; }
 .diagram .node rect { fill: var(--node); stroke: var(--node-line); stroke-width: 1.2; }
 .diagram .node.selected rect { stroke: var(--blue); stroke-width: 2; }
@@ -170,6 +172,9 @@ button { font: inherit; color: inherit; }
 .diagram .node .status.other { fill: var(--warn); }
 .diagram .node .status.booting { fill: var(--warn); animation: pulse 1.6s infinite; }
 .diagram .node .hostbadge { font-size: 9.5px; fill: var(--blue); font-family: var(--mono); }
+.diagram .node rect.cputrack { fill: var(--line); stroke: none; }
+.diagram .node rect.cpubar { fill: var(--accent); stroke: none; }
+.diagram .node rect.cpubar.hot { fill: var(--warn); }
 .diagram .pseudo rect { fill: var(--bg); stroke: var(--node-line); stroke-dasharray: 3 3; }
 .diagram .pseudo .name { font-size: 11px; font-weight: 400; fill: var(--muted); }
 

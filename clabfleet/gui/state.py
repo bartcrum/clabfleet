@@ -19,6 +19,7 @@ from typing import Optional
 
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
+from ..livestate import LiveCache, link_states, probe_ifaces, probe_stats
 from ..nodes import InspectError, access_modes, inspect_all, parse_inspect
 from ..readiness import ReadinessCache, check_ready
 from ..snapshots import Snapshotter, diff_lab
@@ -39,6 +40,7 @@ TOPOLOGY_SUFFIXES = (".clab.yml", ".clab.yaml")
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox"}
 MAX_SCAN_DEPTH = 5
 GUI_PROBE_TIMEOUT = 5  # seconds; the GUI re-probes not-ready nodes anyway
+LIVE_INTERVAL = 5.0  # seconds between live link/CPU refreshes of a lab being viewed
 
 # ANSI escape sequences (colors, bold) in containerlab output
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -153,6 +155,9 @@ class Workspace:
         self._topologies: dict[str, Path] = {}
         self.readiness = ReadinessCache()
         self._probes = ThreadPoolExecutor(max_workers=8, thread_name_prefix="readiness")
+        self.live = LiveCache(LIVE_INTERVAL)
+        self._live_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="live")
+        self._last_runtime: Optional[tuple[float, list[HostState]]] = None
 
     @property
     def multi_host(self) -> bool:
@@ -180,6 +185,7 @@ class Workspace:
 
     def close(self) -> None:
         self._probes.shutdown(wait=False, cancel_futures=True)
+        self._live_pool.shutdown(wait=False, cancel_futures=True)
         with self._runner_lock:
             for runner in self._runners.values():
                 runner.close()
@@ -286,6 +292,7 @@ class Workspace:
             self._annotate_ready(host, state.containers, live)
             states.append(state)
         self.readiness.prune(live)
+        self._last_runtime = (time.monotonic(), states)
         return states
 
     def _annotate_ready(self, host: HostInfo, containers: list[dict], live: set) -> None:
@@ -316,6 +323,98 @@ class Workspace:
             self.readiness.release(key)
             return
         self.readiness.store(key, ok, detail)
+
+    # --- live link and resource state ---
+
+    def live_state(self, topo_id: str) -> dict:
+        """The last live snapshot of a topology's lab, without waiting.
+
+        Asking for it starts a background refresh when the snapshot is
+        older than ``LIVE_INTERVAL``, so labs nobody looks at are not probed.
+        """
+        path = self.topology_path(topo_id)
+        snapshot, due = self.live.get(topo_id)
+        if due and self.live.claim(topo_id):
+            try:
+                self._live_pool.submit(self._refresh_live, topo_id, path)
+            except RuntimeError:  # shutting down
+                self.live.release(topo_id)
+        result = dict(snapshot) if snapshot else {"updated": None, "nodes": {}, "links": {},
+                                                  "errors": {}}
+        result["refreshing"] = self.live.in_flight(topo_id)
+        result["interval"] = self.live.interval
+        return result
+
+    def _refresh_live(self, topo_id: str, path: Path) -> None:
+        try:
+            snapshot = self.collect_live(path)
+        except Exception as exc:  # noqa: BLE001 - shown in the GUI, retried next interval
+            logger.debug("Live state of %s failed: %s", topo_id, exc)
+            snapshot = {"updated": time.time(), "nodes": {}, "links": {},
+                        "errors": {"": str(exc)}}
+        self.live.store(topo_id, snapshot)
+
+    def _recent_runtime(self) -> list[HostState]:
+        """Containers per host, reusing the last inspect if it is recent."""
+        last = self._last_runtime
+        if last and time.monotonic() - last[0] < 2 * self.live.interval:
+            return last[1]
+        return self.runtime()
+
+    def collect_live(self, path: Path) -> dict:
+        """Probe a lab's running nodes now: interface states and CPU/memory.
+
+        One ``docker exec`` per running node and one ``docker stats`` per
+        host. A host or node that cannot be probed leaves its values unset.
+        """
+        topo = load_topology(path)
+        view = topology_view(topo)
+        errors: dict[str, str] = {}
+        containers = {}
+        for host_state in self._recent_runtime():
+            if not host_state.ok:
+                errors[host_state.name] = host_state.error or "unreachable"
+            for c in host_state.containers:
+                if c["lab"] == topo.name:
+                    containers[c["node"]] = c
+        running = [c for c in containers.values() if c["state"] == "running"]
+        by_host: dict[str, list[str]] = {}
+        for c in running:
+            by_host.setdefault(c["host"], []).append(c["container"])
+
+        stats: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="live-probe") as pool:
+            iface_jobs = {c["node"]: pool.submit(self._probe_ifaces, c) for c in running}
+            stats_jobs = {
+                name: pool.submit(probe_stats, self.runner(self.host(name)), names,
+                                  self.host(name).sudo)
+                for name, names in by_host.items()
+            }
+            for name, job in stats_jobs.items():
+                try:
+                    stats.update(job.result())
+                except Exception as exc:  # noqa: BLE001
+                    errors[name] = f"docker stats: {exc}"
+            ifaces = {node: job.result() for node, job in iface_jobs.items()}
+
+        nodes, link_input = {}, {}
+        for n in view["nodes"]:
+            c = containers.get(n["name"])
+            entry = {"state": c["state"] if c else "", "host": c["host"] if c else ""}
+            entry.update(stats.get(c["container"], {}) if c else {})
+            nodes[n["name"]] = entry
+            link_input[n["name"]] = {"kind": n["kind"], "state": entry["state"],
+                                     "ifaces": ifaces.get(n["name"])}
+        return {"updated": time.time(), "nodes": nodes,
+                "links": link_states(view["links"], link_input), "errors": errors}
+
+    def _probe_ifaces(self, container: dict) -> Optional[dict]:
+        try:
+            host = self.host(container["host"])
+            return probe_ifaces(self.runner(host), container["container"], host.sudo)
+        except Exception as exc:  # noqa: BLE001 - reported as unknown
+            logger.debug("Interface probe of %s failed: %s", container["container"], exc)
+            return None
 
     def find_node(self, lab: str, node: str) -> dict:
         for state in self.runtime():

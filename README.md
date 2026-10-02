@@ -275,6 +275,20 @@ printed in the terminal). Stop it with Ctrl+C.
   writes them into the topology file as `graph-posX`/`graph-posY` node
   labels, so the layout travels with the file. Only those labels change:
   comments, ordering, quoting and indentation are kept.
+- **Live link and node state:** while a deployed lab is open, links with
+  an end down are drawn red and dashed. The link's tooltip says which
+  end is down: **admin down** is the end that was shut, **no carrier** is
+  the far side of it. A thin bar in each node shows its CPU use, full at
+  one busy core. Hover a node, or click it, for CPU and memory. The GUI
+  reads each node's interface state from `/sys/class/net` with one
+  `docker exec` per node, and CPU and memory with one `docker stats` per
+  host. It does this in the background, about every 5 to 10 seconds and
+  only for labs someone has open, so many browser tabs do not add load.
+  Topologies may name interfaces the kind's way (`Ethernet1` on cEOS,
+  `Ethernet0/1` on IOL, `ethernet-1/1` on SR Linux). For VM-based kinds
+  the state is that of the container's link to the VM, so a port shut
+  inside the VM still shows as up. Links whose state cannot be read keep
+  their normal colour.
 - **YAML editor:** edit the topology file in the YAML tab. Problems are
   listed as you type, using the same checks as `clabfleet validate`.
   Save with the button or Ctrl+S. Text that is not a loadable topology
