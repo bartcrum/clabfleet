@@ -15,7 +15,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
@@ -462,6 +462,7 @@ class Job:
     finished: Optional[float] = None
     result: Optional[dict] = None
     options: dict = field(default_factory=dict)
+    user: str = ""  # who started it (multi-user GUI)
 
     def add(self, line: str) -> None:
         self.lines.append(ANSI_RE.sub("", line))
@@ -491,7 +492,7 @@ class Job:
         return {
             "id": self.id, "action": self.action, "topology": self.topology, "lab": self.lab,
             "status": self.status, "started": self.started, "finished": self.finished,
-            "options": self.options, "host_times": self.host_times(),
+            "options": self.options, "user": self.user, "host_times": self.host_times(),
             "line_count": len(self.lines),
         }
 
@@ -509,7 +510,7 @@ class Job:
             lab=data.get("lab", ""), status=data.get("status", "error"),
             lines=list(data.get("lines") or []), started=data.get("started") or 0,
             finished=data.get("finished"), result=data.get("result"),
-            options=data.get("options") or {},
+            options=data.get("options") or {}, user=data.get("user") or "",
         )
 
 
@@ -585,6 +586,8 @@ class JobManager:
         self.history = history
         self.jobs: dict[str, Job] = {j.id: j for j in history.load()}
         self._lock = threading.Lock()
+        # Called (in the job's thread) when a job finishes, e.g. for the audit log
+        self.on_finished: Optional[Callable[[Job], None]] = None
 
     def running(self) -> list[Job]:
         return [j for j in self.jobs.values() if j.status == "running"]
@@ -593,7 +596,8 @@ class JobManager:
         """Newest first."""
         return sorted(self.jobs.values(), key=lambda j: j.started, reverse=True)[:limit]
 
-    def start(self, action: str, topo_id: str, options: Optional[dict] = None) -> Job:
+    def start(self, action: str, topo_id: str, options: Optional[dict] = None,
+              user: str = "") -> Job:
         if action not in self.ACTIONS:
             raise ValueError(f"Unknown action '{action}'")
         options = {k: bool(v) for k, v in (options or {}).items() if k in self.OPTIONS}
@@ -614,7 +618,7 @@ class JobManager:
                     f"{len(running)} jobs are already running; wait for one to finish"
                 )
             job = Job(id=uuid.uuid4().hex[:12], action=action, topology=topo_id,
-                      lab=lab, options=options)
+                      lab=lab, options=options, user=user)
             self.jobs[job.id] = job
         self.history.save(job)
         threading.Thread(target=self._run, args=(job, path), daemon=True).start()
@@ -663,3 +667,8 @@ class JobManager:
                 job.add("» time per host: " + ", ".join(f"{h} {t:g}s" for h, t in times.items()))
             job.add("✓ done" if job.status == "ok" else "✗ failed")
             self.history.save(job)
+            if self.on_finished:
+                try:
+                    self.on_finished(job)
+                except Exception:  # noqa: BLE001 - never let a hook break a job
+                    logger.exception("Job finished hook failed")

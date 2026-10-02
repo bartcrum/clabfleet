@@ -323,6 +323,68 @@ Security: terminals are shell access, so the GUI listens on `127.0.0.1`
 only and needs the random token from its start-up URL. Requests from other
 websites are refused. Use `--bind` with care.
 
+### Several users on a shared lab server
+
+To let several people reach one GUI remotely, give each a named login
+and serve it over TLS:
+
+```bash
+clabfleet user add alice                  # operator: everything
+clabfleet user add bob --role viewer      # read-only
+clabfleet user list
+clabfleet user rotate alice               # new token, ends alice's sessions
+clabfleet user remove bob                 # ends bob's sessions
+
+clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
+```
+
+- **Users file:** `~/.clabfleet/users.yaml` (mode 0600; another file with
+  `--users FILE` on both `gui` and `user`). When it exists, the GUI uses
+  named logins instead of the start-up token. Only SHA-256 hashes of the
+  tokens are stored. `user add` and `user rotate` print the token once,
+  with a login link (`--url https://lab.example.com:8650` sets its
+  address). Changes apply to a running GUI right away.
+- **Login:** each user opens `https://<server>:8650/?token=<their token>`.
+  The token is swapped for a session cookie (HttpOnly, SameSite=Strict,
+  Secure over HTTPS) that ends after 12 hours idle, on **Log out**, or
+  when the user is removed or rotated. Sessions live in memory, so a GUI
+  restart logs everyone out. The header shows who you are and your role.
+- **Roles:**
+  - `operator`: deploy, redeploy, save and destroy, terminals, YAML edits
+    and layout saves
+  - `viewer`: topologies, diagrams, YAML, node state, job output and node
+    logs (the Logs tab). Controls they cannot use are hidden. The server
+    refuses everything else with 403. Any route that is not a plain GET
+    is operator-only unless the code marks it otherwise, so new features
+    are protected by default.
+- **Audit log:** `audit.jsonl` next to the users file (or `--audit-log
+  FILE`; in single-token mode only with `--audit-log`). One JSON object
+  per line with `ts`, `user`, `role`, `remote`, `event` and `details`.
+  Events: `login`, `login_failed`, `logout`, `denied`, `job_started`
+  (action, topology, options), `job_finished` (status, seconds),
+  `topology_saved`, `positions_saved`, `terminal_opened` and
+  `terminal_closed` (lab, node, mode, host, seconds, exit code). Jobs also
+  record who started them, shown in the Activity panel.
+
+  ```json
+  {"ts": "2026-10-02T00:51:40.197+00:00", "user": "alice", "role": "operator", "remote": "10.1.2.3", "event": "terminal_opened", "details": {"lab": "spine-leaf-fabric", "node": "Spine-1", "mode": "cli", "host": "localhost"}}
+  ```
+- **TLS:** `--tls-cert` and `--tls-key` take PEM files. For a quick test,
+  a self-signed pair:
+  `openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem -days 365 -subj "/CN=$(hostname)" -addext "subjectAltName=DNS:$(hostname)"`.
+  `--bind` to anything but a loopback address without TLS is refused;
+  `--insecure-http` overrides that with a warning, for trusted networks
+  only. Behind a reverse proxy that terminates TLS, keep the GUI on
+  `127.0.0.1` and pass `--public-url https://lab.example.com` so the
+  origin check and secure cookies match the address browsers use.
+
+Security notes: an operator can open shells on every node and, through
+`docker exec`, act as the account the GUI runs as on each lab host, so
+make only trusted people operators. Tokens are bearer secrets: anyone with
+a login link is that user until you rotate it. Terminals that are already
+open stay open when a user is removed or rotated; close their tabs (or
+restart the GUI) to cut them off.
+
 For the CLI and Shell buttons, your user must be able to run `docker`
 (member of the `docker` group, in a session started after you were added).
 
@@ -563,7 +625,8 @@ clabfleet/
   readiness.py     # Is a node's CLI/SSH up yet (deploy --wait, GUI)
   cli.py           # CLI entrypoint
   gui/
-    server.py      # aiohttp app: API, auth, terminal websockets
+    server.py      # aiohttp app: API, auth middleware, terminal websockets
+    auth.py        # Users file, roles, audit log
     state.py       # Topology discovery, running labs, deploy/destroy jobs
     terminals.py   # Local pty and SSH-channel terminal sessions
     editing.py     # Format-preserving saves of topology files

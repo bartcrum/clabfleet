@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 const S = {
+  me: null,             // /api/me: {user, role, multi_user}
   state: null,          // /api/state
   selected: null,       // {type: "topo", id} | {type: "lab", lab}
   detail: null,         // /api/topologies/<id>
@@ -62,6 +63,11 @@ function toast(msg) {
 }
 
 const MODE_LABEL = { cli: "CLI", shell: "Shell", ssh: "SSH", logs: "Logs" };
+
+// Viewers are read-only (the server enforces it; this just hides controls)
+function canOperate() {
+  return S.me?.role !== "viewer";
+}
 
 // ---------------------------------------------------------------------------
 // Runtime helpers
@@ -137,7 +143,8 @@ const JOB_ICON = { running: "⟳", ok: "✓", error: "✗", interrupted: "✗" }
 
 function jobLabel(j) {
   const when = new Date(j.started * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return `${JOB_ICON[j.status] || "•"} ${j.action} ${j.lab || j.topology} · ${when}`;
+  return `${JOB_ICON[j.status] || "•"} ${j.action} ${j.lab || j.topology} · ${when}` +
+    (j.user ? ` · ${j.user}` : "");
 }
 
 function renderJobPicker() {
@@ -156,7 +163,7 @@ function renderJobMeta() {
   const end = j.finished || Date.now() / 1000;
   const hosts = Object.entries(j.host_times || {}).map(([hst, t]) => `${hst} ${fmtDuration(t)}`).join(", ");
   meta.textContent = `${j.status === "running" ? "running" : j.status} · ${fmtDuration(end - j.started)}` +
-    (hosts ? ` · ${hosts}` : "");
+    (hosts ? ` · ${hosts}` : "") + (j.user ? ` · by ${j.user}` : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -564,7 +571,7 @@ function renderRuntimeOverlays() {
 
 // Terminal buttons for a node; Logs also works for a stopped container
 function openButtons(lab, node, modes, running, exists) {
-  const buttons = (modes || []).map((m) =>
+  const buttons = (canOperate() ? modes || [] : []).map((m) =>
     h("button", {
       class: "btn small",
       disabled: !running,
@@ -1000,7 +1007,7 @@ function nodeClicked(id) {
   if (!isDouble) return;
   const node = S.detail.nodes.find((n) => n.name === id);
   const rt = nodeRuntime(S.detail.name, id);
-  if (rt?.state === "running" && node?.modes.length) openTerminal(S.detail.name, id, node.modes[0]);
+  if (rt?.state === "running" && node?.modes.length && canOperate()) openTerminal(S.detail.name, id, node.modes[0]);
 }
 
 function selectNode(id) {
@@ -1299,6 +1306,29 @@ function setupDock() {
 // Boot
 // ---------------------------------------------------------------------------
 
+async function loadMe() {
+  try {
+    S.me = await api("/api/me");
+  } catch (e) {
+    toast(`Could not load your user: ${e.message}`);
+    return;
+  }
+  document.body.classList.toggle("viewer", !canOperate());
+  $("#yaml").readOnly = !canOperate();
+  const who = $("#whoami");
+  who.hidden = !S.me.multi_user;
+  who.replaceChildren(h("b", {}, S.me.user || ""), ` · ${S.me.role}`);
+  $("#logout").hidden = !S.me.multi_user;
+  renderRuntimeOverlays();
+}
+
+async function logout() {
+  try {
+    await api("/logout", { method: "POST" });
+  } catch (e) { /* the session is gone either way */ }
+  location.href = "/";
+}
+
 function setup() {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.addEventListener("click", () => showView(tab.dataset.view));
@@ -1307,6 +1337,7 @@ function setup() {
     btn.addEventListener("click", () => runAction(btn.dataset.action));
   }
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
+  $("#logout").addEventListener("click", logout);
   const rollback = $("#opt-rollback");
   try { rollback.checked = localStorage.getItem("clab-rollback") === "1"; } catch { /* private mode */ }
   rollback.addEventListener("change", () => {
@@ -1317,6 +1348,7 @@ function setup() {
   setupDock();
   window.addEventListener("resize", () => renderDiagram(false));
 
+  loadMe();
   refreshState();
   refreshHosts();
   $("#job-select").addEventListener("change", (e) => trackJob(e.target.value, false));

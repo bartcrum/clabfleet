@@ -223,6 +223,15 @@ span hosts, built on `Workspace.host_status()`.
 
 ### 3.6 Multi-user and remote access — L
 
+**Done.** `clabfleet user add/list/remove/rotate` manages a users file
+with operator and viewer roles; only token hashes are stored. Viewers are
+read-only by default deny: any route that is not a plain GET needs an
+operator unless marked otherwise. Logins, jobs, edits and terminal
+sessions go to a JSON Lines audit log. `--tls-cert`/`--tls-key` serve
+HTTPS, and a non-loopback `--bind` without TLS is refused unless
+`--insecure-http` is given. Without a users file the GUI keeps its
+single-token mode.
+
 The GUI is single-token and localhost only. For a shared jump host: named
 users with per-user tokens, an audit log of terminal sessions and
 actions, and TLS.
