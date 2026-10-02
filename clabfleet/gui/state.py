@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -54,7 +55,8 @@ def find_topologies(roots: list[Path]) -> dict[str, Path]:
 
     Returns {id: path}; the id is the path relative to its root (prefixed
     with the root name when there are several roots) and is what the
-    browser uses to refer to a topology.
+    browser uses to refer to a topology. Symlinks that lead out of the
+    root are left out: the GUI shows the file to viewers.
     """
     found: dict[str, Path] = {}
     for root in roots:
@@ -70,6 +72,9 @@ def find_topologies(roots: list[Path]) -> dict[str, Path]:
             for fn in sorted(filenames):
                 if fn.endswith(TOPOLOGY_SUFFIXES):
                     path = Path(dirpath) / fn
+                    if not path.resolve().is_relative_to(root):
+                        logger.warning("Ignoring %s: it links outside %s", path, root)
+                        continue
                     rel = path.relative_to(root).as_posix()
                     topo_id = f"{root.name}/{rel}" if len(roots) > 1 else rel
                     found[topo_id] = path
@@ -211,7 +216,22 @@ class Workspace:
             self._topologies = find_topologies(self.roots)
         if topo_id not in self._topologies:
             raise KeyError(f"Unknown topology '{topo_id}'")
-        return self._topologies[topo_id]
+        path = self._topologies[topo_id]
+        # Again now: it may have been replaced by a symlink since the scan
+        if not any(path.resolve().is_relative_to(root.resolve()) for root in self.roots):
+            raise KeyError(f"Topology '{topo_id}' links outside the workspace")
+        return path
+
+    def workspace_labs(self) -> set[str]:
+        """Names of the labs the workspace's topologies define."""
+        self._topologies = find_topologies(self.roots)
+        labs = set()
+        for path in self._topologies.values():
+            try:
+                labs.add(load_topology(path).name)
+            except Exception:  # noqa: BLE001 - an invalid file defines no lab
+                continue
+        return labs
 
     def topology_detail(self, topo_id: str) -> dict:
         path = self.topology_path(topo_id)
@@ -417,6 +437,10 @@ class Workspace:
             return None
 
     def find_node(self, lab: str, node: str) -> dict:
+        # Only labs of this workspace: viewers may follow node logs, and the
+        # hosts can run other people's labs too
+        if lab not in self.workspace_labs():
+            raise KeyError(f"Lab '{lab}' is not in this workspace")
         for state in self.runtime():
             for c in state.containers:
                 if c["lab"] == lab and c["node"] == node:
@@ -518,7 +542,8 @@ class JobHistory:
     """Finished and running jobs as JSON files in ``<workspace>/.clabfleet/jobs``.
 
     Keeps the newest ``keep`` jobs. Without a writable directory, history
-    simply is not kept.
+    simply is not kept. Job output can show configs, so the directory is
+    0700 and the files 0600.
     """
 
     def __init__(self, directory: Optional[Path], keep: int = 50):
@@ -530,6 +555,8 @@ class JobHistory:
             return []
         jobs = []
         for path in self.directory.glob("*.json"):
+            if path.is_symlink():
+                continue
             try:
                 job = Job.from_dict(json.loads(path.read_text()))
             except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -546,10 +573,18 @@ class JobHistory:
         if not self.directory:
             return
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            tmp = self.directory / f".{job.id}.tmp"
-            tmp.write_text(json.dumps(job.to_dict()))
-            tmp.replace(self.directory / f"{job.id}.json")
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if self.directory.stat().st_mode & 0o077:
+                self.directory.chmod(0o700)
+            # A fresh name each time, so nothing in the directory can redirect the write
+            fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=f".{job.id}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(json.dumps(job.to_dict()))
+                os.replace(tmp, self.directory / f"{job.id}.json")
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
             self._prune()
         except OSError as exc:
             logger.warning("Could not save job history in %s: %s", self.directory, exc)
