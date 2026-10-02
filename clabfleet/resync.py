@@ -22,6 +22,9 @@ and links all stay) and updates only what the import owns:
 Only nodes recorded in the previous import report count as removed, so
 nodes added by hand are never reported or pruned. Without a report, every
 node in the file is treated as imported.
+
+:func:`was_sanitised` tells from the previous report whether the last
+import was sanitised, so the CLI can refuse to write raw configs over it.
 """
 
 import io
@@ -111,6 +114,15 @@ def _link_key(a: str, b: str) -> LinkKey:
 
 def _pair(key: LinkKey) -> tuple[str, ...]:
     return tuple(sorted(ep.split(":", 1)[0] for ep in key))
+
+
+def was_sanitised(report: dict) -> bool:
+    """True if the import that wrote ``report`` sanitised its configs."""
+    if "sanitised" in report:
+        return bool(report["sanitised"])
+    # Reports written before the flag: a node with sanitising results
+    return any(isinstance(entry, dict) and "sanitised" in entry
+               for entry in (report.get("nodes") or {}).values())
 
 
 def _strip_volatile(text: str) -> str:
@@ -352,3 +364,5 @@ def _literal_configs(data, literal) -> None:
 def _atomic_write(path: Path, text: str) -> None:
     from .gui.editing import write_if_unchanged
     write_if_unchanged(path, text, base_hash="")
+    # The file may hold inline configs: owner only, as export-live writes it
+    path.chmod(path.stat().st_mode & 0o700)

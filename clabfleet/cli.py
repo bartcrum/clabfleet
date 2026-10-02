@@ -18,7 +18,8 @@ Usage:
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
     clabfleet export-live [<inventory>] [-o output.clab.yml] [--netbox URL | --nautobot URL
-                          | --ansible FILE] [--filter KEY=VALUE] [--sanitise]
+                          | --ansible FILE] [--filter KEY=VALUE] [--allowed-network CIDR]
+                          [--sanitise [--allow-residual] | --no-sanitise]
                           [--include-neighbours] [--apply [--prune] | --overwrite] [--json]
     clabfleet new <template> [--spines N ...] [--kind KIND] [--image IMAGE] [-o FILE] [--force]
     clabfleet new --list
@@ -72,7 +73,7 @@ from .exporter import (
     write_result,
 )
 from .inventory import load_inventory, printable
-from .resync import apply_diff, diff_topology
+from .resync import apply_diff, diff_topology, was_sanitised
 from .sanitise import SanitiseOptions
 from .templates import (
     DEFAULT_KIND,
@@ -316,7 +317,13 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Image for neighbour placeholders (default: alpine:3)")
     conv.add_argument("--sanitise", "--sanitize", action="store_true",
                       help="Remove or replace secrets, AAA/SNMP config and management "
-                           "addresses in the saved configs")
+                           "addresses in the saved configs (best effort: review them "
+                           "before sharing)")
+    conv.add_argument("--no-sanitise", "--no-sanitize", action="store_true",
+                      help="Save configs as they are, even over a sanitised import")
+    conv.add_argument("--allow-residual", action="store_true",
+                      help="With --sanitise: write configs even if they still look like "
+                           "they hold secrets")
     conv.add_argument("--mgmt-address", choices=["remove", "dhcp", "keep"], default="remove",
                       help="With --sanitise: what to do with management interface "
                            "addresses (default: remove)")
@@ -827,6 +834,13 @@ def _export_live(args: argparse.Namespace) -> int:
         raise ValueError("give an inventory file or --netbox, --nautobot or --ansible")
     if args.prune and not args.apply:
         raise ValueError("--prune only works with --apply")
+    if args.sanitise and args.no_sanitise:
+        raise ValueError("use --sanitise or --no-sanitise, not both")
+    output = Path(args.output) if args.output else None
+    if output is not None and output.exists() and (args.apply or args.overwrite) \
+            and not (args.sanitise or args.no_sanitise) and was_sanitised(load_report(output)):
+        raise ValueError(f"the last import into {output} was sanitised: add --sanitise "
+                         "(or --no-sanitise to write the configs as they are)")
     filters: dict = {}
     for item in args.filter:
         key, sep, value = item.partition("=")
@@ -844,7 +858,6 @@ def _export_live(args: argparse.Namespace) -> int:
     if not inventory.devices:
         raise ValueError("the inventory has no devices")
 
-    output = Path(args.output) if args.output else None
     resync = output is not None and output.exists() and not args.overwrite
     if (args.apply or args.json) and not resync:
         raise ValueError("--apply and --json are for re-syncing an existing --output file")
@@ -855,6 +868,7 @@ def _export_live(args: argparse.Namespace) -> int:
         map_interfaces=not args.keep_interface_names,
         sanitise=SanitiseOptions(mgmt=args.mgmt_address, user=args.lab_user,
                                  password=args.lab_password) if args.sanitise else None,
+        allow_residual=args.allow_residual,
         include_neighbours=args.include_neighbours,
         neighbour_image=args.neighbour_image,
         inline_configs=output is None,
@@ -869,7 +883,11 @@ def _export_live(args: argparse.Namespace) -> int:
         raise ValueError("no device could be reached")
     result = build_topology(collected, options)
     for msg in result.warnings:
-        print(f"warning: {msg}", file=sys.stderr)
+        print(f"warning: {printable(msg)}", file=sys.stderr)
+    if not args.sanitise and (not resync or args.apply):
+        print("WARNING: --sanitise not given: the configs are saved as they are, with the "
+              "network's passwords, keys and SNMP communities. Files are written readable "
+              "by you only; do not share or commit them.", file=sys.stderr)
 
     if output is None:
         print(dump_yaml(result.topology))

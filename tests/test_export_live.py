@@ -435,3 +435,148 @@ def test_cli_with_netbox_source(tmp_path, monkeypatch, capsys):
     assert _links(topo) == EXPECTED_LINKS
     assert sorted(live_fakes.FakeDevice.opened) == sorted(devices)
     assert validate_topology(out).ok
+
+
+# --- keeping production data where it belongs -----------------------------------
+
+def _mode(path):
+    return path.stat().st_mode & 0o777
+
+
+def test_files_are_private_and_raw_configs_warn(tmp_path, napalm, capsys):
+    inv = _inventory(tmp_path)
+    out = tmp_path / "lab" / "prod.clab.yml"
+    (tmp_path / "lab" / "configs").mkdir(parents=True)
+    old = tmp_path / "lab" / "configs" / "core-rtr-01.cfg"
+    old.write_text("stale\n")
+    old.chmod(0o644)
+    assert cli.main(["export-live", str(inv), "-o", str(out)]) == 0
+    assert "WARNING: --sanitise not given" in capsys.readouterr().err
+    assert _mode(out.parent / "configs") == 0o700
+    for path in [out, report_path(out), *(out.parent / "configs").iterdir()]:
+        assert _mode(path) == 0o600, path
+    assert "stale" not in old.read_text()
+
+    assert cli.main(["export-live", str(inv), "-o", str(out), "--sanitise", "--overwrite"]) == 0
+    assert "--sanitise not given" not in capsys.readouterr().err
+    assert cli.main(["export-live", str(inv)]) == 0        # inline configs on stdout
+    assert "--sanitise not given" in capsys.readouterr().err
+
+
+def test_resync_keeps_a_sanitised_lab_sanitised(tmp_path, monkeypatch, capsys):
+    live_fakes.install(monkeypatch)
+    inv, out = _first_import(tmp_path, capsys, "--sanitise")
+    live_fakes.install(monkeypatch, _changed_network())
+    for flag in ("--apply", "--overwrite"):
+        assert cli.main(["export-live", str(inv), "-o", str(out), flag]) == 1
+        assert "was sanitised" in capsys.readouterr().err
+    assert "PROD" not in (tmp_path / "configs" / "core-rtr-02.cfg").read_text()
+    # Reporting alone writes nothing, so it needs no flag
+    assert cli.main(["export-live", str(inv), "-o", str(out)]) == 0
+    assert cli.main(["export-live", str(inv), "-o", str(out), "--include-neighbours",
+                     "--apply", "--sanitise"]) == 0
+    assert not SECRET_MARKER.findall((tmp_path / "configs" / "core-rtr-02.cfg").read_text())
+    assert _mode(out) == 0o600
+    capsys.readouterr()
+    assert cli.main(["export-live", str(inv), "-o", str(out), "--apply", "--no-sanitise",
+                     "--include-neighbours"]) == 0
+    assert "R2SECRET" in (tmp_path / "configs" / "core-rtr-02.cfg").read_text()
+    assert cli.main(["export-live", str(inv), "-o", str(out), "--sanitise",
+                     "--no-sanitise"]) == 1
+
+
+def test_residual_secrets_stop_the_export(tmp_path, monkeypatch, capsys):
+    devices = copy.deepcopy(live_fakes.DEVICES)
+    r2 = devices["core-rtr-02.example.com"]
+    r2["config"] = r2["config"].replace(
+        "end\n", "interface Gi9\n ip frobnicate authentication text PLANTED0001\nend\n")
+    live_fakes.install(monkeypatch, devices)
+    inv = _inventory(tmp_path)
+    out = tmp_path / "prod.clab.yml"
+    assert cli.main(["export-live", str(inv), "-o", str(out), "--sanitise"]) == 1
+    err = capsys.readouterr().err
+    assert "still look like they hold secrets" in err
+    assert "core-rtr-02: line" in err and "(authentication)" in err
+    assert "PLANTED" not in err
+    assert not out.exists() and not (tmp_path / "configs").exists()
+
+    assert cli.main(["export-live", str(inv), "-o", str(out), "--sanitise",
+                     "--allow-residual"]) == 0
+    assert "core-rtr-02: config may still hold secrets" in capsys.readouterr().err
+    rep = yaml.safe_load(report_path(out).read_text())
+    assert rep["nodes"]["core-rtr-02"]["sanitised"]["residual"][0]["category"] == \
+        "authentication"
+    assert "PLANTED" not in report_path(out).read_text()
+
+
+def test_sanitised_report_leaves_out_device_addresses():
+    from clabfleet.sanitise import SanitiseOptions
+    result = build_topology(_collected(), ExportOptions(sanitise=SanitiseOptions(),
+                                                        include_neighbours=True))
+    assert result.report["sanitised"] is True
+    for name, entry in result.report["nodes"].items():
+        assert "source" not in entry, name
+    assert "example.com" not in yaml.safe_dump(result.report)
+    result = build_topology(_collected(), ExportOptions(include_neighbours=True))
+    assert result.report["sanitised"] is False
+    assert result.report["nodes"]["core-rtr-01"]["source"] == "core-rtr-01.example.com"
+    assert result.report["nodes"]["server-01"]["source"] == "server-01.example.com"
+
+
+def test_kept_interface_names_are_checked_and_warnings_escaped():
+    collected = _collected()
+    lldp = collected[2].lldp      # dist-sw-01
+    lldp["Ethernet11"] = [{"remote_system_name": "core-rtr-02",
+                           "remote_port": "Gi0/0/9\x1b]0;owned\x07"}]
+    lldp["Ethernet12"] = [{"remote_system_name": "core-rtr-02", "remote_port": "x" * 65}]
+    result = build_topology(collected, ExportOptions(map_interfaces=False))
+    eps = [ep for link in result.topology["topology"]["links"] for ep in link["endpoints"]]
+    assert not any("Gi0/0/9" in ep or "xxx" in ep for ep in eps)
+    bad = [w for w in result.warnings if "not a usable interface name" in w]
+    assert len(bad) == 2
+    assert all("\x1b" not in w and "\x07" not in w for w in result.warnings)
+    assert any(r"\x1b]0;owned\x07" in w for w in bad)
+    assert ("core-rtr-01:Gi0/0/1", "core-rtr-02:GigabitEthernet0/0/1") in _links(result.topology)
+
+
+def test_empty_lldp_names_never_match_a_device():
+    collected = _collected()
+    collected[1].facts["fqdn"] = ".example.com"     # core-rtr-02 without a hostname part
+    collected[2].lldp["Ethernet11"] = [{"remote_system_name": "", "remote_port": "Gi9"}]
+    result = build_topology(collected, ExportOptions())
+    assert _links(result.topology) == EXPECTED_LINKS
+
+
+@pytest.mark.parametrize("hostname,expected", [
+    ("-x", "x"), ("_core", "core"), (".example.com", "node"), ("---", "node"),
+    ("rtr 1.example.com", "rtr-1"), ("Leaf_01", "Leaf_01"),
+])
+def test_node_names_start_with_a_letter_or_digit(hostname, expected):
+    import re
+    from clabfleet.exporter import _node_name
+    assert _node_name(hostname) == expected
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", _node_name(hostname))
+
+
+def test_ssh_drivers_check_known_host_keys(monkeypatch):
+    seen = {}
+
+    def get_network_driver(platform):
+        def driver(hostname, username, password, optional_args=None):
+            seen[hostname] = optional_args
+            raise ConnectionError("not reachable")
+        return driver
+    import sys
+    import types
+    module = types.ModuleType("napalm")
+    module.get_network_driver = get_network_driver
+    monkeypatch.setitem(sys.modules, "napalm", module)
+    collect_devices([
+        {"hostname": "a", "platform": "ios", "username": "u", "password": "p"},
+        {"hostname": "b", "platform": "nxos_ssh", "username": "u", "password": "p",
+         "optional_args": {"system_host_keys": False, "port": 2222}},
+        {"hostname": "c", "platform": "eos", "username": "u", "password": "p"},
+    ])
+    assert seen["a"] == {"system_host_keys": True}
+    assert seen["b"] == {"system_host_keys": False, "port": 2222}   # inventory wins
+    assert seen["c"] == {}
