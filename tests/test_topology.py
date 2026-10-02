@@ -96,6 +96,14 @@ def test_link_formats():
     ({"name": "t", "topology": {"nodes": {"a": {"kind": "linux"}},
                                 "links": [{"endpoints": ["a:e1", "zz:e1"]}]}}, "unknown node"),
     ({"name": "t", "topology": {"nodes": {"a": {"kind": "linux", "group": "g"}}}}, "unknown group"),
+    # Node names become paths and container names on the lab hosts
+    ({"name": "t", "topology": {"nodes": {"../x": {"kind": "linux"}}}}, "Invalid node name"),
+    ({"name": "t", "topology": {"nodes": {"a/b": {"kind": "linux"}}}}, "Invalid node name"),
+    ({"name": "t", "topology": {"nodes": {"..": {"kind": "linux"}}}}, "Invalid node name"),
+    ({"name": "t", "topology": {"nodes": {".a": {"kind": "linux"}}}}, "Invalid node name"),
+    ({"name": "t", "topology": {"nodes": {"-a": {"kind": "linux"}}}}, "Invalid node name"),
+    ({"name": "t", "topology": {"nodes": {"a b": {"kind": "linux"}}}}, "Invalid node name"),
+    ({"name": "t", "topology": {"nodes": {"": {"kind": "linux"}}}}, "Invalid node name"),
 ])
 def test_validation_errors(data, message):
     with pytest.raises(TopologyError, match=message):
@@ -124,3 +132,25 @@ def test_referenced_files(tmp_path):
     assert sorted(map(str, topo.referenced_files())) == [
         "configs/r1.cfg", "configs/r2.cfg", "data", "lic.key",
     ]
+
+
+def test_node_names_containerlab_accepts():
+    topo = topology_from_dict({"name": "t", "topology": {"nodes": {
+        n: {"kind": "linux"} for n in ("Spine-1", "leaf_1", "r1.site", "9k")}}})
+    assert list(topo.nodes) == ["Spine-1", "leaf_1", "r1.site", "9k"]
+
+
+def test_referenced_files_skip_symlinks_out_of_the_folder(tmp_path):
+    secret = tmp_path / "home" / "id_rsa"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE KEY")
+    lab = tmp_path / "lab"
+    (lab / "configs").mkdir(parents=True)
+    (lab / "configs" / "r1.cfg").symlink_to(secret)
+    (lab / "configs" / "real.cfg").write_text("hostname r2")
+    (lab / "configs" / "r2.cfg").symlink_to("real.cfg")  # inside: fine
+    topo = topology_from_dict({"name": "t", "topology": {"nodes": {
+        "r1": {"kind": "linux", "startup-config": "configs/r1.cfg"},
+        "r2": {"kind": "linux", "startup-config": "configs/r2.cfg"},
+    }}}, base_dir=lab)
+    assert list(map(str, topo.referenced_files())) == ["configs/r2.cfg"]

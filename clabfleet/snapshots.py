@@ -20,6 +20,7 @@ snapshot, or with the ``startup-config`` the topology gives the node.
 import difflib
 import json
 import logging
+import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -58,6 +59,9 @@ VOLATILE_LINES = {
 RESERVED_NAMES = {"previous", "latest", "startup"}
 
 PERMISSION_DENIED = "permission denied"
+
+# A config file name in snapshot.json: a plain name inside the snapshot folder
+FILE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
 class SnapshotError(Exception):
@@ -166,9 +170,11 @@ class Snapshotter:
         taken = datetime.now(timezone.utc)
         name = name or _free_name(root, taken.strftime("%Y%m%dT%H%M%SZ"))
         path = root / name
-        path.mkdir(parents=True)
+        # Configs hold password hashes and keys: only the user may read them
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.mkdir(mode=0o700)
         for node, info in captured.items():
-            (path / info["file"]).write_text(texts[node])
+            _write_private(path / info["file"], texts[node])
         meta = {
             "version": 1,
             "lab": topo.name,
@@ -179,7 +185,7 @@ class Snapshotter:
             "nodes": captured,
             "skipped": skipped,
         }
-        (path / META_FILE).write_text(json.dumps(meta, indent=2) + "\n")
+        _write_private(path / META_FILE, json.dumps(meta, indent=2) + "\n")
         summary.update(snapshot=name, path=str(path), nodes=captured, skipped=skipped)
         return summary
 
@@ -237,6 +243,13 @@ def check_name(name: str) -> None:
         )
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Create a new file only the user can read (never through a symlink)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+
+
 def _free_name(root: Path, base: str) -> str:
     name, n = base, 1
     while (root / name).exists():
@@ -257,7 +270,9 @@ def list_snapshots(topo: Topology, directory: Optional[str | Path] = None) -> li
     result = []
     for path in root.iterdir():
         meta_path = path / META_FILE
-        if not meta_path.is_file():
+        # A snapshot folder may come from someone else (a downloaded lab), so
+        # symlinks are not followed and snapshot.json is not trusted
+        if path.is_symlink() or meta_path.is_symlink() or not meta_path.is_file():
             continue
         try:
             meta = json.loads(meta_path.read_text())
@@ -267,10 +282,18 @@ def list_snapshots(topo: Topology, directory: Optional[str | Path] = None) -> li
         if not isinstance(meta, dict) or not isinstance(meta.get("nodes"), dict):
             logger.warning("Ignoring snapshot %s: bad %s", path, META_FILE)
             continue
+        meta["nodes"] = {str(n): info for n, info in meta["nodes"].items()
+                         if isinstance(info, dict)}
+        for info in meta["nodes"].values():
+            info["kind"] = str(info.get("kind") or "")
+        skipped = meta.get("skipped")
+        meta["skipped"] = ({str(n): str(r) for n, r in skipped.items()}
+                           if isinstance(skipped, dict) else {})
+        meta["taken_at"] = str(meta.get("taken_at") or "")
         meta["name"] = path.name
         meta["path"] = str(path)
         result.append(meta)
-    result.sort(key=lambda m: (str(m.get("taken_at") or ""), m["name"]))
+    result.sort(key=lambda m: (m["taken_at"], m["name"]))
     return result
 
 
@@ -289,7 +312,15 @@ def snapshot_config(snap: dict, node: str) -> Optional[str]:
     info = snap["nodes"].get(node)
     if not info:
         return None
-    path = Path(snap["path"]) / info.get("file", "")
+    # snapshot.json is just a file in the folder: only read plain file names
+    # in the snapshot itself, not "../x", "/etc/x" or a symlink out of it
+    name = info.get("file")
+    if not isinstance(name, str) or name in (".", "..") or not FILE_NAME_RE.fullmatch(name):
+        return None
+    folder = Path(snap["path"]).resolve()
+    path = (folder / name).resolve()
+    if not path.is_relative_to(folder):
+        return None
     try:
         return path.read_text()
     except OSError:
@@ -313,6 +344,10 @@ def startup_config(topo: Topology, node: str) -> tuple[Optional[str], str]:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = topo.base_dir / path
+    # The GUI shows this to anyone who may read diffs, so only files in the
+    # topology's folder (checked after symlinks), never e.g. ~/.ssh/id_rsa
+    if not path.resolve().is_relative_to(topo.base_dir.resolve()):
+        return None, "startup-config is outside the topology directory"
     try:
         return path.read_text(), ""
     except OSError as exc:

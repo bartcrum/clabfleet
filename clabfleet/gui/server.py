@@ -451,6 +451,7 @@ async def _save_positions(request):
     return web.json_response(detail)
 
 
+@operator_only  # configs hold password hashes and keys
 async def _node_diff(request):
     """?node=X&against=previous|startup: the node's latest snapshot diff."""
     ws: Workspace = request.app[WORKSPACE]

@@ -58,6 +58,20 @@ def test_missing_and_outside_files(tmp_path):
     ]
 
 
+def test_symlink_out_of_the_folder_is_reported(tmp_path):
+    (tmp_path / "secret").write_text("x")
+    lab = tmp_path / "lab"
+    lab.mkdir()
+    (lab / "a.cfg").symlink_to(tmp_path / "secret")
+    report = validate_topology(_write(lab, _topo({
+        "a": {"kind": "linux", "startup-config": "a.cfg"}})))
+    assert report.errors == []
+    assert report.warnings == [
+        "node 'a' startup-config 'a.cfg' is a symlink to a file outside the topology "
+        "directory and is not copied to remote hosts",
+    ]
+
+
 def test_unknown_kind_and_duplicate_interface(tmp_path):
     report = validate_topology(_write(tmp_path, _topo(
         {"a": {"kind": "linux"}, "b": {"kind": "acme_os"}, "c": {"kind": "acme_os"}},
