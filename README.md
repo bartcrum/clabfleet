@@ -314,7 +314,7 @@ clabfleet --sudo gui                     # this machine
 clabfleet gui --cluster topologies/cluster.yaml   # all cluster hosts
 ```
 
-It opens your browser at a `http://localhost:8650/?token=...` link (also
+It opens your browser at a `http://localhost:8650/#token=...` link (also
 printed in the terminal). Stop it with Ctrl+C.
 
 - **Sidebar:** every `*.clab.yml` under the current directory (or each
@@ -382,7 +382,9 @@ printed in the terminal). Stop it with Ctrl+C.
 
 Security: terminals are shell access, so the GUI listens on `127.0.0.1`
 only and needs the random token from its start-up URL. Requests from other
-websites are refused. Use `--bind` with care.
+websites are refused. Use `--bind` with care. See
+[Login and sessions](#login-and-sessions) below; they work the same way
+with a single token.
 
 ### Several users on a shared lab server
 
@@ -408,11 +410,10 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   other users could change (group/world-writable, owned by someone else,
   or in such a directory) is refused and nobody can log in until it is
   fixed.
-- **Login:** each user opens `https://<server>:8650/?token=<their token>`.
-  The token is swapped for a session cookie (HttpOnly, SameSite=Strict,
-  Secure over HTTPS) that ends after 12 hours idle, on **Log out**, or
-  when the user is removed or rotated. Sessions live in memory, so a GUI
-  restart logs everyone out. The header shows who you are and your role.
+- **Login:** each user opens `https://<server>:8650/#token=<their token>`
+  or pastes their token into the login form. See
+  [Login and sessions](#login-and-sessions). The header shows who you are
+  and your role.
 - **Roles:**
   - `operator`: deploy, redeploy, save and destroy, terminals, YAML edits
     and layout saves
@@ -428,7 +429,8 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
 - **Audit log:** `audit.jsonl` next to the users file (or `--audit-log
   FILE`; in single-token mode only with `--audit-log`). One JSON object
   per line with `ts`, `user`, `role`, `remote`, `event` and `details`.
-  Events: `login`, `login_failed`, `logout`, `denied`, `job_started`
+  Events: `login`, `login_failed`, `login_throttled` (once per address
+  and minute after 5 failed logins), `logout`, `denied`, `job_started`
   (action, topology, options), `job_finished` (status, seconds),
   `topology_saved`, `positions_saved`, `terminal_opened` and
   `terminal_closed` (lab, node, mode, host, seconds, exit code). Jobs also
@@ -444,17 +446,45 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   `--insecure-http` overrides that with a warning, for trusted networks
   only. Behind a reverse proxy that terminates TLS, keep the GUI on
   `127.0.0.1` and pass `--public-url https://lab.example.com` so the
-  origin check and secure cookies match the address browsers use.
+  origin check and secure cookies match the address browsers use. Over
+  HTTPS the GUI sends `Strict-Transport-Security` (one year), so browsers
+  will then use HTTPS for every port of that host name.
 
-Security notes: operators are effectively root on the lab hosts, by
-design. containerlab runs as root, and a topology can bind-mount any host
-path, run privileged containers or point at any file, so editing a
-topology and deploying it is root access; operators can also open shells
-on every node and, through `docker exec`, act as the account the GUI runs
-as on each lab host. Make only trusted people operators. Tokens are bearer secrets: anyone with
-a login link is that user until you rotate it. Terminals that are already
-open stay open when a user is removed or rotated; close their tabs (or
-restart the GUI) to cut them off.
+### Login and sessions
+
+- Login links put the token after `#` (`/#token=...`). Browsers do not
+  send that part to the server, so it stays out of access logs and proxy
+  logs; the page posts the token to `/login` and removes it from the
+  address bar. Without a link, the page asks for the token. Old
+  `/?token=...` links still work (they are redirected to the `#` form)
+  but are deprecated: the token in them reaches the server's URL. The
+  access log (`-v`) never shows query strings.
+- `/login` only accepts JSON from the GUI's own origin, so another website
+  cannot log your browser in. A login link of a different user does not
+  replace your session unless you confirm the switch.
+- A login gives the browser a random session id in a cookie (HttpOnly,
+  SameSite=Strict; over HTTPS Secure with the `__Host-` prefix). The token
+  itself is never stored in the browser. The cookie name is unique to each
+  GUI run, because browsers send a host's cookies to all of its ports.
+- A session ends after 12 hours idle, 7 days after login, on **Log out**,
+  or when the user is removed or rotated. Each user keeps at most 20
+  sessions; another login ends the oldest. Sessions live in memory, so a
+  GUI restart logs everyone out.
+- After 5 failed logins from one address within a minute, logins from it
+  are refused (429) for the rest of that minute. Behind a reverse proxy
+  every client shares the proxy's address.
+- Responses carry a Content-Security-Policy (no inline scripts, no
+  framing) and `Cache-Control: no-store` for everything but static files.
+
+Security notes: **operators are effectively root on the lab hosts.** That
+is by design: containerlab runs as root, and an operator can edit and
+deploy a topology that mounts any host path or runs privileged
+containers. They can also open shells on every node and, through
+`docker exec`, act as the account the GUI runs as on each lab host. Make
+only trusted people operators; `viewer` is the role for anyone else.
+Tokens are bearer secrets: anyone with a login link is that user until you
+rotate it. Terminals that are already open stay open when a user is
+removed or rotated; close their tabs (or restart the GUI) to cut them off.
 
 For the CLI and Shell buttons, your user must be able to run `docker`
 (member of the `docker` group, in a session started after you were added).

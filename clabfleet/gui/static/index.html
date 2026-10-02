@@ -114,6 +114,17 @@
     </div>
   </section>
 
+  <div id="login" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <h1>clabfleet</h1>
+      <p class="muted small">Open the GUI with your login link, or paste your token.</p>
+      <input id="login-token" class="mono" type="password" autocomplete="off"
+             aria-label="Login token" placeholder="Token" required>
+      <button class="btn primary" type="submit">Log in</button>
+      <p id="login-error" class="login-error small" role="alert" hidden></p>
+    </form>
+  </div>
+
   <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="/static/vendor/xterm.js"></script>
