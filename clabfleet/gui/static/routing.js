@@ -2,8 +2,9 @@
 
 // ---------------------------------------------------------------------------
 // Routing tab: intended OSPF / BGP / EVPN views, read from the startup configs
-// (/api/routing/<id>). Nodes sit where the Diagram tab puts them, so both tabs
-// share one layout; dragging a node here moves it there too.
+// (/api/routing/<id>), and in Live mode the running state laid over them
+// (/api/routing-live/<id>). Nodes sit where the Diagram tab puts them, so
+// both tabs share one layout; dragging a node here moves it there too.
 //
 // Uses app.js globals: S, $, h, s, api, toast, NODE_W, NODE_H, PSEUDO_W,
 // PSEUDO_H, graphModel, ensurePositions, savePositions, truncate, ifaceLabel,
@@ -24,6 +25,9 @@ const RT = {
   fitted: false,
   extPos: {},           // positions of BGP peers outside the lab
   edges: {},            // edge id -> edge drawn in the current view
+  mode: "intended",     // "intended" | "live"
+  live: null,           // /api/routing-live/<id>, plus its topology id
+  liveLoading: false,
 };
 
 const RT_PROTO_LABEL = { ospf: "OSPF", bgp: "BGP", evpn: "EVPN" };
@@ -35,10 +39,11 @@ function rtPrefsLoad() {
     const p = JSON.parse(localStorage.getItem(RT_VIEW_PREFS)) || {};
     if (typeof p.underlay === "boolean") RT.underlay = p.underlay;
     if (["control", "data", "both"].includes(p.layer)) RT.layer = p.layer;
+    if (["intended", "live"].includes(p.mode)) RT.mode = p.mode;
   } catch { /* private mode */ }
 }
 function rtPrefsSave() {
-  try { localStorage.setItem(RT_VIEW_PREFS, JSON.stringify({ underlay: RT.underlay, layer: RT.layer })); } catch { /* private mode */ }
+  try { localStorage.setItem(RT_VIEW_PREFS, JSON.stringify({ underlay: RT.underlay, layer: RT.layer, mode: RT.mode })); } catch { /* private mode */ }
 }
 
 function rtVisible() {
@@ -68,6 +73,38 @@ async function rtLoad() {
     RT.loading = false;
   }
   rtRender();
+}
+
+function rtDeployed() {
+  return !!S.detail && !S.detail.error && labStatus(S.detail.name).deployed > 0;
+}
+
+function rtLiveOn() {
+  return RT.mode === "live" && rtDeployed();
+}
+
+function rtLiveData() {
+  return rtLiveOn() && RT.live?.id === rtTopoId() && RT.live.updated ? RT.live : null;
+}
+
+// The server probes at most every few seconds whoever asks; the first
+// answer for a lab is empty while its probes run
+async function rtLoadLive() {
+  const id = rtTopoId();
+  if (!id || RT.liveLoading || !rtLiveOn()) return;
+  RT.liveLoading = true;
+  try {
+    const data = await api(`/api/routing-live/${encodeURIComponent(id).replace(/%2F/g, "/")}`);
+    if (rtTopoId() !== id) return;
+    RT.live = { ...data, id };
+  } catch (e) {
+    return;  // keep the last data; the next refresh tries again
+  } finally {
+    RT.liveLoading = false;
+  }
+  rtRender();
+  clearTimeout(RT.liveRetry);
+  if (!RT.live.updated || RT.live.refreshing) RT.liveRetry = setTimeout(rtLoadLive, 2000);
 }
 
 // --- geometry ----------------------------------------------------------------
@@ -280,6 +317,66 @@ function rtEvpnModel() {
   return { nodes, edges, groups: [], legend };
 }
 
+// --- live layer --------------------------------------------------------------------
+
+const RT_LIVE_TEXT = { up: "up", down: "DOWN", partial: "partly up", unknown: "state not known", missing: "not configured" };
+
+function rtUptime(sec) {
+  if (sec == null) return "";
+  const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  return d ? `${d}d ${hh}h` : hh ? `${hh}h ${m}m` : `${m}m ${sec % 60}s`;
+}
+
+function rtLiveEntry(edgeId) {
+  const L = rtLiveData();
+  if (!L) return null;
+  return L.ospf?.[edgeId] || L.bgp?.[edgeId] || L.vxlan?.[edgeId] || null;
+}
+
+// The extra (unintended) neighbours shown in the current protocol view
+function rtExtras() {
+  const L = rtLiveData();
+  if (!L) return [];
+  const pick = { ospf: ["ospf"], bgp: ["bgp", "evpn"], evpn: RT.layer === "data" ? [] : ["evpn"] }[RT.proto] || [];
+  return pick.flatMap((k) => (L.extra?.[k] || []).map((e, i) => ({ ...e, kind: k, id: `extra-${k}-${i}` })));
+}
+
+// Colour edges by their running state and add what runs but is not intended
+function rtApplyLive(model) {
+  const L = rtLiveData();
+  for (const e of model.edges) {
+    const st = rtLiveEntry(e.id);
+    if (!st) continue;
+    e.cls = `${e.cls} live live-${st.state}${st.drift ? " drift" : ""}`;
+    const sides = st.families ? Object.entries(st.families).map(([fam, f]) => [fam, f.a, f.b]) : [["", st.a, st.b]];
+    const lines = sides.map(([fam, a, b]) => `${fam ? `${fam}: ` : ""}${e.a} ${rtSideText(a)} · ${e.b} ${rtSideText(b)}`);
+    e.title = `${e.title}\nLive: ${RT_LIVE_TEXT[st.state] || st.state}${st.detail ? ` (${st.detail})` : ""}\n${lines.join("\n")}`;
+  }
+  for (const x of rtExtras()) {
+    const peer = x.peer || `ext:${x.ip}`;
+    if (!model.nodes[peer]) {
+      model.nodes[peer] = { external: true, label: x.ip, sub: x.asn ? `AS ${x.asn}` : x.router_id ? `rid ${x.router_id}` : "not in the lab" };
+    }
+    model.edges.push({
+      id: x.id, a: x.node, b: peer, ai: "", bi: "",
+      cls: `rt-edge extra live live-${x.state}`,
+      title: `${x.node} → ${x.peer || x.ip}: running but not in the startup config\n` +
+        `${x.kind.toUpperCase()} neighbor ${x.ip}${x.asn ? ` AS ${x.asn}` : ""} · ${x.detail || x.state}`,
+    });
+  }
+  for (const [node, n] of Object.entries(L.nodes || {})) {
+    if (Object.keys(n.errors || {}).length && model.nodes[node]) {
+      model.nodes[node].warn = true;
+    }
+  }
+}
+
+function rtSideText(side) {
+  if (!side) return "";
+  if (side.state === "up") return `up${side.uptime != null ? ` ${rtUptime(side.uptime)}` : ""}${side.pfx_rcvd != null ? `, ${side.pfx_rcvd} pfx` : ""}`;
+  return `${RT_LIVE_TEXT[side.state] || side.state}${side.detail && side.detail !== "Established" ? ` (${side.detail})` : ""}`;
+}
+
 // --- rendering -------------------------------------------------------------------
 
 function rtRender() {
@@ -313,6 +410,7 @@ function rtRender() {
   if (S.detail.nodes.some((n) => !S.positions[n.name])) ensurePositions(physical);
   const P = { ...S.positions };
   const model = { ospf: rtOspfModel, bgp: rtBgpModel, evpn: rtEvpnModel }[RT.proto]();
+  if (rtLiveData()) rtApplyLive(model);
   rtPlaceExternals(model, P);
   RT.edges = Object.fromEntries(model.edges.map((e) => [e.id, e]));
 
@@ -386,7 +484,13 @@ function rtRender() {
   g.append(labels);
   svg.replaceChildren(g);
 
-  rtRenderLegend(model.legend);
+  rtRenderLegend(rtLiveData() ? [
+    { swatch: "line", cls: "live-up", text: "up" },
+    { swatch: "line", cls: "live-down", text: "down / missing" },
+    { swatch: "line", cls: "live-partial", text: "some address families down" },
+    { swatch: "line", cls: "live-unknown", text: "not known (node not running or not readable)" },
+    { swatch: "line", cls: "extra", text: "running, not in startup config" },
+  ] : model.legend);
   rtRenderProblems();
   rtRenderCard();
   if (!RT.fitted) { rtFit(P); RT.fitted = true; }
@@ -407,6 +511,25 @@ function rtPlaceExternals(model, P) {
 
 function rtRenderBar() {
   const d = RT.data;
+  const deployed = rtDeployed();
+  const modes = $("#routing-modes");
+  modes.replaceChildren(...[["intended", "Intended"], ["live", "Live"]].map(([m, label]) => h("button", {
+    class: `seg-btn${(m === "live") === rtLiveOn() ? " active" : ""}`,
+    disabled: m === "live" && !deployed,
+    title: m === "live" ? (deployed ? "Running protocol state, read from the nodes every few seconds" : "Deploy the lab to see its running state")
+      : "What the startup configs say",
+    onclick: () => { RT.mode = m; rtPrefsSave(); rtRender(); if (m === "live") rtLoadLive(); },
+  }, label)));
+  const status = $("#routing-live-status");
+  const L = rtLiveData();
+  status.hidden = !rtLiveOn();
+  if (rtLiveOn()) {
+    const errs = L ? Object.keys(L.errors || {}).length + Object.values(L.nodes || {}).filter((n) => Object.keys(n.errors || {}).length).length : 0;
+    status.textContent = !L ? "reading the nodes…"
+      : L.error ? `could not read: ${L.error}`
+      : `read ${Math.max(0, Math.round(Date.now() / 1000 - L.updated))}s ago${errs ? ` · ${errs} not readable` : ""}`;
+    status.classList.toggle("warn", !!(L && (L.error || errs)));
+  }
   const protos = $("#routing-protos");
   protos.replaceChildren(...["ospf", "bgp", "evpn"].map((p) => h("button", {
     class: `seg-btn${RT.proto === p ? " active" : ""}`,
@@ -447,7 +570,30 @@ function rtRenderBar() {
 
 function rtProblems() {
   if (!RT.data?.problems || !RT.proto) return [];
-  return RT.data.problems.filter((p) => p.protocol === RT.proto || p.protocol === "ip");
+  const out = RT.data.problems.filter((p) => p.protocol === RT.proto || p.protocol === "ip");
+  const L = rtLiveData();
+  if (!L) return out;
+  const live = [];
+  const label = (e) => `${e.a} ↔ ${e.b}`;
+  for (const e of Object.values(RT.edges)) {
+    const st = rtLiveEntry(e.id);
+    if (st && (st.state === "down" || st.state === "partial")) {
+      live.push({ node: e.a, severity: "live", message: `${label(e)} is ${RT_LIVE_TEXT[st.state]}${st.detail ? `: ${st.detail}` : ""}` });
+    }
+  }
+  for (const e of Object.values(RT.edges)) {
+    const drift = rtLiveEntry(e.id)?.drift;
+    if (drift) live.push({ node: e.b, severity: "live", message: drift });
+  }
+  for (const x of rtExtras()) {
+    live.push({ node: x.node, severity: "live", message: `${x.node} runs a ${x.kind.toUpperCase()} neighbor ${x.ip}${x.peer ? ` (${x.peer})` : ""} that is not in its startup config` });
+  }
+  for (const [node, n] of Object.entries(L.nodes || {})) {
+    for (const [topic, err] of Object.entries(n.errors || {})) {
+      live.push({ node, severity: "live", message: `${node}: could not read ${topic || "its state"}: ${err}` });
+    }
+  }
+  return [...live, ...out];
 }
 
 function rtRenderProblems() {
@@ -456,7 +602,7 @@ function rtRenderProblems() {
   list.hidden = !RT.showProblems || !problems.length;
   if (list.hidden) return;
   list.replaceChildren(...problems.map((p) => h("li", {
-    class: p.severity === "info" ? "info" : "warn",
+    class: p.severity === "info" ? "info" : p.severity === "live" ? "live" : "warn",
     onclick: () => { RT.sel = { type: "node", id: p.node }; rtRender(); },
   }, p.message)));
 }
@@ -496,6 +642,7 @@ function rtRenderCard() {
   const sel = RT.sel;
   const body = sel && (sel.type === "node" ? rtNodeCard(sel.id) : rtEdgeCard(sel.id));
   if (!body) { card.hidden = true; return; }
+  if (rtLiveData()) body.parts.push(...(sel.type === "node" ? rtLiveNodeParts(sel.id) : rtLiveEdgeParts(sel.id)));
   card.replaceChildren(
     h("h3", {}, body.title, h("button", { class: "close", title: "Close", onclick: () => { RT.sel = null; rtRender(); } }, "×")),
     ...body.parts.filter(Boolean));
@@ -507,7 +654,7 @@ function rtNodeCard(id) {
   const nodeProblems = (d.problems || [])
     .filter((p) => p.node === id && (p.protocol === RT.proto || p.protocol === "ip")).map((p) => p.message);
   if (id.startsWith("ext:")) {
-    const ext = d.bgp?.external?.[id];
+    const ext = d.bgp?.external?.[id] || rtExtras().find((x) => `ext:${x.ip}` === id);
     return ext && { title: ext.ip, parts: [rtDl([["Peer", "outside the lab"], ["AS", ext.asn]])] };
   }
   if (RT.proto === "ospf") {
@@ -533,9 +680,11 @@ function rtNodeCard(id) {
       parts: [
         rtDl([["AS", n.asn], ["Router ID", `${n.router_id}${n.router_id_configured ? "" : " (derived)"}`],
               ["Networks", n.networks.join(", ")]]),
-        rtTable(["Peer", "Address", "Type", "AFI"], sessions.map((x) => {
-          const [me, peer] = x.a.node === id ? [x.a, x.b] : [x.b, x.a];
-          return [peer.node.replace(/^ext:/, ""), peer.ip, x.type + (x.configured === "both" ? "" : " ⚠"), x.families.join(", ")];
+        rtTable(["Peer", "Address", "Type", "AFI", ...(rtLiveData() ? ["Live"] : [])], sessions.map((x) => {
+          const [, peer] = x.a.node === id ? [x.a, x.b] : [x.b, x.a];
+          const live = rtLiveEntry(x.id);
+          return [peer.node.replace(/^ext:/, ""), peer.ip, x.type + (x.configured === "both" ? "" : " ⚠"),
+                  x.families.join(", "), ...(rtLiveData() ? [live ? RT_LIVE_TEXT[live.state] || live.state : ""] : [])];
         })),
         rtCardProblems(nodeProblems),
       ],
@@ -562,8 +711,53 @@ function rtNodeCard(id) {
   };
 }
 
+function rtLiveEdgeParts(id) {
+  const st = rtLiveEntry(id);
+  const e = RT.edges[id];
+  if (!st || !e) return [];
+  const rows = st.families
+    ? Object.entries(st.families).flatMap(([fam, f]) => [[`${fam} ${e.a}`, rtSideText(f.a)], [`${fam} ${e.b}`, rtSideText(f.b)]])
+    : [[e.a, rtSideText(st.a)], [e.b, rtSideText(st.b)]];
+  return [
+    h("h4", { class: `rt-live-head live-${st.state}` }, `Live: ${RT_LIVE_TEXT[st.state] || st.state}`),
+    st.detail ? h("p", { class: "small muted" }, st.detail) : null,
+    rtDl(rows),
+    st.drift ? h("p", { class: "small rt-drift" }, st.drift) : null,
+  ];
+}
+
+function rtLiveNodeParts(id) {
+  const L = rtLiveData();
+  const n = L?.nodes?.[id];
+  const extras = rtExtras().filter((x) => x.node === id);
+  const parts = [];
+  if (n) {
+    parts.push(h("h4", { class: "rt-live-head" }, "Live"));
+    parts.push(rtDl([["Read", n.collected.join(", ") || "nothing"],
+                     ...Object.entries(n.errors || {}).map(([k, v]) => [`${k || "all"} failed`, v])]));
+  }
+  if (extras.length) {
+    parts.push(h("p", { class: "small muted" }, "Running but not in the startup config:"));
+    parts.push(rtTable(["Neighbor", "Peer", "State"], extras.map((x) => [x.ip, x.peer || (x.asn ? `AS ${x.asn}` : ""), x.detail || x.state])));
+  }
+  return parts;
+}
+
 function rtEdgeCard(id) {
   const d = RT.data;
+  if (id.startsWith("extra-")) {
+    const x = rtExtras().find((y) => y.id === id);
+    if (!x) return null;
+    return {
+      title: `${x.kind.toUpperCase()} neighbor not in the config`,
+      parts: [
+        rtDl([["Node", x.node], ["Neighbor", x.ip], ["Peer", x.peer || "outside the lab"], ["AS", x.asn],
+              ["Router ID", x.router_id], ["Interface", x.iface], ["State", x.detail || x.state],
+              ["Up", rtUptime(x.uptime)], ["Prefixes", x.pfx_rcvd]]),
+        h("p", { class: "small muted" }, "Configured on the running node (for example on the CLI) but not in its startup-config. Save configs to keep it."),
+      ],
+    };
+  }
   if (id.startsWith("ospf")) {
     const a = d.ospf?.adjacencies.find((x) => x.id === id);
     if (!a) return null;
@@ -704,13 +898,17 @@ function rtNodeClicked(id) {
 
 window.Routing = {
   // The Routing tab was opened
-  show() { rtRender(); },
+  show() { rtRender(); if (rtLiveOn()) rtLoadLive(); },
   // Another topology was selected
-  reset() { RT.topo = null; RT.data = null; RT.sel = null; RT.extPos = {}; RT.vni = "all"; },
+  reset() { RT.topo = null; RT.data = null; RT.live = null; RT.sel = null; RT.extPos = {}; RT.vni = "all"; },
   // The topology file changed (saved YAML, finished job): re-read the configs
   changed() { if (rtVisible()) rtLoad(); else RT.topo = null; },
   // Container states changed: refresh the status dots
-  runtime() { if (rtVisible() && RT.data) rtRender(); },
+  runtime() {
+    if (!rtVisible() || !RT.data) return;
+    if (rtLiveOn()) rtLoadLive();
+    rtRender();
+  },
   resize() { if (rtVisible() && RT.data) rtRender(); },
 };
 

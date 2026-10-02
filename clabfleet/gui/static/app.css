@@ -357,6 +357,28 @@ table.nodes td .open { display: flex; gap: 6px; }
 .diagram .node .rt-warn { font-size: 13px; fill: var(--warn); }
 .diagram .rt-ext { cursor: pointer; }
 
+/* live protocol state: drawn over the intended colours */
+.diagram .rt-edge.live-up { stroke: var(--accent); opacity: 1; }
+.diagram .rt-edge.live-down { stroke: var(--danger); stroke-width: 2.6; stroke-dasharray: 6 4; }
+.diagram .rt-edge.live-partial { stroke: var(--warn); stroke-dasharray: 6 4; }
+.diagram .rt-edge.live-unknown { stroke: var(--muted); opacity: .45; stroke-dasharray: 2 4; }
+.diagram .rt-edge.extra { stroke: var(--blue); stroke-dasharray: 1 5; stroke-width: 2.6; stroke-linecap: round; }
+.diagram .rt-edge.extra.live-down { stroke: var(--danger); }
+.diagram .rt-edge.live.drift { stroke: var(--blue); }
+.rt-drift { color: var(--blue); }
+.routing-live-status { color: var(--muted); white-space: nowrap; }
+.routing-live-status.warn { color: var(--warn); }
+.routing-problems .live { color: var(--danger); }
+.rt-live-head { margin: 4px 0 6px; font-size: 12.5px; }
+.rt-live-head.live-up { color: var(--accent); }
+.rt-live-head.live-down { color: var(--danger); }
+.rt-live-head.live-partial { color: var(--warn); }
+.routing-legend .sw.live-up { border-top-color: var(--accent); }
+.routing-legend .sw.live-down { border-top: 2px dashed var(--danger); }
+.routing-legend .sw.live-partial { border-top: 2px dashed var(--warn); }
+.routing-legend .sw.live-unknown { border-top: 2px dotted var(--muted); }
+.routing-legend .sw.extra { border-top: 2px dotted var(--blue); }
+
 .routing-legend {
   position: absolute; left: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px 14px;
   max-width: calc(100% - 330px); padding: 6px 10px; font-size: 11.5px; color: var(--muted);

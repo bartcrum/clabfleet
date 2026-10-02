@@ -247,6 +247,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_put("/api/topologies/{id:.+}", _save_topology)
     app.router.add_get("/api/live/{id:.+}", _live)
     app.router.add_get("/api/routing/{id:.+}", _routing)
+    app.router.add_get("/api/routing-live/{id:.+}", _routing_live)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
     app.router.add_get("/api/diff/{id:.+}", _node_diff)
@@ -560,6 +561,17 @@ async def _routing(request):
     except KeyError as exc:
         raise web.HTTPNotFound(text=str(exc))
     return web.json_response(view)
+
+
+async def _routing_live(request):
+    """Live OSPF / BGP / EVPN state of a topology's running lab (cached;
+    asking refreshes it in the background)."""
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        live = await asyncio.to_thread(ws.routing_live, request.match_info["id"])
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc))
+    return web.json_response(live)
 
 
 async def _json_body(request) -> dict:

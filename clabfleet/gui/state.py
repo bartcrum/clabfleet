@@ -24,7 +24,9 @@ from ..deployer import LabDeployer, read_placement_record
 from ..livestate import LiveCache, link_states, probe_ifaces, probe_stats
 from ..nodes import InspectError, access_modes, inspect_all, parse_inspect
 from ..readiness import ReadinessCache, check_ready
+from ..execute import ssh_exec
 from ..routing import routing_view
+from ..routing.live import collect as collect_protocols, overlay as protocol_overlay
 from ..snapshots import Snapshotter, diff_lab
 from ..validate import validate_text
 from .editing import EditConflict, set_positions, text_hash, write_if_unchanged
@@ -44,6 +46,8 @@ SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox"}
 MAX_SCAN_DEPTH = 5
 GUI_PROBE_TIMEOUT = 5  # seconds; the GUI re-probes not-ready nodes anyway
 LIVE_INTERVAL = 5.0  # seconds between live link/CPU refreshes of a lab being viewed
+PROTOCOL_INTERVAL = 10.0   # seconds between protocol state probes of an open lab
+PROTOCOL_SSH_TIMEOUT = 10  # per SSH command on VM-based nodes
 RUNTIME_TTL = 2.0  # seconds a `containerlab inspect` result is reused for
 
 # ANSI escape sequences (colors, bold) in containerlab output
@@ -172,6 +176,7 @@ class Workspace:
         self.readiness = ReadinessCache()
         self._probes = ThreadPoolExecutor(max_workers=8, thread_name_prefix="readiness")
         self.live = LiveCache(LIVE_INTERVAL)
+        self.protocols = LiveCache(PROTOCOL_INTERVAL)
         self._live_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="live")
         self._last_runtime: Optional[tuple[float, list[HostState]]] = None
         self._runtime_lock = threading.Lock()
@@ -267,6 +272,56 @@ class Workspace:
             return routing_view(load_topology(path))
         except Exception as exc:
             return {"error": str(exc)}
+
+    def routing_live(self, topo_id: str) -> dict:
+        """The last live protocol state of a topology's lab, without waiting.
+
+        Like ``live_state``: asking starts a background refresh when the
+        snapshot is older than ``PROTOCOL_INTERVAL``.
+        """
+        path = self.topology_path(topo_id)
+        snapshot, due = self.protocols.get(topo_id)
+        if due and self.protocols.claim(topo_id):
+            try:
+                self._live_pool.submit(self._refresh_protocols, topo_id, path)
+            except RuntimeError:  # shutting down
+                self.protocols.release(topo_id)
+        result = dict(snapshot) if snapshot else {"updated": None}
+        result["refreshing"] = self.protocols.in_flight(topo_id)
+        result["interval"] = self.protocols.interval
+        return result
+
+    def _refresh_protocols(self, topo_id: str, path: Path) -> None:
+        try:
+            snapshot = self.collect_protocols(path)
+        except Exception as exc:  # noqa: BLE001 - shown in the GUI, retried next interval
+            logger.debug("Protocol state of %s failed: %s", topo_id, exc)
+            snapshot = {"updated": time.time(), "error": str(exc)}
+        self.protocols.store(topo_id, snapshot)
+
+    def collect_protocols(self, path: Path) -> dict:
+        """Ask a lab's running nodes for their OSPF / BGP / EVPN state now."""
+        topo = load_topology(path)
+        view = routing_view(topo)
+        containers, errors = {}, {}
+        for host_state in self._recent_runtime():
+            if not host_state.ok:
+                errors[host_state.name] = host_state.error or "unreachable"
+            for c in host_state.containers:
+                if c["lab"] == topo.name:
+                    containers[c["node"]] = c
+
+        def node_io(c):
+            host = self.host(c["host"])
+            runner = self.runner(host)
+            return runner, host.sudo, lambda cmd: ssh_exec(runner, c["kind"], c["ipv4"], cmd,
+                                                           timeout=PROTOCOL_SSH_TIMEOUT)
+
+        states = collect_protocols(view, containers, node_io)
+        result = protocol_overlay(view, states, {n: c["state"] == "running"
+                                                 for n, c in containers.items()})
+        result["errors"] = errors
+        return result
 
     def node_diff(self, topo_id: str, node: str, against: str) -> dict:
         """One node's config in the latest snapshot against ``previous`` or ``startup``."""

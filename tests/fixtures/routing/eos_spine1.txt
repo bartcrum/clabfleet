@@ -1,0 +1,85 @@
+@@clabfleet bgp
+{
+    "vrfs": {
+        "default": {
+            "vrf": "default",
+            "routerId": "10.255.0.1",
+            "asn": "65000",
+            "peers": {
+                "10.0.1.1": {
+                    "version": 4,
+                    "msgReceived": 179,
+                    "msgSent": 181,
+                    "inMsgQueue": 0,
+                    "outMsgQueue": 0,
+                    "asn": "65001",
+                    "prefixAccepted": 1,
+                    "prefixReceived": 1,
+                    "upDownTime": 1790901176.847569,
+                    "underMaintenance": false,
+                    "peerState": "Established",
+                    "prefixAdvertised": 4
+                },
+                "10.0.1.3": {
+                    "version": 4,
+                    "msgReceived": 179,
+                    "msgSent": 178,
+                    "inMsgQueue": 0,
+                    "outMsgQueue": 0,
+                    "asn": "65001",
+                    "prefixAccepted": 1,
+                    "prefixReceived": 1,
+                    "upDownTime": 1790901177.892522,
+                    "underMaintenance": false,
+                    "peerState": "Established",
+                    "prefixAdvertised": 4
+                },
+                "10.0.1.5": {
+                    "version": 4,
+                    "msgReceived": 177,
+                    "msgSent": 179,
+                    "inMsgQueue": 0,
+                    "outMsgQueue": 0,
+                    "asn": "65001",
+                    "prefixAccepted": 1,
+                    "prefixReceived": 1,
+                    "upDownTime": 1790901176.860378,
+                    "underMaintenance": false,
+                    "peerState": "Established",
+                    "prefixAdvertised": 4
+                },
+                "10.0.1.7": {
+                    "version": 4,
+                    "msgReceived": 181,
+                    "msgSent": 179,
+                    "inMsgQueue": 0,
+                    "outMsgQueue": 0,
+                    "asn": "65001",
+                    "prefixAccepted": 1,
+                    "prefixReceived": 1,
+                    "upDownTime": 1790901175.836928,
+                    "underMaintenance": false,
+                    "peerState": "Established",
+                    "prefixAdvertised": 4
+                }
+            }
+        }
+    }
+}
+@@clabfleet evpn
+{
+    "vrfs": {
+        "default": {
+            "vrf": "default",
+            "routerId": "10.255.0.1",
+            "asn": "65000",
+            "peers": {}
+        }
+    }
+}
+@@clabfleet vxlan
+{
+    "vteps": {},
+    "interfaces": {},
+    "vtepTunnelTypes": {}
+}
