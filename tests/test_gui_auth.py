@@ -466,7 +466,7 @@ def test_failed_logins_are_throttled_per_address(tmp_path, monkeypatch):
 
 def test_session_limits(tmp_path, monkeypatch):
     clock = [1000.0]
-    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
     users = UserStore(tmp_path / "users.yaml")
     users.add("alice")
     users.add("bob", "viewer")
@@ -664,3 +664,97 @@ def test_run_installs_the_access_logger(tmp_path, monkeypatch):
     monkeypatch.setattr(server.web, "run_app", lambda app, **kw: calls.append(kw))
     server.run(_workspace(tmp_path), open_browser=False)
     assert calls[0]["access_log_class"] is server.AccessLogger
+
+
+# ----------------------------------------------------------------------
+# Logins kept across restarts
+# ----------------------------------------------------------------------
+
+def _restart(tmp_path, token=None, users=None):
+    """A GUI app as ``run`` makes it: sessions kept per port in a file."""
+    sessions = auth.SessionFile(tmp_path / "state" / "gui-sessions-8650.json")
+    return server.create_app(_workspace(tmp_path), token, users=users, instance="8650",
+                             session_file=sessions)
+
+
+def test_logins_survive_a_restart(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    alice, bob = users.add("alice"), users.add("bob", "viewer")
+    path = tmp_path / "state" / "gui-sessions-8650.json"
+
+    async def scenario():
+        cookies = {}
+        async with TestClient(TestServer(_restart(tmp_path, users=users))) as client:
+            for name, tok in (("alice", alice), ("bob", bob)):
+                client.session.cookie_jar.clear()
+                resp = await _login(client, tok)
+                assert resp.status == 200
+                assert f"Max-Age={server.SESSION_MAX_AGE}" in resp.headers["Set-Cookie"]
+                cookies[name] = resp.cookies["clabfleet_session_8650"].value
+        # Only hashes of the session ids, in a private file
+        text = path.read_text()
+        assert all(sid not in text for sid in cookies.values())
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+        users.rotate("bob")  # ends bob's sessions, even those on disk
+        async with TestClient(TestServer(_restart(tmp_path, users=users))) as client:
+            name = "clabfleet_session_8650"
+            client.session.cookie_jar.update_cookies({name: cookies["alice"]})
+            assert (await (await client.get("/api/me")).json())["user"] == "alice"
+            client.session.cookie_jar.update_cookies({name: cookies["bob"]})
+            assert (await client.get("/api/me")).status == 401
+            # Logging out ends the session for the next run too
+            client.session.cookie_jar.update_cookies({name: cookies["alice"]})
+            assert (await client.post("/logout")).status == 200
+        async with TestClient(TestServer(_restart(tmp_path, users=users))) as client:
+            client.session.cookie_jar.update_cookies({name: cookies["alice"]})
+            assert (await client.get("/api/me")).status == 401
+
+    asyncio.run(scenario())
+
+
+def test_single_token_logins_survive_a_new_token(tmp_path):
+    async def scenario():
+        async with TestClient(TestServer(_restart(tmp_path, "first"))) as client:
+            assert (await _login(client, "first")).status == 200
+            jar = client.session.cookie_jar.filter_cookies(client.make_url("/"))
+            sid = jar["clabfleet_session_8650"].value
+        # The next start prints another token; the browser stays logged in
+        async with TestClient(TestServer(_restart(tmp_path, "second"))) as client:
+            client.session.cookie_jar.update_cookies({"clabfleet_session_8650": sid})
+            me = await (await client.get("/api/me")).json()
+            assert me == {"user": None, "role": "operator", "multi_user": False}
+            assert (await _login(client, "first")).status == 401  # the old token is gone
+
+    asyncio.run(scenario())
+
+
+def test_sessions_do_not_cross_modes_and_expire_on_disk(tmp_path, monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice")
+    path = tmp_path / "s.json"
+    named = server.Auth(users=users, instance="1", session_file=auth.SessionFile(path))
+    sid = named.start_session(users.get("alice"))
+    single = server.Auth("tok", instance="1", session_file=auth.SessionFile(path))
+    req = make_mocked_request("GET", "/api/me", app=server.create_app(_workspace(tmp_path), "tok"),
+                              headers={"Cookie": f"{single.cookie_name(False)}={sid}"})
+    assert single.identify(req) is None  # a named user's session is no operator's
+    # Expired sessions are dropped when the next run loads the file
+    clock[0] += server.SESSION_IDLE + 1
+    later = server.Auth(users=users, instance="1", session_file=auth.SessionFile(path))
+    later.start_session(users.get("alice"))
+    assert len(json.loads(path.read_text())["sessions"]) == 1
+
+
+def test_sessions_file_others_can_change_is_not_used(tmp_path, caplog):
+    path = tmp_path / "gui-sessions-8650.json"
+    path.write_text(json.dumps({"version": 1, "sessions": {}}))
+    path.chmod(0o666)
+    store = auth.SessionFile(path)
+    with caplog.at_level(logging.ERROR):
+        assert store.load() == {}
+    assert "writable by other users" in caplog.text
+    store.save({"a" * 64: {}})  # left alone
+    assert json.loads(path.read_text())["sessions"] == {}

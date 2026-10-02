@@ -542,7 +542,8 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   or in such a directory) is refused and nobody can log in until it is
   fixed.
 - **Login:** each user opens `https://<server>:8650/#token=<their token>`
-  or pastes their token into the login form. See
+  or pastes their token into the login form, once per browser: the login
+  lasts up to 30 days and survives GUI restarts. See
   [Login and sessions](#login-and-sessions). The header shows who you are
   and your role.
 - **Roles:**
@@ -597,12 +598,19 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   replace your session unless you confirm the switch.
 - A login gives the browser a random session id in a cookie (HttpOnly,
   SameSite=Strict; over HTTPS Secure with the `__Host-` prefix). The token
-  itself is never stored in the browser. The cookie name is unique to each
-  GUI run, because browsers send a host's cookies to all of its ports.
-- A session ends after 12 hours idle, 7 days after login, on **Log out**,
+  itself is never stored in the browser. The cookie name includes the
+  GUI's port, because browsers send a host's cookies to all of its ports.
+- Logins survive a GUI restart on the same port, and closing the browser:
+  open your link once per browser. The sessions are kept in
+  `gui-sessions-<port>.json` next to the users file (or in
+  `~/.clabfleet/` without one), mode 0600, and only as SHA-256 hashes of
+  the session ids, so reading the file does not let anyone in. Like the
+  users file, it is not used if other users could change it. In
+  single-token mode each start prints a new token, but browsers already
+  logged in stay logged in; delete the file to log every browser out.
+- A session ends after 7 days idle, 30 days after login, on **Log out**,
   or when the user is removed or rotated. Each user keeps at most 20
-  sessions; another login ends the oldest. Sessions live in memory, so a
-  GUI restart logs everyone out.
+  sessions; another login ends the oldest.
 - After 5 failed logins from one address within a minute, logins from it
   are refused (429) for the rest of that minute. Behind a reverse proxy
   every client shares the proxy's address.

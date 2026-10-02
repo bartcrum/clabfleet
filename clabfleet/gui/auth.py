@@ -152,14 +152,7 @@ class UserStore:
 
     def _check_ownership(self) -> None:
         """Refuse a users file (or its directory) other users could change."""
-        for path, what in ((self.path, "Users file"), (self.path.parent, "Directory of users file")):
-            st = path.stat()
-            if st.st_uid not in (os.getuid(), 0):
-                raise ValueError(f"{what} {path} is not owned by you; refusing to use it")
-            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-                raise ValueError(
-                    f"{what} {path} is writable by other users; refusing to use it "
-                    "(chmod go-w it)")
+        check_private(self.path, "Users file")
 
     def validate(self) -> dict[str, User]:
         """The users, raising if the file is unreadable (for start-up checks)."""
@@ -217,22 +210,84 @@ class UserStore:
         return self._read() if self.path.exists() else {}
 
     def _write(self, users: dict[str, User]) -> None:
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         text = ("# clabfleet GUI users; manage with `clabfleet user`.\n"
                 "# Only SHA-256 hashes of the tokens are stored.\n")
         text += yaml.safe_dump({"users": {n: u.to_dict() for n, u in sorted(users.items())}},
                                sort_keys=False)
-        # mkstemp: a fresh 0600 file, so nothing planted in the directory
-        # can redirect or pre-open the write
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.",
-                                   suffix=".tmp")
+        write_private(self.path, text)
+
+
+def check_private(path: Path, what: str) -> None:
+    """Refuse a file (or its directory) that other users could change."""
+    for p, desc in ((path, what), (path.parent, f"Directory of {what[0].lower()}{what[1:]}")):
+        st = p.stat()
+        if st.st_uid not in (os.getuid(), 0):
+            raise ValueError(f"{desc} {p} is not owned by you; refusing to use it")
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ValueError(f"{desc} {p} is writable by other users; refusing to use it "
+                             "(chmod go-w it)")
+
+
+def write_private(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` as a new 0600 file."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # mkstemp: a fresh 0600 file, so nothing planted in the directory
+    # can redirect or pre-open the write
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+class SessionFile:
+    """GUI login sessions kept on disk, so a restart does not log anyone out.
+
+    Holds the SHA-256 of each session id, never the id itself: reading the
+    file does not let anyone use a session. Each entry also has the user
+    name, the hash of the token the session came from (rotating the token
+    ends it) and its creation and last-use times (Unix seconds). A file
+    other users could change is not used, as for the users file.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path).expanduser()
+        self.usable = True
+
+    def load(self) -> dict[str, dict]:
+        """Session hash -> {name, token_sha256, created, last_seen}."""
         try:
-            with os.fdopen(fd, "w") as fh:
-                fh.write(text)
-            os.replace(tmp, self.path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+            check_private(self.path, "Sessions file")
+            data = json.loads(self.path.read_text())
+            sessions = data.get("sessions") if isinstance(data, dict) else None
+            if not isinstance(sessions, dict):
+                raise ValueError("expected a 'sessions' mapping")
+            out = {}
+            for key, s in sessions.items():
+                if re.fullmatch(r"[0-9a-f]{64}", str(key)) and isinstance(s, dict):
+                    out[key] = {"name": str(s.get("name", "")),
+                                "token_sha256": str(s.get("token_sha256", "")),
+                                "created": float(s.get("created", 0)),
+                                "last_seen": float(s.get("last_seen", 0))}
+            return out
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, TypeError) as exc:
+            # Fail closed: nobody is logged in, and the file is left alone
+            logger.error("Not using sessions file %s: %s", self.path, exc)
+            self.usable = False
+            return {}
+
+    def save(self, sessions: dict[str, dict]) -> None:
+        if not self.usable:
+            return
+        try:
+            write_private(self.path, json.dumps({"version": 1, "sessions": sessions}, indent=1))
+        except OSError as exc:
+            logger.warning("Could not write sessions file %s: %s", self.path, exc)
 
 
 class AuditLog:

@@ -14,7 +14,8 @@ localhost by default and every request must be authenticated. Two modes:
 In both modes the token is only sent in the body of ``POST /login`` (login
 links carry it in the URL fragment, which browsers do not send to the
 server) and is exchanged for a random session id in a SameSite=Strict
-cookie; logging out ends the session. Websocket and POST requests must
+cookie; logging out ends the session. Sessions are kept on disk (hashed)
+so a restart on the same port logs nobody out. Websocket and POST requests must
 also come from the GUI's own origin, so other websites open in the
 browser cannot drive it.
 """
@@ -31,7 +32,7 @@ import ssl
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -44,8 +45,8 @@ from ..capture import GUI_MAX_BYTES, CaptureError
 from ..nodes import access_modes, run_docker, terminal_command, terminal_stop_command
 from ..snapshots import SnapshotError
 from .auth import (
-    ACCESS_ATTR, OPERATOR, VIEWER, AuditLog, User, UserStore, allow_viewer, hash_token,
-    login_link, operator_only,
+    ACCESS_ATTR, DEFAULT_USERS_FILE, OPERATOR, VIEWER, AuditLog, SessionFile, User, UserStore,
+    allow_viewer, hash_token, login_link, operator_only,
 )
 from .captures import open_capture, pcap_filename, spec_from_query
 from .editing import EditConflict
@@ -60,8 +61,10 @@ logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE = "clabfleet_session"  # plus the instance id; "__Host-" prefix over HTTPS
-SESSION_IDLE = 12 * 3600              # seconds without a request before a session ends
-SESSION_MAX_AGE = 7 * 24 * 3600       # seconds after login a session ends regardless
+SESSION_IDLE = 7 * 24 * 3600          # seconds without a request before a session ends
+SESSION_MAX_AGE = 30 * 24 * 3600      # seconds after login a session ends regardless
+SESSION_SAVE_EVERY = 60               # seconds between writes of last-use times only
+SESSION_FILE = "gui-sessions-{instance}.json"  # next to the users file, or in ~/.clabfleet
 SESSIONS_PER_USER = 20                # a further login ends that user's oldest session
 LOGIN_FAILURES = 5                    # failed logins allowed per remote address ...
 LOGIN_WINDOW = 60                     # ... in this many seconds; then 429 until it ends
@@ -84,7 +87,7 @@ USER_KEY = web.RequestKey("user", User) if hasattr(web, "RequestKey") else "clab
 class _Session:
     name: str
     token_sha256: str  # the token the session came from; rotating it ends the session
-    created: float
+    created: float     # Unix seconds, so sessions kept on disk survive a restart
     last_seen: float
 
 
@@ -99,10 +102,17 @@ class Auth:
     """Who a request comes from, in single-token or named-user mode.
 
     Both modes hand out the same kind of session: a random id in a cookie,
-    mapped to a user here. The token itself never goes into a cookie."""
+    mapped to a user here. The token itself never goes into a cookie.
+
+    With a ``session_file``, sessions are kept on disk (by the hash of their
+    id) and a restarted GUI with the same ``instance`` (its port) takes them
+    over, so nobody has to log in again. In single-token mode the token
+    changes with each start; sessions then belong to "the operator" rather
+    than to one token."""
 
     def __init__(self, token: Optional[str] = None, users: Optional[UserStore] = None,
-                 public_url: Optional[str] = None):
+                 public_url: Optional[str] = None, *, instance: Optional[str] = None,
+                 session_file: Optional[SessionFile] = None):
         if not token and not users:
             raise ValueError("Need a token or a users file")
         self.token = token
@@ -110,9 +120,14 @@ class Auth:
         self.public_url = public_url
         # Browsers send a host's cookies to all of its ports, so each GUI
         # instance has its own cookie name
-        self.instance = secrets.token_hex(4)
+        self.instance = instance or secrets.token_hex(4)
         self._operator = None if users else User("", OPERATOR, hash_token(token))
-        self._sessions: dict[str, _Session] = {}
+        self._file = session_file
+        self._sessions: dict[str, _Session] = {}  # by hash_token(session id)
+        if session_file:
+            self._sessions = {k: _Session(**v) for k, v in session_file.load().items()}
+            self._expire()
+        self._saved = time.time()
         self._failures: dict[str, _Failures] = {}
 
     @property
@@ -141,34 +156,46 @@ class Auth:
         """A new session id for ``user``. Beyond SESSIONS_PER_USER, the
         user's oldest sessions end."""
         self._expire()
-        now = time.monotonic()
-        mine = sorted((s.created, sid) for sid, s in self._sessions.items() if s.name == user.name)
-        for _, sid in mine[:max(0, len(mine) - SESSIONS_PER_USER + 1)]:
-            del self._sessions[sid]
+        now = time.time()
+        mine = sorted((s.created, key) for key, s in self._sessions.items() if s.name == user.name)
+        for _, key in mine[:max(0, len(mine) - SESSIONS_PER_USER + 1)]:
+            del self._sessions[key]
         sid = secrets.token_urlsafe(32)
-        self._sessions[sid] = _Session(user.name, user.token_sha256, now, now)
+        # Single-token mode: no token to tie the session to (it changes per start)
+        tied = user.token_sha256 if self.multi_user else ""
+        self._sessions[hash_token(sid)] = _Session(user.name, tied, now, now)
+        self._save()
         return sid
 
     def identify(self, request: web.Request, touch: bool = True) -> Optional[User]:
         """The request's user, or None. ``touch=False`` checks a long-lived
         request (an open terminal) without counting it as activity."""
-        session = self._sessions.get(self._session_id(request))
-        now = time.monotonic()
+        session = self._sessions.get(self._session_key(request))
+        now = time.time()
         if not session or self._expired(session, now):
             return None
-        # Re-read the user each time: removed or rotated users are out at once
-        user = self.users.get(session.name) if self.multi_user else self._operator
-        if not user or not hmac.compare_digest(user.token_sha256, session.token_sha256):
+        if self.multi_user:
+            # Re-read the user each time: removed or rotated users are out at once
+            user = self.users.get(session.name)
+            if not user or not hmac.compare_digest(user.token_sha256, session.token_sha256):
+                return None
+        elif session.name:  # a named user's session from a run with a users file
             return None
+        else:
+            user = self._operator
         if touch:
             session.last_seen = now
+            if now - self._saved > SESSION_SAVE_EVERY:
+                self._save()
         return user
 
     def logout(self, request: web.Request) -> None:
-        self._sessions.pop(self._session_id(request), None)
+        if self._sessions.pop(self._session_key(request), None):
+            self._save()
 
-    def _session_id(self, request: web.Request) -> str:
-        return request.cookies.get(self.cookie_name(_cookie_secure(request)), "")
+    def _session_key(self, request: web.Request) -> str:
+        sid = request.cookies.get(self.cookie_name(_cookie_secure(request)), "")
+        return hash_token(sid) if sid else ""
 
     @staticmethod
     def _expired(session: _Session, now: float) -> bool:
@@ -176,9 +203,14 @@ class Auth:
                 or now - session.created > SESSION_MAX_AGE)
 
     def _expire(self) -> None:
-        now = time.monotonic()
-        for sid in [k for k, v in self._sessions.items() if self._expired(v, now)]:
-            del self._sessions[sid]
+        now = time.time()
+        for key in [k for k, v in self._sessions.items() if self._expired(v, now)]:
+            del self._sessions[key]
+
+    def _save(self) -> None:
+        self._saved = time.time()
+        if self._file:
+            self._file.save({k: asdict(v) for k, v in self._sessions.items()})
 
     # --- failed logins, per remote address ---
 
@@ -217,16 +249,19 @@ CAPTURE_POOL = web.AppKey("capture_pool", ThreadPoolExecutor)
 def create_app(workspace: Workspace, token: Optional[str] = None, *,
                users: Optional[UserStore] = None, audit: Optional[AuditLog] = None,
                public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
-               max_user_sessions: int = MAX_USER_SESSIONS) -> web.Application:
+               max_user_sessions: int = MAX_USER_SESSIONS, instance: Optional[str] = None,
+               session_file: Optional[SessionFile] = None) -> web.Application:
     """The GUI app. Pass ``token`` for single-token mode or ``users`` for
     named users; ``public_url`` is the address browsers use when it differs
     from what the server sees (e.g. behind a TLS-terminating proxy).
-    ``max_sessions``/``max_user_sessions`` cap open terminal tabs."""
+    ``max_sessions``/``max_user_sessions`` cap open terminal tabs.
+    ``instance`` names the session cookie and ``session_file`` keeps logins
+    across restarts (see ``Auth``)."""
     # Topologies with inline startup configs can be large
     app = web.Application(middlewares=[_auth_middleware], client_max_size=16 * 1024 * 1024)
     app[WORKSPACE] = workspace
     app[JOBS] = JobManager(workspace)
-    app[AUTH] = Auth(token, users, public_url)
+    app[AUTH] = Auth(token, users, public_url, instance=instance, session_file=session_file)
     app[AUDIT] = audit_log = audit or AuditLog(None)
     app[JOBS].on_finished = lambda job: _audit_job_finished(audit_log, job)
     app.on_response_prepare.append(_security_headers)
@@ -269,8 +304,12 @@ def run(workspace: Workspace, host: str = "127.0.0.1", port: int = 8650,
         public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
         max_user_sessions: int = MAX_USER_SESSIONS) -> None:
     token = None if users else secrets.token_urlsafe(24)
+    # Logins are kept per port: a restart on the same port keeps them
+    state_dir = users.path.parent if users else DEFAULT_USERS_FILE.expanduser().parent
+    session_file = SessionFile(state_dir / SESSION_FILE.format(instance=port))
     app = create_app(workspace, token, users=users, audit=audit, public_url=public_url,
-                     max_sessions=max_sessions, max_user_sessions=max_user_sessions)
+                     max_sessions=max_sessions, max_user_sessions=max_user_sessions,
+                     instance=str(port), session_file=session_file)
     base = public_url.rstrip("/") if public_url else _base_url(host, port, ssl_context is not None)
 
     async def _announce(_app):
@@ -470,8 +509,10 @@ async def _login(request):
     auth.logout(request)  # a login always starts a fresh session
     secure = _cookie_secure(request)
     resp = web.json_response({"user": user.name or None, "role": user.role})
+    # Max-Age: the login outlives the browser window, up to the session's end
     resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
-                    httponly=True, samesite="Strict", secure=secure or None)
+                    max_age=SESSION_MAX_AGE, httponly=True, samesite="Strict",
+                    secure=secure or None)
     request.app[AUDIT].record("login", user, remote)
     return resp
 
