@@ -32,6 +32,7 @@ or a remote server over SSH with --host.
 """
 
 import argparse
+import getpass
 import ipaddress
 import json
 import logging
@@ -224,8 +225,13 @@ def _build_parser() -> argparse.ArgumentParser:
                              "exec, SSH for VM-based kinds such as IOL, else a shell")
     p_exec.add_argument("--user", dest="node_user",
                         help="SSH username on the nodes (default: per kind, usually admin)")
-    p_exec.add_argument("--password", dest="node_password",
-                        help="SSH password on the nodes (default: CLAB_NODE_PASSWORD or admin)")
+    pw = p_exec.add_mutually_exclusive_group()
+    pw.add_argument("--password", dest="node_password",
+                    help="SSH password on the nodes (default: CLAB_NODE_PASSWORD or admin). "
+                         "Visible to other users in ps and kept in shell history: prefer "
+                         "CLAB_NODE_PASSWORD or --ask-password")
+    pw.add_argument("--ask-password", action="store_true",
+                    help="Prompt for the nodes' SSH password")
     p_exec.add_argument("--parallel", type=int, default=8,
                         help="Nodes to run on at once (default: 8)")
     p_exec.add_argument("--timeout", type=float, default=60,
@@ -640,7 +646,10 @@ def _user(args: argparse.Namespace) -> int:
 
 
 def _exec(args: argparse.Namespace, cluster: ClusterConfig) -> int:
-    executor = LabExecutor(cluster, ssh_user=args.node_user, ssh_password=args.node_password,
+    password = args.node_password
+    if args.ask_password:
+        password = getpass.getpass("SSH password for the nodes: ")
+    executor = LabExecutor(cluster, ssh_user=args.node_user, ssh_password=password,
                            parallel=args.parallel, timeout=args.timeout)
     out = executor.run(args.topology, " ".join(args.cmd), nodes=_node_patterns(args),
                        mode=args.mode)

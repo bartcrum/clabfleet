@@ -109,8 +109,10 @@ output. Each node is reached the best way its kind allows (`--mode auto`):
 | `shell` | Everything else | `sh -c` inside the container |
 
 SSH mode logs in with containerlab's default `admin`/`admin`, or `root`
-for cRPD. Use `--user` and `--password`, or set `CLAB_NODE_PASSWORD`, if
-your startup configs create other logins. Words after the topology are
+for cRPD. Use `--user` with `CLAB_NODE_PASSWORD` or `--ask-password` (a
+prompt) if your startup configs create other logins. `--password PW` works
+too, but other users on the machine can see it in `ps` and it stays in your
+shell history. Words after the topology are
 joined with spaces, as `ssh` does, so quote the command or put it after
 `--` when it has options of its own. Like the GUI terminals, the CLI and
 shell modes need Docker access on the host. If Docker refuses and the
@@ -792,6 +794,7 @@ fetch (such as `! Last configuration change`) are not a config change.
 | `CLAB_SSH_USER` | your SSH config | SSH username |
 | `CLAB_SSH_KEY` | SSH agent / defaults | SSH private key |
 | `CLAB_SSH_PASS` | — | SSH password (prefer keys) |
+| `CLAB_NODE_PASSWORD` | `admin` | `exec`: SSH password on the lab nodes |
 | `CLAB_SUDO` | off | Run containerlab with sudo (`1` to enable). The GUI uses `sudo -n`, so sudo for containerlab must not need a password |
 | `CLAB_CAPTURE_IMAGE` | `nicolaka/netshoot:latest` | Image with `tcpdump` for capturing on nodes that have none |
 | `CLABFLEET_DEVICE_USERNAME` / `CLABFLEET_DEVICE_PASSWORD` | — | `export-live`: device login when the inventory gives none |
