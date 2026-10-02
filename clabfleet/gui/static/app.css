@@ -598,3 +598,32 @@ table.nodes td .open { display: flex; gap: 6px; }
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
 }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+/* ---------- users dialog ---------- */
+.users-dlg { width: min(720px, calc(100vw - 32px)); }
+.users-body { display: grid; gap: 14px; padding: 18px 20px 20px; }
+.users-head { display: flex; align-items: center; }
+.users-head h2 { margin: 0; font-size: 16px; }
+.users-head .close { margin-left: auto; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 18px; }
+.users-table { font-size: var(--fs-md); }
+.users-table th, .users-table td { padding: 6px 8px; }
+.users-table select { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px; font: inherit; }
+.users-table .acts { display: flex; gap: 6px; justify-content: flex-end; }
+.users-table .you { color: var(--muted); font-size: var(--fs-sm); }
+.users-add { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+.users-add h3 { margin: 0; font-size: var(--fs-md); }
+.users-add p { margin: 0; }
+.users-add-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.users-add-row input, .users-add-row select {
+  color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 8px; font: var(--fs-md) var(--sans);
+}
+.users-add-row input { flex: 1; min-width: 140px; }
+.users-secret {
+  display: grid; gap: 6px; padding: 10px 12px; border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--warn) 60%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent); font-size: var(--fs-md);
+}
+.users-secret[hidden] { display: none; }
+.users-secret .val { display: flex; gap: 8px; align-items: center; }
+.users-secret code { font: var(--fs-md) var(--mono); overflow-wrap: anywhere; user-select: all; }

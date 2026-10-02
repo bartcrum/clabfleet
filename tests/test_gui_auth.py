@@ -260,7 +260,8 @@ def test_roles_sessions_and_audit(tmp_path, monkeypatch):
             assert "SameSite=Strict" in cookie and view_token not in cookie
             assert await (await client.get("/api/me")).json() == {
                 "user": "bob", "role": "viewer", "multi_user": True,
-                "has_password": False, "must_change": False}
+                "has_password": False, "must_change": False,
+                "can_manage_users": False}
             for path in ("/", "/api/state", "/api/jobs", "/api/topologies/t.clab.yml"):
                 assert (await client.get(path)).status == 200, path
             denied = [
@@ -385,7 +386,8 @@ def test_single_token_mode_is_one_operator(tmp_path, monkeypatch):
             assert cookie["path"] == "/" and not cookie["secure"]
             assert await (await client.get("/api/me")).json() == {
                 "user": None, "role": "operator", "multi_user": False,
-                "has_password": False, "must_change": False}
+                "has_password": False, "must_change": False,
+                "can_manage_users": False}
             resp = await client.get("/api/state")
             assert resp.headers["X-Frame-Options"] == "DENY"
 
@@ -751,7 +753,8 @@ def test_single_token_logins_survive_a_new_token(tmp_path):
             client.session.cookie_jar.update_cookies({"clabfleet_session_8650": sid})
             me = await (await client.get("/api/me")).json()
             assert me == {"user": None, "role": "operator", "multi_user": False,
-                          "has_password": False, "must_change": False}
+                          "has_password": False, "must_change": False,
+                "can_manage_users": False}
             assert (await _login(client, "first")).status == 401  # the old token is gone
 
     asyncio.run(scenario())
@@ -1044,3 +1047,115 @@ def test_startup_message_tells_the_first_login(tmp_path):
     users.set_password("admin", "a good new password")
     _, text = server.startup_message("http://localhost:8650", None, users, None)
     assert "First login" not in text and initial not in text
+
+
+# ----------------------------------------------------------------------
+# Managing users from the GUI
+# ----------------------------------------------------------------------
+
+def test_operators_manage_users(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "LOGIN_FAILURES", 100)
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("root", password=PASSWORD)
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users, audit=AuditLog(audit_path))
+        async with TestClient(TestServer(app)) as client:
+            await client.post("/login", json={"username": "root", "password": PASSWORD})
+            me = await (await client.get("/api/me")).json()
+            assert me["can_manage_users"] is True
+
+            # A new user gets a temporary password, shown once, to change at first login
+            resp = await client.post("/api/users", json={"name": "alice", "role": "viewer"})
+            assert resp.status == 200
+            added = await resp.json()
+            temp = added["password"]
+            assert added["user"] == {"name": "alice", "role": "viewer", "password": True,
+                                     "token": False, "must_change": True,
+                                     "created": added["user"]["created"]}
+            assert users.check_password("alice", temp).must_change
+            # Or a login token with its link
+            resp = await client.post("/api/users", json={"name": "ci", "login": "token"})
+            body = await resp.json()
+            assert users.authenticate(body["token"]).name == "ci"
+            assert body["link"].endswith(f"/#token={body['token']}")
+
+            listing = await (await client.get("/api/users")).json()
+            assert [u["name"] for u in listing["users"]] == ["alice", "ci", "root"]
+            assert listing["you"] == "root"
+            assert temp not in json.dumps(listing) and body["token"] not in json.dumps(listing)
+
+            bad = [client.post("/api/users", json={"name": "alice"}),          # exists
+                   client.post("/api/users", json={"name": "a b"}),            # bad name
+                   client.post("/api/users", json={"name": "x", "role": "god"}),
+                   client.post("/api/users", json={"name": "x", "login": "magic"})]
+            assert [r.status for r in await asyncio.gather(*bad)] == [400] * 4
+
+            # Roles, resets and removal of others
+            resp = await client.patch("/api/users/alice", json={"role": "operator"})
+            assert resp.status == 200 and users.get("alice").role == "operator"
+            assert (await client.patch("/api/users/alice", json={"role": "god"})).status == 400
+            assert (await client.patch("/api/users/nobody", json={"role": "viewer"})).status == 404
+            resp = await client.post("/api/users/alice/reset", json={})
+            new_temp = (await resp.json())["password"]
+            assert users.check_password("alice", temp) is None
+            assert users.check_password("alice", new_temp).must_change
+            resp = await client.post("/api/users/ci/reset", json={"login": "token"})
+            assert users.authenticate(body["token"]) is None  # the old token is gone
+            assert (await client.delete("/api/users/ci")).status == 200
+            assert (await client.delete("/api/users/ci")).status == 404
+            assert "ci" not in users.users()
+
+            # Not on yourself
+            assert (await client.patch("/api/users/root", json={"role": "viewer"})).status == 400
+            assert (await client.post("/api/users/root/reset", json={})).status == 400
+            assert (await client.delete("/api/users/root")).status == 400
+
+    asyncio.run(scenario())
+    events = [(e["event"], e["details"]) for e in _events(audit_path)
+              if e["event"].startswith("user_")]
+    assert events[:2] == [("user_added", {"name": "alice", "role": "viewer", "login": "password"}),
+                          ("user_added", {"name": "ci", "role": "operator", "login": "token"})]
+    assert ("user_removed", {"name": "ci"}) in events
+    assert PASSWORD not in audit_path.read_text()
+
+
+def test_viewers_cannot_manage_users(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("root", password=PASSWORD)
+    users.add("vic", "viewer", password=PASSWORD)
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users)
+        async with TestClient(TestServer(app)) as client:
+            await client.post("/login", json={"username": "vic", "password": PASSWORD})
+            assert (await (await client.get("/api/me")).json())["can_manage_users"] is False
+            calls = [client.get("/api/users"),
+                     client.post("/api/users", json={"name": "eve"}),
+                     client.patch("/api/users/root", json={"role": "viewer"}),
+                     client.post("/api/users/root/reset", json={}),
+                     client.delete("/api/users/root")]
+            assert [r.status for r in await asyncio.gather(*calls)] == [403] * 5
+        # Single-token mode has no users to manage
+        app = server.create_app(_workspace(tmp_path), "tok")
+        async with TestClient(TestServer(app)) as client:
+            await _login(client, "tok")
+            assert (await client.get("/api/users")).status == 404
+
+    asyncio.run(scenario())
+    assert set(users.users()) == {"root", "vic"} and users.get("root").role == "operator"
+
+
+def test_the_last_operator_stays(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("root", password=PASSWORD)
+    users.add("vic", "viewer", password=PASSWORD)
+    with pytest.raises(ValueError, match="last operator"):
+        users.set_role("root", "viewer")
+    with pytest.raises(ValueError, match="last operator"):
+        users.remove("root", keep_operator=True)
+    users.set_role("vic", "operator")
+    users.set_role("root", "viewer")  # someone else is an operator now
+    users.remove("vic")  # the CLI may still remove anyone
+    assert set(users.users()) == {"root"}
