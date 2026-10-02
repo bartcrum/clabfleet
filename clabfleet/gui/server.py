@@ -43,6 +43,7 @@ def create_app(workspace: Workspace, token: str) -> web.Application:
     app.router.add_get("/api/hosts", _hosts)
     app.router.add_get("/api/topologies/{id:.+}", _topology)
     app.router.add_put("/api/topologies/{id:.+}", _save_topology)
+    app.router.add_get("/api/live/{id:.+}", _live)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
     app.router.add_get("/api/jobs", _jobs)
@@ -147,6 +148,17 @@ async def _topology(request):
     except KeyError as exc:
         raise web.HTTPNotFound(text=str(exc))
     return web.json_response(detail)
+
+
+async def _live(request):
+    """Link states and node CPU/memory of a topology's running lab (cached;
+    asking refreshes it in the background)."""
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        live = await asyncio.to_thread(ws.live_state, request.match_info["id"])
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc))
+    return web.json_response(live)
 
 
 async def _json_body(request) -> dict:

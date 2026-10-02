@@ -193,6 +193,11 @@ generates nodes, links and startup configs from a small template set.
 
 ### 3.3 Live link and node state in the diagram — M
 
+**Done.** Interface state is read from `/sys/class/net` rather than
+`ip link`, so it works in any container with `sh`. Probes run in the
+background only for labs open in a browser, at most once per lab every
+5 seconds however many tabs are open. Served at `/api/live/<topology>`.
+
 Nodes are coloured by container state only. Poll `ip link` inside
 containers to show links down, and `docker stats` for CPU and memory per
 node.

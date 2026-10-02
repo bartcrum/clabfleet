@@ -12,6 +12,7 @@ const S = {
   positions: {},        // node name -> [x, y] for the open topology
   view: { x: 0, y: 0, k: 1 },
   jobPolling: null,
+  live: null,           // /api/live/<id> for the open topology, plus its id
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -183,6 +184,7 @@ async function refreshState() {
   renderSidebar();
   renderLabHead();
   renderRuntimeOverlays();
+  refreshLive();
   if (!S.viewJob && S.state.jobs.length) {
     const running = S.state.jobs.find((j) => j.status === "running");
     trackJob((running || S.state.jobs[0]).id, false);
@@ -206,6 +208,48 @@ async function refreshHosts() {
   } catch (e) {
     box.replaceChildren(h("span", { class: "host-chip" }, `hosts: ${e.message}`));
   }
+}
+
+// Link states and CPU/memory of the open lab, fetched along with the state.
+// The server answers from its cache and refreshes it in the background.
+async function refreshLive() {
+  const id = S.selected?.type === "topo" ? S.selected.id : null;
+  if (!id || !S.detail || S.detail.error || !labStatus(S.detail.name).deployed) {
+    if (S.live) { S.live = null; renderDiagram(false); renderNodeCard(); }
+    return;
+  }
+  let data;
+  try {
+    data = await api(`/api/live/${topoPath(id)}`);
+  } catch (e) {
+    return;  // keep the last data; the next refresh tries again
+  }
+  if (S.selected?.type !== "topo" || S.selected.id !== id) return;
+  S.live = { ...data, id };
+  renderDiagram(false);
+  renderNodeCard();
+  // First request for this lab: its probes are still running
+  clearTimeout(S.liveRetry);
+  if (!data.updated) S.liveRetry = setTimeout(refreshLive, 2500);
+}
+
+function liveData() {
+  return S.live && S.selected?.type === "topo" && S.live.id === S.selected.id ? S.live : null;
+}
+
+// "Spine-1:eth1 down" for each end of a link that is down
+function downEnds(ls) {
+  return [ls?.a, ls?.b].filter((e) => e?.state === "down").map((e) => `${e.node}:${e.iface} ${e.detail}`);
+}
+
+function fmtBytes(b) {
+  if (b == null) return "?";
+  if (b >= 1024 ** 3) return `${(b / 1024 ** 3).toFixed(1)} GiB`;
+  return `${Math.round(b / 1024 ** 2)} MiB`;
+}
+
+function fmtCpu(pct) {
+  return pct == null ? "?" : `${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
 }
 
 function fmtMem(mb) {
@@ -410,6 +454,7 @@ async function selectTopology(id) {
     return;
   }
   S.positions = loadPositions(id);
+  S.live = null;
   $("#empty").hidden = true;
   $("#lab").hidden = false;
   loadEditor();
@@ -419,6 +464,7 @@ async function selectTopology(id) {
   renderDiagram(true);
   renderNodesTable();
   renderNodeCard();
+  refreshLive();
 }
 
 // Re-fetch the selected topology (e.g. after a job changed its placement
@@ -446,6 +492,7 @@ function selectOtherLab(lab) {
   if (!confirmDiscard()) return;
   S.selected = { type: "lab", lab };
   S.detail = null;
+  S.live = null;
   S.selectedNode = null;
   $("#empty").hidden = true;
   $("#lab").hidden = false;
@@ -782,6 +829,7 @@ function renderDiagram(fit) {
   const multi = S.state?.multi_host;
   const P = S.positions;
   const vnis = crossLinkVnis();
+  const live = liveData();
 
   const g = s("g", { id: "viewport", transform: `translate(${S.view.x},${S.view.y}) scale(${S.view.k})` });
 
@@ -806,14 +854,19 @@ function renderDiagram(fit) {
     const cross = multi && ha && hb && ha !== hb;
     const vni = vnis[`${l.a.id}:${l.a.iface}|${l.b.id}:${l.b.iface}`];
     const vxlan = cross ? `  (VXLAN ${ha} ↔ ${hb}${vni !== undefined ? `, VNI ${vni}` : ""})` : "";
+    const ls = live?.links?.[l.id];
+    const down = ls?.state === "down";
+    const stateText = down ? `\nDOWN: ${downEnds(ls).join(", ")}` : ls?.state === "up" ? "\nup" : "";
     g.append(s("path", {
-      class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}`,
+      class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}${down ? " down" : ""}`,
       d: `M${p0[0]},${p0[1]} Q${c[0]},${c[1]} ${p1[0]},${p1[1]}`,
-    }, s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}`)));
-    for (const [end, from, alt] of [[l.a, p0, false], [l.b, p1, true]]) {
+    }, s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}${stateText}`)));
+    for (const [end, from, alt, side] of [[l.a, p0, false, "a"], [l.b, p1, true, "b"]]) {
       if (!end.iface) continue;
       const pseudo = end.id.startsWith("~");
-      labels.append(ifaceLabel(from, c, pseudo ? PSEUDO_W : NODE_W, pseudo ? PSEUDO_H : NODE_H, end.iface, alt));
+      const label = ifaceLabel(from, c, pseudo ? PSEUDO_W : NODE_W, pseudo ? PSEUDO_H : NODE_H, end.iface, alt);
+      if (ls?.[side]?.state === "down") label.classList.add("down");
+      labels.append(label);
     }
   }
 
@@ -828,6 +881,8 @@ function renderDiagram(fit) {
     }
     const rt = nodeRuntime(lab, nd.id);
     const stClass = { running: "running", booting: "booting", partial: "other" }[nodeState(rt)] || "";
+    const res = rt?.state === "running" ? live?.nodes?.[nd.id] : null;
+    const usage = res && res.cpu != null ? `${fmtCpu(res.cpu)} · ${fmtBytes(res.mem)}` : "";
     const el = s("g", {
       class: `node${S.selectedNode === nd.id ? " selected" : ""}`,
       transform: `translate(${x},${y})`, "data-id": nd.id,
@@ -839,7 +894,14 @@ function renderDiagram(fit) {
       multi && (nodeHost(lab, nd.id) || nd.node.host_pin)
         ? s("text", { class: "hostbadge", x: NODE_W / 2 - 6, y: NODE_H / 2 + 13, "text-anchor": "end" }, `@${nodeHost(lab, nd.id) || nd.node.host_pin}`)
         : null,
-      s("title", {}, `${nd.id} (${nd.node.kind}) — ${nodeStateText(rt)}`));
+      // CPU bar along the bottom of the box, full at one busy core
+      usage ? s("rect", { class: "cputrack", x: -NODE_W / 2 + 9, y: NODE_H / 2 - 6, width: NODE_W - 18, height: 2.5, rx: 1.25 }) : null,
+      usage ? s("rect", {
+        class: `cpubar${res.cpu >= 80 ? " hot" : ""}`, x: -NODE_W / 2 + 9, y: NODE_H / 2 - 6,
+        width: Math.max(1.5, ((NODE_W - 18) * Math.min(res.cpu, 100)) / 100), height: 2.5, rx: 1.25,
+      }) : null,
+      s("title", {}, `${nd.id} (${nd.node.kind}) — ${nodeStateText(rt)}` +
+        (usage ? `\nCPU ${fmtCpu(res.cpu)} · memory ${fmtBytes(res.mem)}` : "")));
     g.append(el);
   }
 
@@ -954,12 +1016,23 @@ function renderNodeCard() {
   const lab = S.detail.name;
   const rt = nodeRuntime(lab, node.name);
   const running = rt?.state === "running";
+  const live = liveData();
+  const res = running ? live?.nodes?.[node.name] : null;
+  const down = Object.values(live?.links || {})
+    .flatMap((ls) => [ls.a, ls.b])
+    .filter((e) => e?.node === node.name && e.state === "down")
+    .map((e) => `${e.iface} (${e.detail})`);
   const rows = [
     ["Kind", node.kind + (node.type ? ` (${node.type})` : "")],
     ["Image", rt?.image || node.image],
     ["State", nodeStateText(rt)],
     ["Mgmt", rt?.ipv4],
     ["Container", rt?.container],
+    res?.cpu != null ? ["CPU", fmtCpu(res.cpu)] : null,
+    res?.mem != null ? ["Memory", `${fmtBytes(res.mem)}` +
+      (res.mem_limit ? ` of ${fmtBytes(res.mem_limit)}` : "") +
+      (res.mem_percent != null ? ` (${res.mem_percent}%)` : "")] : null,
+    down.length ? ["Links down", down.join(", ")] : null,
     S.state?.multi_host ? ["Host", rt?.host || placedHost(node.name) || (node.host_pin && `${node.host_pin} (pinned)`) || (node.host_tags && `tags: ${node.host_tags}`)] : null,
   ].filter((r) => r && r[1]);
   card.replaceChildren(
