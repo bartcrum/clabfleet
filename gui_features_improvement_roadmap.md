@@ -291,7 +291,7 @@ projectors for training sessions.
 
 11. **Export a view — S.** Download the Diagram or Routing view as
     SVG / PNG, light or dark.
+    **Done** (branch `gui-batch2`): Export on the Diagram and Routing tabs, SVG or PNG (2x), light or dark, standalone (styles, colours and glyphs inlined).
 12. **Diagram annotations — S–M.** Sticky notes and labelled boxes
     ("DC1", "tenant A") saved as labels in the topology file, like
     positions.
-    **Done** (branch `gui-batch2`): Export on the Diagram and Routing tabs, SVG or PNG (2x), light or dark, standalone (styles, colours and glyphs inlined).
