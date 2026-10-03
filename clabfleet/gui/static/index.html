@@ -150,11 +150,12 @@
               </div>
               <div class="diagram-tools">
                 <button id="edit-topo" class="btn ghost small operator-only" title="Add, link and remove nodes by drawing"><svg class="ico" aria-hidden="true"><use href="#i-pencil"/></svg>Edit</button>
-                <button id="save-layout" class="btn ghost small operator-only" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
-                <button id="relayout" class="btn ghost small" title="Discard manual positions">Auto layout</button>
-                <button id="add-note" class="btn ghost small anno-tool" hidden title="Add a sticky note (double-click one to edit it, Delete to remove)">Note</button>
-                <button id="add-box" class="btn ghost small anno-tool" hidden title="Add a labelled box around a group, e.g. DC1 (drag its corner to resize)">Box</button>
-                <button id="lanes-toggle" class="btn ghost small" hidden aria-pressed="false" title="One lane per host: links between hosts cross the lane borders">Host lanes</button>
+                <button id="save-layout" class="btn ghost small operator-only logical-only" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
+                <button id="relayout" class="btn ghost small logical-only" title="Discard manual positions">Auto layout</button>
+                <button id="add-note" class="btn ghost small anno-tool logical-only" hidden title="Add a sticky note (double-click one to edit it, Delete to remove)">Note</button>
+                <button id="add-box" class="btn ghost small anno-tool logical-only" hidden title="Add a labelled box around a group, e.g. DC1 (drag its corner to resize)">Box</button>
+                <button id="lanes-toggle" class="btn ghost small logical-only" hidden aria-pressed="false" title="One lane per host: links between hosts cross the lane borders">Host lanes</button>
+                <button id="racks-toggle" class="btn ghost small" aria-pressed="false" title="Rack view: each host is a rack with the nodes in its slots, links are cables between their ports">Racks</button>
                 <span class="menu-wrap export-wrap"><button id="export-diagram" class="btn ghost small" title="Save this view as SVG or PNG, light or dark" aria-haspopup="menu"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg>Export</button></span>
               </div>
               <div class="zoom-tools" role="group" aria-label="Zoom" data-zoom-for="diagram">
@@ -469,6 +470,7 @@
   <script src="/static/trace.js"></script>
   <script src="/static/minimap.js"></script>
   <script src="/static/lanes.js"></script>
+  <script src="/static/racks.js"></script>
   <script src="/static/annotations.js"></script>
 </body>
 </html>

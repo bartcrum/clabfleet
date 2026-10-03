@@ -1018,3 +1018,78 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
   #palette-open { display: none; }
   .lab-title h1 { font-size: 16px; }
 }
+
+/* ---------- rack view (racks.js): hosts as racks, links as cables ---------- */
+/* The racks stay dark metal in every theme; cable colour is the link's role,
+   port LEDs its state (the status colours, as everywhere else) */
+:root {
+  --rack: #1f2124; --rack-rail: #2d3034; --rack-face: #2f3237; --rack-face-hi: #43474e;
+  --rack-label: #e8e6df; --rack-muted: #a3a49f; --rack-jack: #0e0f10;
+  --tray: #1a1d22; --tray-edge: #2f3540;
+  --cable-fabric: #3b82f6; --cable-peer: #e0a800; --cable-access: #9aa0a8; --cable-special: #8b95a3;
+  --led-off: #4a4d52;
+}
+:root[data-theme="light"] {
+  --rack: #2b2d31; --rack-rail: #3a3d42; --rack-face: #3a3d43; --rack-face-hi: #50545b;
+  --tray: #dcdfe3; --tray-edge: #b9c0c8;
+  --cable-fabric: #1f6fd1; --cable-peer: #c99500; --cable-access: #7d838b; --cable-special: #8f9aa7;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="contrast"]) {
+    --rack: #2b2d31; --rack-rail: #3a3d42; --rack-face: #3a3d43; --rack-face-hi: #50545b;
+    --tray: #dcdfe3; --tray-edge: #b9c0c8;
+    --cable-fabric: #1f6fd1; --cable-peer: #c99500; --cable-access: #7d838b; --cable-special: #8f9aa7;
+  }
+}
+:root[data-theme="contrast"] {
+  --rack: #000000; --rack-rail: #ffffff; --rack-face: #000000; --rack-face-hi: #ffffff;
+  --rack-label: #ffffff; --rack-muted: #e6e6e6; --rack-jack: #000000;
+  --tray: #000000; --tray-edge: #ffffff;
+  --cable-fabric: #40c4ff; --cable-peer: #ffd600; --cable-access: #ffffff; --cable-special: #e6e6e6;
+  --led-off: #6b6b6b;
+}
+
+.diagram .tray { fill: var(--tray); stroke: var(--tray-edge); }
+.diagram .tray-label { font: 600 var(--fs-xs) var(--sans); letter-spacing: .1em; text-transform: uppercase; fill: var(--muted); }
+.diagram .rack .frame { fill: var(--rack); }
+.diagram .rack.unplaced .frame { stroke: var(--warn); stroke-dasharray: 6 4; }
+.diagram .rack .rail { fill: var(--rack-rail); }
+.diagram .rack .mgr { stroke: var(--rack-rail); stroke-dasharray: 2 4; }
+.diagram .rack .unum { font: 9px var(--mono); fill: var(--rack-muted); }
+.diagram .rack .rk-name { font: 700 16px var(--sans); fill: var(--rack-label); }
+.diagram .rack .rk-meta { font: 10px var(--mono); fill: var(--rack-muted); }
+
+.diagram .rack-dev rect.face { fill: var(--rack-face); stroke: var(--rack-face-hi); stroke-width: 1; stroke-dasharray: none; }
+.diagram .pseudo.rack-dev rect.face { fill: var(--rack); stroke-dasharray: 3 3; }
+.diagram .node.rack-dev.selected rect.face, .diagram .node.rack-dev.kb rect.face { stroke: var(--select); stroke-width: 2; }
+.diagram .node.rack-dev:hover rect.face { stroke: var(--select); }
+.diagram .rack-dev .name { font-size: 13px; font-weight: 600; fill: var(--rack-label); }
+.diagram .pseudo.rack-dev .name { font-weight: 400; fill: var(--rack-muted); }
+.diagram .rack-dev .kind { font: 9.5px var(--mono); fill: var(--rack-muted); }
+.diagram .rack-dev .status.running .mark { stroke: var(--rack-face); }
+.diagram .rack-dev .status .ring { stroke: var(--rack-muted); }
+.diagram .rack-dev rect.jack { fill: var(--rack-jack); stroke: var(--rack-face-hi); stroke-width: .8; stroke-dasharray: none; }
+.diagram .rack-dev rect.led { fill: var(--led-off); stroke: none; }
+.diagram .rack-dev rect.led.up { fill: var(--ok); }
+.diagram .rack-dev rect.led.down { fill: var(--danger); }
+.diagram .rack-dev .pnum { font: 7.5px var(--mono); fill: var(--rack-muted); text-anchor: middle; }
+
+.diagram .cable { fill: none; stroke-width: 3; stroke-linecap: round; }
+.diagram .cable.fabric { stroke: var(--cable-fabric); }
+.diagram .cable.peer { stroke: var(--cable-peer); }
+.diagram .cable.access { stroke: var(--cable-access); }
+.diagram .cable.special { stroke: var(--cable-special); stroke-dasharray: 2 5; }
+.diagram .cable.down { stroke-dasharray: 7 5; }
+.diagram .cable.selected { stroke: var(--select); stroke-width: 4; }
+.diagram .boot { fill: var(--rack-jack); }
+.diagram .flow { fill: none; stroke: #fff; stroke-opacity: .85; stroke-width: 1.5; stroke-linecap: round;
+  stroke-dasharray: 1.5 22; pointer-events: none; animation: cable-flow var(--flow-dur, 2s) linear infinite; }
+@keyframes cable-flow { to { stroke-dashoffset: -47; } }
+.diagram .vni { font: 600 9px var(--mono); fill: var(--muted); }
+.diagram .port-ring { fill: none; stroke: var(--select); stroke-width: 1.6; opacity: 0; pointer-events: none; }
+.diagram.focusing .port-ring.hl { opacity: 1; }
+.diagram.focusing .flow:not(.hl), .diagram.focusing .vni:not(.hl), .diagram.focusing .boot { opacity: .2; }
+
+/* What only the logical view offers */
+body.racks-view .logical-only { display: none !important; }
+body.building #racks-toggle { display: none; }

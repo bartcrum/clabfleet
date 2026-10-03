@@ -17,7 +17,7 @@ let bounds = null;         // world box drawn in the map: {x, y, w, h}
 
 function shown() {
   const nodes = (diagramModel?.nodes || []).filter((n) => !n.pseudo);
-  return !$("#view-diagram").hidden && nodes.length >= MIN_NODES;
+  return !$("#view-diagram").hidden && nodes.length >= MIN_NODES && !window.Racks?.active();
 }
 
 // The part of the world the diagram shows now
