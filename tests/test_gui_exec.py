@@ -61,3 +61,63 @@ def test_run_on_nodes(tmp_path, monkeypatch):
     asyncio.run(scenario())
     execs = [json.loads(line) for line in audit_path.read_text().splitlines() if '"exec"' in line]
     assert execs[0]["user"] == "op" and execs[0]["details"]["command"] == "uname -a"
+
+
+def test_whatif(tmp_path, monkeypatch):
+    from clabfleet.gui import state
+    from clabfleet.gui.state import HostState
+    from clabfleet.runner import CommandResult
+
+    (tmp_path / "w.clab.yml").write_text(
+        "name: w\ntopology:\n  nodes:\n    r1: {kind: cisco_iol, image: i}\n    h: {kind: linux, image: a}\n"
+        "    stopped: {kind: linux, image: a}\n"
+        "  links:\n    - endpoints: [r1:Ethernet0/1, h:eth1]\n    - endpoints: [stopped:eth1, h:eth2]\n")
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    ws.topologies()
+    containers = [{"lab": "w", "node": "r1", "state": "running", "kind": "cisco_iol", "host": "localhost", "container": "clab-w-r1"},
+                  {"lab": "w", "node": "h", "state": "running", "kind": "linux", "host": "localhost", "container": "clab-w-h"},
+                  {"lab": "w", "node": "stopped", "state": "exited", "kind": "linux", "host": "localhost", "container": "clab-w-stopped"}]
+    monkeypatch.setattr(Workspace, "runtime", lambda self, max_age=0: [HostState("localhost", ok=True, containers=containers)])
+    ran = []
+
+    def run_docker(runner, argv, sudo):
+        ran.append(argv)
+        if argv[-4:] == ["route", "show", "dev", "eth1"]:
+            return CommandResult(0, "default via 10.0.0.1 \n10.0.0.0/24 scope link  src 10.0.0.2 \n", "")
+        return CommandResult(0, "", "")
+
+    monkeypatch.setattr(state, "run_docker", run_docker)
+    assert ws.whatif("w.clab.yml", "link-down", "r1", "Ethernet0/1") == "r1:Ethernet0/1 shut"
+    assert ran[-1] == ["docker", "exec", "clab-w-r1", "ip", "link", "set", "dev", "eth1", "down"]  # IOL's kernel name
+    # A host loses its routes with a shut interface: kept, and put back on no shut
+    assert ws.whatif("w.clab.yml", "link-down", "h", "eth1") == "h:eth1 shut"
+    assert ws.whatif("w.clab.yml", "link-up", "h", "eth1") == "h:eth1 up again"
+    assert ran[-1] == ["docker", "exec", "clab-w-h", "ip", "route", "replace", "default", "via", "10.0.0.1", "dev", "eth1"]
+    assert ws.whatif("w.clab.yml", "link-up", "h", "eth1") == "h:eth1 up again"  # nothing kept: nothing replaced
+    assert ran[-1][-1] == "up"
+    assert ws.whatif("w.clab.yml", "freeze", "h") == "h frozen" and ran[-1] == ["docker", "pause", "clab-w-h"]
+    assert ws.whatif("w.clab.yml", "resume", "h") == "h resumed" and ran[-1] == ["docker", "unpause", "clab-w-h"]
+    for args, error in [(("explode", "h"), "action must be"), (("link-down", "h", "eth9"), "no link on 'eth9'"),
+                        (("link-down", "stopped", "eth1"), "stopped is not running"), (("freeze", "ghost"), "No node")]:
+        with pytest.raises(ValueError, match=error):
+            ws.whatif("w.clab.yml", *args)
+
+    users = UserStore(tmp_path / "users.yaml")
+    op, viewer = users.add("op"), users.add("vic", "viewer")
+    audit_path = tmp_path / "audit.jsonl"
+
+    async def scenario():
+        app = server.create_app(ws, users=users, audit=AuditLog(audit_path))
+        async with TestClient(TestServer(app)) as client:
+            await client.post("/login", json={"token": viewer})
+            assert (await client.post("/api/whatif/w.clab.yml", json={"action": "freeze", "node": "h"})).status == 403
+            await client.post("/logout")
+            await client.post("/login", json={"token": op})
+            resp = await client.post("/api/whatif/w.clab.yml", json={"action": "link-down", "node": "h", "iface": "eth1"})
+            assert resp.status == 200 and (await resp.json())["done"] == "h:eth1 shut"
+            assert (await client.post("/api/whatif/w.clab.yml", json={"action": "nope", "node": "h"})).status == 400
+            assert (await client.post("/api/whatif/w.clab.yml", json={"action": 1, "node": "h"})).status == 400
+
+    asyncio.run(scenario())
+    events = [json.loads(line) for line in audit_path.read_text().splitlines() if '"whatif"' in line]
+    assert events[0]["details"] == {"topology": "w.clab.yml", "action": "link-down", "node": "h", "iface": "eth1"}

@@ -303,6 +303,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/api/routing-live/{id:.+}", _routing_live)
     app.router.add_get("/api/events/{id:.+}", _events)
     app.router.add_post("/api/exec/{id:.+}", _exec)
+    app.router.add_post("/api/whatif/{id:.+}", _whatif)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
     app.router.add_put("/api/graph/{id:.+}", _save_graph)
@@ -1009,6 +1010,28 @@ async def _exec(request):
         if len(r.get("output") or "") > EXEC_MAX_OUTPUT:
             r["output"] = r["output"][:EXEC_MAX_OUTPUT] + "\n[output cut]\n"
     return web.json_response(out)
+
+
+async def _whatif(request):
+    """A reversible failure: ``{"action": link-down|link-up|freeze|resume,
+    "node", "iface"?}`` (see ``Workspace.whatif``)."""
+    ws: Workspace = request.app[WORKSPACE]
+    topo_id = request.match_info["id"]
+    body = await _json_body(request)
+    action, node, iface = body.get("action"), body.get("node"), body.get("iface", "")
+    if not all(isinstance(v, str) for v in (action, node, iface)):
+        raise web.HTTPBadRequest(text="Expected action, node and iface")
+    _refuse_while_busy(request, topo_id)
+    audit(request, "whatif", topology=topo_id, action=action, node=node, iface=iface)
+    try:
+        done = await asyncio.to_thread(ws.whatif, topo_id, action, node, iface)
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+    except Exception as exc:  # noqa: BLE001 - docker or the node refused
+        raise web.HTTPBadGateway(text=str(exc))
+    return web.json_response({"done": done})
 
 
 async def _save_positions(request):

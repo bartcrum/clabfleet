@@ -438,6 +438,16 @@ an operator.
   recorded while the Diagram reads them, sessions, adjacencies and tunnels
   while the Routing tab is Live or the Health panel is open. Click a row
   to jump to it.
+- **Traffic:** links carrying traffic are drawn thicker (from 10 kb/s, by
+  orders of magnitude), with the rate each way in the link's tooltip and
+  inspector, from the interfaces' byte counters read with the link state.
+- **What if:** on a running lab, an operator can shut and un-shut a link
+  end (the interface goes down inside the node, as on a shut port), shut
+  or restore all of a node's links, or freeze and resume a node (`docker
+  pause`: its links stay up but it stops answering, like a hung box, so
+  its neighbours time out). The inspector offers them on links and nodes;
+  disruptive ones ask first, all are audited (`whatif`), and nothing is
+  saved to any config. Watch the Routing tab in Live mode reconverge.
 - **Export:** Export on the Diagram and Routing tabs saves the view as SVG
   or PNG, light or dark, for documents and slides.
 - **Freshness:** live views say how old their data is ("live: read 4 s

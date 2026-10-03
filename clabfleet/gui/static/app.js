@@ -462,6 +462,21 @@ function fmtBytes(b) {
   return `${Math.round(b / 1024 ** 2)} MiB`;
 }
 
+// Link traffic (feature 5): bits per second, and the stroke it gets
+function fmtRate(bps) {
+  if (bps == null) return "?";
+  for (const [unit, size] of [["Gb/s", 1e9], ["Mb/s", 1e6], ["kb/s", 1e3]]) {
+    if (bps >= size) return `${(bps / size).toFixed(bps >= 10 * size ? 0 : 1)} ${unit}`;
+  }
+  return `${Math.round(bps)} b/s`;
+}
+
+// Thicker by orders of magnitude from 10 kb/s (1.6 px idle, up to 7 px)
+function linkWidth(bps) {
+  if (!bps || bps < 10e3) return null;
+  return Math.min(7, 1.6 + 1.1 * Math.log10(bps / 10e3) + 0.6).toFixed(1);
+}
+
 function fmtCpu(pct) {
   return pct == null ? "?" : `${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
 }
@@ -1538,12 +1553,15 @@ function renderDiagram(fit) {
     const vxlan = cross ? `  (VXLAN ${ha} ↔ ${hb}${vni !== undefined ? `, VNI ${vni}` : ""})` : "";
     const ls = live?.links?.[l.id];
     const down = ls?.state === "down";
-    const stateText = down ? `\nDOWN: ${downEnds(ls).join(", ")}` : ls?.state === "up" ? "\nup" : "";
+    const rate = ls?.rate;
+    const stateText = (down ? `\nDOWN: ${downEnds(ls).join(", ")}` : ls?.state === "up" ? "\nup" : "") +
+      (rate ? `\n${l.a.id} → ${l.b.id} ${fmtRate(rate.ab)}, ${l.b.id} → ${l.a.id} ${fmtRate(rate.ba)}` : "");
     const d = `M${p0[0]},${p0[1]} Q${c[0]},${c[1]} ${p1[0]},${p1[1]}`;
     const ends = `${l.a.id}|${l.b.id}`;
+    const width = rate && !down ? linkWidth(Math.max(rate.ab, rate.ba)) : null;
     g.append(s("path", {
-      class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}${down ? " down" : ""}${selectedLink()?.id === l.id ? " selected" : ""}`,
-      d, "data-ends": ends,
+      class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}${down ? " down" : ""}${selectedLink()?.id === l.id ? " selected" : ""}${width ? " busy" : ""}`,
+      d, "data-ends": ends, style: width ? `stroke-width: ${width}` : null,
     }, s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}${stateText}`)));
     // Wide invisible stroke so links are easy to click (packet capture)
     g.append(s("path", { class: "link-hit", d, "data-link": l.id },
@@ -1913,9 +1931,84 @@ function renderNodeCard() {
         class: "btn small ghost",
         title: `Diff ${node.name}'s config in the latest snapshot`,
         onclick: () => openDiff(S.selected.id, node.name),
-      }, "Config diff")));
+      }, "Config diff")),
+    ...nodeWhatif(node, rt, live));
   card.hidden = false;
   syncInspector();
+}
+
+// ---------------------------------------------------------------------------
+// What if (feature 6): reversible failures on a running lab
+// ---------------------------------------------------------------------------
+
+function isShut(end) {
+  return end?.state === "down" && /admin down$/.test(end.detail || "");
+}
+
+async function whatif(action, node, iface = "", confirm = null) {
+  if (confirm && !(await confirmDialog(confirm))) return;
+  try {
+    const { done } = await api(`/api/whatif/${topoPath(S.selected.id)}`, {
+      method: "POST", body: JSON.stringify({ action, node, iface }),
+    });
+    announce(done);
+    toast(done, { ok: true, actions: [{ label: "Watch Routing › Live", run: () => window.Routing?.showLive() }] });
+  } catch (e) {
+    toast(`Not done: ${e.message}`);
+  }
+  await refreshState();
+  setTimeout(refreshLive, 1500);  // the next probe sees the change
+}
+
+function linkWhatif(l, ls) {
+  if (!canOperate() || S.selected?.type !== "topo") return [];
+  const ends = [["a", l.a], ["b", l.b]].filter(([, e]) => e.node && nodeRuntime(S.detail.name, e.node)?.state === "running");
+  if (!ends.length) return [];
+  return [h("h4", {}, "What if"), h("span", { class: "open" }, ends.map(([side, e]) => isShut(ls?.[side])
+    ? h("button", { class: "btn small", onclick: () => whatif("link-up", e.node, e.iface) }, `No shut ${e.node}:${e.iface}`)
+    : h("button", {
+        class: "btn small", title: `Take ${e.node}:${e.iface} administratively down; the far end loses its carrier`,
+        onclick: () => whatif("link-down", e.node, e.iface, {
+          title: `Shut ${e.node}:${e.iface}?`, ok: "Shut it", danger: true,
+          body: [`Takes ${e.node}:${e.iface} down inside the node, like a shut port: the link goes down and the protocols over it reconverge.`,
+                 "No shut brings it back. Nothing is saved to any config."],
+        }),
+      }, `Shut ${e.node}:${e.iface}`)))];
+}
+
+function nodeWhatif(node, rt, live) {
+  if (!canOperate() || S.selected?.type !== "topo" || !rt) return [];
+  const paused = rt.state === "paused";
+  const ends = S.detail.links.flatMap((l) => [[l, "a"], [l, "b"]]).filter(([l, side]) => l[side].node === node.name);
+  const shut = ends.filter(([l, side]) => isShut(live?.links?.[l.id]?.[side]));
+  const buttons = [paused
+    ? h("button", { class: "btn small", onclick: () => whatif("resume", node.name) }, "Resume")
+    : rt.state === "running" ? h("button", {
+        class: "btn small", title: "Pause the node: its links stay up but it stops answering, so its neighbours time out",
+        onclick: () => whatif("freeze", node.name, "", {
+          title: `Freeze ${node.name}?`, ok: "Freeze it", danger: true,
+          body: [`Pauses ${node.name} (docker pause): its links stay up but it stops answering, like a hung box. Its neighbours time out and reconverge.`,
+                 "Resume brings it back where it was."],
+        }),
+      }, "Freeze") : null];
+  if (rt.state === "running" && ends.length) {
+    buttons.push(shut.length
+      ? h("button", { class: "btn small", onclick: () => restoreLinks(node.name, shut) }, "Restore its links")
+      : h("button", { class: "btn small", onclick: () => isolate(node.name, ends) }, "Shut all its links"));
+  }
+  return [h("h4", {}, "What if"), h("span", { class: "open" }, buttons.filter(Boolean))];
+}
+
+async function isolate(name, ends) {
+  if (!(await confirmDialog({
+    title: `Isolate ${name}?`, ok: "Shut its links", danger: true,
+    body: [`Takes all ${ends.length} of ${name}'s link interfaces down inside the node, cutting it off. Restore its links undoes it.`],
+  }))) return;
+  for (const [l, side] of ends) await whatif("link-down", name, l[side].iface);
+}
+
+async function restoreLinks(name, shut) {
+  for (const [l, side] of shut) await whatif("link-up", name, l[side].iface);
 }
 
 // The node's links: interface, far end and (live) state; a row selects the link
@@ -2002,6 +2095,7 @@ function buildLinkCard(card, l) {
       h("button", { class: "close", title: "Close", "aria-label": "Close", onclick: () => selectLink(null) }, "×")),
     h("h4", {}, "Overview"),
     h("dl", { class: "link-overview" }),
+    h("div", { class: "whatif" }),
     h("h4", {}, "Capture packets"),
     h("div", { class: "sides" }, ["a", "b"].map((k) =>
       h("label", { class: "side", "data-side": k },
@@ -2035,8 +2129,10 @@ function syncLinkCard(card, l) {
     ls?.b ? [endpointLabel(l.b), endState(ls.b)] : null,
     l.type ? ["Type", l.type] : null,
     S.state?.multi_host && ha && hb && ha !== hb ? ["VXLAN", `${ha} ↔ ${hb}${vni !== undefined ? `, VNI ${vni}` : ""}`] : null,
+    ls?.rate ? ["Traffic", `${l.a.node || "a"} → ${l.b.node || "b"} ${fmtRate(ls.rate.ab)} · back ${fmtRate(ls.rate.ba)}`] : null,
   ].filter(Boolean);
   card.querySelector(".link-overview").replaceChildren(...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
+  card.querySelector(".whatif").replaceChildren(...linkWhatif(l, ls));
   const sides = { a: captureSide(l.a), b: captureSide(l.b) };
   if (!sides[captureForm.side].ok) {
     const other = captureForm.side === "a" ? "b" : "a";

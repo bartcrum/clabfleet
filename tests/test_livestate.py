@@ -9,6 +9,7 @@ from clabfleet.gui.state import Workspace, topology_view
 from clabfleet.livestate import (
     LiveCache,
     endpoint_state,
+    link_rates,
     link_states,
     linux_iface_names,
     oper_to_state,
@@ -30,12 +31,14 @@ ALPINE_IFACES = ("eth0\tup\t0x1003\t\neth1\tdown\t0x1002\t\neth2\tlowerlayerdown
 
 
 def test_parse_iface_states_and_operstates():
-    ifaces = parse_iface_states(CEOS_IFACES + "Gi0-0-0-0\tup\t0x1003\tto core\tR1\n")
-    assert ifaces["eth1"] == {"oper": "up", "admin_up": True, "alias": ""}
-    assert ifaces["Gi0-0-0-0"]["alias"] == "to core\tR1"
+    ifaces = parse_iface_states(CEOS_IFACES + "Gi0-0-0-0\tup\t0x1003\t1200\t3400\tto core\tR1\n")
+    assert ifaces["eth1"] == {"oper": "up", "admin_up": True, "rx": None, "tx": None, "alias": ""}
+    assert ifaces["Gi0-0-0-0"]["alias"] == "to core\tR1"  # the alias comes last: tabs and all
+    assert (ifaces["Gi0-0-0-0"]["rx"], ifaces["Gi0-0-0-0"]["tx"]) == (1200, 3400)
     assert parse_iface_states(ALPINE_IFACES)["eth1"]["admin_up"] is False
     assert parse_iface_states("*\t\t\t\n") == {}  # /sys/class/net glob matched nothing
-    assert parse_iface_states("eth1\n")["eth1"] == {"oper": "", "admin_up": None, "alias": ""}
+    assert parse_iface_states("eth1\n")["eth1"] == {"oper": "", "admin_up": None, "rx": None,
+                                                    "tx": None, "alias": ""}
     assert [oper_to_state(s) for s in ("up", "UP", "down", "lowerlayerdown", "dormant",
                                        "notpresent", "unknown", "", "testing")] == [
         "up", "up", "down", "down", "down", "down", "unknown", "unknown", "unknown"]
@@ -99,8 +102,8 @@ def test_link_states_map_interfaces_to_topology_links():
     links = link_states(topology_view(topo)["links"], nodes)
     assert links["link0"] == {
         "state": "up",
-        "a": {"node": "sw", "iface": "Ethernet1", "state": "up", "detail": "eth1 up"},
-        "b": {"node": "r1", "iface": "Ethernet0/1", "state": "up", "detail": "eth1 up"},
+        "a": {"node": "sw", "iface": "Ethernet1", "state": "up", "detail": "eth1 up", "rx": None, "tx": None},
+        "b": {"node": "r1", "iface": "Ethernet0/1", "state": "up", "detail": "eth1 up", "rx": None, "tx": None},
     }
     assert links["link1"]["state"] == "down"
     assert (links["link1"]["a"]["state"], links["link1"]["b"]["state"]) == ("up", "down")
@@ -320,3 +323,21 @@ def test_live_api(tmp_path, monkeypatch):
     assert body["links"]["link1"]["state"] == "down"
     assert body["nodes"]["pc"]["cpu"] == 2.5
     ws.close()
+
+
+def test_link_rates_from_byte_counters():
+    def snap(t, a_tx, b_tx, b_rx=None):
+        return {"updated": t, "links": {"L": {"state": "up", "a": {"tx": a_tx, "rx": 0},
+                                              "b": {"tx": b_tx, "rx": b_rx}}}}
+    current = snap(110, 1_000_000 + 125_000, 500)
+    link_rates(snap(100, 1_000_000, 0), current)
+    assert current["links"]["L"]["rate"] == {"ab": 100_000, "ba": 400}  # bits per second
+    # a counter that went back (the node restarted): no rate from it
+    current = snap(120, 10, 900)
+    link_rates(snap(110, 5000, 500), current)
+    assert current["links"]["L"]["rate"] == {"ab": 0, "ba": 320}
+    # no read before, or no time between: nothing
+    current = snap(130, 1, 1)
+    link_rates(None, current)
+    link_rates(snap(130, 0, 0), current)
+    assert "rate" not in current["links"]["L"]
