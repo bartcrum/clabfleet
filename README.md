@@ -399,8 +399,10 @@ Ctrl+C. `--single-token` skips users altogether: the GUI prints a random
 token link instead, opens it in your browser, and whoever has the token is
 an operator.
 
-- **Look:** the **◐ System / ☀ Light / ☾ Dark** button in the top bar
-  picks the colour theme (remembered per browser). Status is shown by
+- **Look:** the **◐ System / ☀ Light / ☾ Dark / ◑ High contrast** button
+  in the top bar picks the colour theme (remembered per browser); high
+  contrast is for projectors and bright rooms. A node or session pulses
+  once when its state changes (not with reduced motion). Status is shown by
   shape as well as colour: a hollow ring is not deployed, a filled disc
   (with a check on the diagram) running, a half ring booting, a diamond
   not running, a square an error. Hover or select a node to fade
@@ -429,6 +431,15 @@ an operator.
   a lab, tab or node, open a node's CLI, shell, logs or config drift, run
   Deploy, Save configs and the other lab actions, switch the theme, and
   more. Arrow keys and Enter pick.
+- **Events:** the Events tab (next to Health) lists what changed between
+  live reads while the lab was open, such as a BGP session or a link going
+  down and coming back, with the time, so a flap is still visible after it
+  recovered; a strip shows the last 30 minutes at a glance. Links are
+  recorded while the Diagram reads them, sessions, adjacencies and tunnels
+  while the Routing tab is Live or the Health panel is open. Click a row
+  to jump to it.
+- **Export:** Export on the Diagram and Routing tabs saves the view as SVG
+  or PNG, light or dark, for documents and slides.
 - **Freshness:** live views say how old their data is ("live: read 4 s
   ago"). When it stops updating (a host or the GUI's server not
   answering), the label says so and the live colours turn grey instead of

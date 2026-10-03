@@ -30,6 +30,7 @@ from ..routing.live import collect as collect_protocols, family as cli_family, o
 from ..snapshots import Snapshotter, diff_lab, startup_config, unified_diff
 from ..validate import validate_text
 from .editing import EditConflict, apply_graph, set_positions, text_hash, write_if_unchanged
+from .events import EventLog, link_items, protocol_items
 from ..runner import Runner
 from ..topology import (
     LABEL_HOST,
@@ -180,6 +181,7 @@ class Workspace:
         self._probes = ThreadPoolExecutor(max_workers=8, thread_name_prefix="readiness")
         self.live = LiveCache(LIVE_INTERVAL)
         self.protocols = LiveCache(PROTOCOL_INTERVAL)
+        self.events = EventLog()  # changes between live reads, for the timeline
         self._live_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="live")
         self._last_runtime: Optional[tuple[float, list[HostState]]] = None
         self._runtime_lock = threading.Lock()
@@ -300,6 +302,13 @@ class Workspace:
         except Exception as exc:  # noqa: BLE001 - shown in the GUI, retried next interval
             logger.debug("Protocol state of %s failed: %s", topo_id, exc)
             snapshot = {"updated": time.time(), "error": str(exc)}
+        else:
+            try:
+                view = routing_view(load_topology(path))
+                self.events.observe(topo_id, "protocols", protocol_items(snapshot, view),
+                                    snapshot["updated"])
+            except Exception as exc:  # noqa: BLE001 - the timeline must not break the probe
+                logger.debug("Protocol events of %s: %s", topo_id, exc)
         self.protocols.store(topo_id, snapshot)
 
     def collect_protocols(self, path: Path) -> dict:
@@ -595,6 +604,8 @@ class Workspace:
             logger.debug("Live state of %s failed: %s", topo_id, exc)
             snapshot = {"updated": time.time(), "nodes": {}, "links": {},
                         "errors": {"": str(exc)}}
+        else:
+            self.events.observe(topo_id, "links", link_items(snapshot), snapshot["updated"])
         self.live.store(topo_id, snapshot)
 
     def _recent_runtime(self) -> list[HostState]:

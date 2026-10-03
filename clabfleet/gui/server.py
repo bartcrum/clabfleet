@@ -301,6 +301,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/api/live/{id:.+}", _live)
     app.router.add_get("/api/routing/{id:.+}", _routing)
     app.router.add_get("/api/routing-live/{id:.+}", _routing_live)
+    app.router.add_get("/api/events/{id:.+}", _events)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
     app.router.add_put("/api/graph/{id:.+}", _save_graph)
@@ -955,6 +956,21 @@ async def _builder_configs(request):
     except (TemplateError, ValueError, KeyError) as exc:
         raise web.HTTPBadRequest(text=str(exc.args[0]) if exc.args else str(exc))
     return web.json_response({"configs": configs, "skipped": skipped})
+
+
+async def _events(request):
+    """Changes seen between live reads of the lab: {"events": [...]}, oldest
+    first; ``?since=<unix time>`` for the newer ones only."""
+    ws: Workspace = request.app[WORKSPACE]
+    topo_id = request.match_info["id"]
+    try:
+        ws.topology_path(topo_id)
+        since = float(request.query["since"]) if "since" in request.query else None
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
+    except ValueError:
+        raise web.HTTPBadRequest(text="since must be a number")
+    return web.json_response({"events": ws.events.events(topo_id, since)})
 
 
 async def _save_positions(request):

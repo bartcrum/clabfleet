@@ -169,6 +169,7 @@ visual language is shared.
 A short pulse when a node or session changes state, edges fading between
 colours, booting nodes breathing. All disabled under
 `prefers-reduced-motion`.
+**Done** (branch `gui-batch2`): a node, or a session/tunnel on Routing Live, pulses once when its state changes (continuing smoothly across redraws); nothing under reduced motion.
 
 ### D. States and feedback
 
@@ -229,6 +230,7 @@ already split into `:root` and a light override, so this is mostly a
 **F2. High-contrast theme — S**
 Thicker strokes, no tints, maximum-contrast status colours. Useful on
 projectors for training sessions.
+**Done** (branch `gui-batch2`): black, white lines, saturated status colours, thicker strokes, no tints; in the theme cycle and the palette.
 
 ### Suggested design order
 
@@ -253,6 +255,7 @@ projectors for training sessions.
 2. **Protocol event timeline — S–M.** The live poller already reads every
    10 s; record changes ("Spine-1↔Leaf-2 down 14:02:11, up 14:02:40") in
    a strip under the diagram so flaps are visible after the fact.
+   **Done** (branch `gui-batch2`): the server records changes of links (Diagram live state) and of sessions, adjacencies and tunnels (Routing Live / Health) between reads; an Events tab lists them and draws the last 30 minutes as a strip; a row jumps to its link or session.
 3. **EVPN MAC/IP per VNI — M.** Which hosts (type-2 / type-5 routes) are
    learned on each VNI and from which VTEP, in the VTEP's card. The part
    of roadmap 4.2 left for later.
@@ -273,6 +276,7 @@ projectors for training sessions.
 
 7. **Command palette (Ctrl+K) — S.** Jump to a node, open its CLI or
    logs, switch tabs, run Deploy and other actions from the keyboard.
+   **Done** (branch `gui-batch1`).
 8. **Run a command on many nodes — M.** `clabfleet exec` in the GUI:
    select nodes or a glob, run a command, compare outputs side by side or
    diffed.
@@ -282,12 +286,12 @@ projectors for training sessions.
     a live diagram preview before writing the file.
     **Done as a drawing builder** (branch `topology-builder`): New lab from
     blank or a template, and an Edit mode on the Diagram tab.
-   **Done** (branch `gui-batch1`).
 
 **Docs and sharing**
 
 11. **Export a view — S.** Download the Diagram or Routing view as
     SVG / PNG, light or dark.
+    **Done** (branch `gui-batch2`): Export on the Diagram and Routing tabs, SVG or PNG (2x), light or dark, standalone (styles, colours and glyphs inlined).
 12. **Diagram annotations — S–M.** Sticky notes and labelled boxes
     ("DC1", "tenant A") saved as labels in the topology file, like
     positions.

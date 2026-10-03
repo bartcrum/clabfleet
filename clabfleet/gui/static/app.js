@@ -21,7 +21,7 @@ const $ = (sel) => document.querySelector(sel);
 
 // Colour theme: "system" follows prefers-color-scheme; light and dark set
 // data-theme on <html>, which app.css checks before the media query
-const THEMES = { system: "◐ System", light: "☀ Light", dark: "☾ Dark" };
+const THEMES = { system: "◐ System", light: "☀ Light", dark: "☾ Dark", contrast: "◑ High contrast" };
 function savedTheme() {
   try { return THEMES[localStorage.getItem("clab-theme")] ? localStorage.getItem("clab-theme") : "system"; } catch { return "system"; }
 }
@@ -233,6 +233,28 @@ function kindName(kind) {
   return KIND_NAMES[kind] || kind || "";
 }
 
+// Motion (C5): a node or edge whose state changed since the last drawing
+// pulses once. The first look at it only sets the baseline; nothing moves
+// under prefers-reduced-motion (the stylesheet stops every animation).
+const PULSE_MS = 1200;
+const seenStates = new Map();  // key -> {state, at: when it last changed}
+
+// Milliseconds since the state of ``key`` changed, while its pulse runs;
+// null otherwise. Redraws within the pulse continue it (negative delay)
+// instead of starting it again.
+function noteState(key, state) {
+  const now = performance.now();
+  const seen = seenStates.get(key);
+  if (!seen) { seenStates.set(key, { state, at: -Infinity }); return null; }
+  if (seen.state !== state) { seen.state = state; seen.at = now; }
+  const elapsed = now - seen.at;
+  return elapsed < PULSE_MS ? elapsed : null;
+}
+
+function pulseAttrs(elapsed) {
+  return elapsed == null ? {} : { style: `--pulse-delay: -${Math.round(elapsed)}ms` };
+}
+
 // Node box sizes on both canvases
 const NODE_W = 148, NODE_H = 48, PSEUDO_W = 112, PSEUDO_H = 30;
 
@@ -325,6 +347,7 @@ async function refreshState() {
   renderLabHead();
   renderRuntimeOverlays();
   refreshLive();
+  refreshEvents();
   if (!S.viewJob && S.state.jobs.length) {
     const running = S.state.jobs.find((j) => j.status === "running");
     trackJob((running || S.state.jobs[0]).id, false);
@@ -1011,6 +1034,63 @@ function driftActions(node) {
                   disabled: !!runningJob(S.selected.id), onclick: () => runAction("save") }, "Save configs"));
 }
 
+// ---------------------------------------------------------------------------
+// Events: changes between live reads (feature 2)
+// ---------------------------------------------------------------------------
+
+const EVENT_WINDOW = 30 * 60;  // the strip's span, seconds
+const EVENT_GOOD = new Set(["up"]);
+let eventsCache = { id: null, events: [] };
+
+async function refreshEvents() {
+  const id = S.selected?.type === "topo" ? S.selected.id : null;
+  if (!id) { eventsCache = { id: null, events: [] }; renderEvents(); return; }
+  try {
+    const { events } = await api(`/api/events/${topoPath(id)}`);
+    if (S.selected?.id === id) eventsCache = { id, events };
+  } catch (e) { return; }
+  renderEvents();
+}
+
+function eventSev(e) {
+  return EVENT_GOOD.has(e.to) ? "ok" : ["down", "missing"].includes(e.to) ? "error" : "warn";
+}
+
+function focusEvent(e) {
+  if (e.kind === "link") { showView("diagram"); selectLink(e.id); }
+  else window.Routing?.focus(e.kind, { type: "edge", id: e.id }, true);
+}
+
+function renderEvents() {
+  const now = Date.now() / 1000;
+  const events = eventsCache.id && eventsCache.id === S.selected?.id ? eventsCache.events : [];
+  const recent = events.filter((e) => now - e.t < 600).length;
+  $("#events-count").textContent = recent ? String(recent) : "";
+  // The strip: one mark per change in the last half hour, by what it went to
+  const strip = $("#events-strip");
+  const w = strip.clientWidth || 600, hgt = 26;
+  const marks = events.filter((e) => now - e.t < EVENT_WINDOW).map((e) => {
+    const x = w - ((now - e.t) / EVENT_WINDOW) * (w - 8) - 4;
+    return s("rect", { class: `ev-mark ${eventSev(e)}`, x: x - 1.5, y: 4, width: 3, height: hgt - 8, rx: 1 },
+      s("title", {}, `${new Date(e.t * 1000).toLocaleTimeString()} ${e.label}: ${e.from} → ${e.to}`));
+  });
+  strip.setAttribute("viewBox", `0 0 ${w} ${hgt}`);
+  strip.replaceChildren(s("line", { class: "ev-axis", x1: 4, y1: hgt / 2, x2: w - 4, y2: hgt / 2 }),
+    s("text", { class: "ev-tick", x: 4, y: hgt - 2 }, "30 min ago"),
+    s("text", { class: "ev-tick", x: w - 4, y: hgt - 2, "text-anchor": "end" }, "now"), ...marks);
+  const list = $("#events-list");
+  if (!events.length) {
+    list.replaceChildren(h("li", { class: "health-empty" },
+      S.selected?.type === "topo" ? "No changes seen yet." : "Select a lab to see its changes."));
+    return;
+  }
+  list.replaceChildren(...[...events].reverse().slice(0, 200).map((e) => h("li", { class: "health-item" },
+    h("button", { class: `health-row ${eventSev(e)}`, onclick: () => focusEvent(e) },
+      h("span", { class: `sev ${eventSev(e) === "ok" ? "info ok" : eventSev(e)}` }),
+      h("span", { class: "tag mono" }, new Date(e.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })),
+      h("span", { class: "msg" }, `${e.label}: ${e.from} → `, h("b", {}, e.to), e.detail ? ` (${e.detail})` : "")))));
+}
+
 // Select a node on the Diagram (or the Nodes table for labs without a file)
 function revealNode(name) {
   if (S.selected?.type === "topo" && S.detail?.nodes) {
@@ -1471,10 +1551,11 @@ function renderDiagram(fit) {
     const rt = nodeRuntime(lab, nd.id);
     const stClass = { running: "running", booting: "booting", partial: "other" }[nodeState(rt)] || "";
     const res = rt?.state === "running" ? live?.nodes?.[nd.id] : null;
+    const changed = noteState(`${lab}/${nd.id}`, stClass);
     const usage = res && res.cpu != null ? `${fmtCpu(res.cpu)} · ${fmtBytes(res.mem)}` : "";
     const el = s("g", {
-      class: `node${S.selectedNode === nd.id ? " selected" : ""}`,
-      transform: `translate(${x},${y})`, "data-id": nd.id, "data-f": nd.id,
+      class: `node${S.selectedNode === nd.id ? " selected" : ""}${changed != null ? " pulse" : ""}`,
+      transform: `translate(${x},${y})`, "data-id": nd.id, "data-f": nd.id, ...pulseAttrs(changed),
       role: "img", "aria-label": nodeLabel(nd.id),
     },
       s("rect", { x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 9 }),
@@ -2303,6 +2384,7 @@ function setupDock() {
   });
   document.querySelector('.dock-tab[data-pane="activity"]').addEventListener("click", () => activatePane("activity"));
   document.querySelector('.dock-tab[data-pane="health"]').addEventListener("click", () => { activatePane("health"); renderHealth(); });
+  document.querySelector('.dock-tab[data-pane="events"]').addEventListener("click", () => { activatePane("events"); refreshEvents(); });
   $("#health-source").addEventListener("change", (ev) => { healthFilter.source = ev.target.value; renderHealth(); });
   renderHealth();
 
