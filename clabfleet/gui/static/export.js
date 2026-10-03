@@ -57,7 +57,7 @@ function build(svg, viewportId, theme) {
   const cvp = clone.querySelector(`#${viewportId}`);
   cvp.removeAttribute("transform");
   // Interaction-only parts and states
-  for (const el of clone.querySelectorAll(".link-hit, .link-handle, .link-draft, title")) el.remove();
+  for (const el of clone.querySelectorAll(".link-hit, .link-handle, .link-draft, .anno-handle, title")) el.remove();
   for (const el of clone.querySelectorAll(".hl, .kb, .selected, .link-target")) el.classList.remove("hl", "kb", "selected", "link-target");
   // The glyphs it uses, from the page's sprite
   const defs = s("defs", {});

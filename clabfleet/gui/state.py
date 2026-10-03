@@ -29,6 +29,7 @@ from ..routing import routing_view
 from ..routing.live import collect as collect_protocols, family as cli_family, overlay as protocol_overlay
 from ..snapshots import Snapshotter, diff_lab, startup_config, unified_diff
 from ..validate import validate_text
+from . import annotations
 from .editing import EditConflict, apply_graph, set_positions, text_hash, write_if_unchanged
 from .events import EventLog, link_items, protocol_items
 from ..runner import Runner
@@ -263,7 +264,8 @@ class Workspace:
     def topology_detail(self, topo_id: str) -> dict:
         path = self.topology_path(topo_id)
         text = path.read_text()
-        detail = {"id": topo_id, "path": str(path), "yaml": text, "hash": text_hash(text)}
+        detail = {"id": topo_id, "path": str(path), "yaml": text, "hash": text_hash(text),
+                  "annotations": annotations.load(path)}
         try:
             topo = load_topology(path)
             detail.update(topology_view(topo))
@@ -552,6 +554,10 @@ class Workspace:
             raise UnloadableTopology(report)
         write_if_unchanged(path, text, base_hash)
         return {"detail": self.topology_detail(topo_id), "validation": report}
+
+    def save_annotations(self, topo_id: str, data) -> dict:
+        """Notes and boxes on the lab's diagram (``annotations``)."""
+        return annotations.save(self.topology_path(topo_id), data)
 
     def save_positions(self, topo_id: str, positions: dict, base_hash: str) -> dict:
         """Write node positions into the file as graph-posX/graph-posY labels."""

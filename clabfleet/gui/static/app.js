@@ -741,6 +741,8 @@ async function selectTopology(id) {
   window.Builder?.reset();
   window.Run?.reset();
   window.Trace?.reset();
+  window.Lanes?.reset();
+  window.Annotations?.reset();
   S.selected = { type: "topo", id };
   S.selectedNode = null;
   try {
@@ -904,7 +906,27 @@ function setupLabMenu() {
   menu.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") { setOpen(false); btn.focus(); }
   });
-  menu.querySelector("[data-action]").addEventListener("click", () => setOpen(false));
+  // Any action in it (on narrow screens the secondary actions live here too)
+  menu.addEventListener("click", (ev) => { if (ev.target.closest("[data-action]")) setOpen(false); });
+}
+
+let setSidebarCollapsed = null;
+// E4: narrow screens. The secondary lab actions move into the ⋯ menu, the
+// sidebar starts as a rail and opens over the page, closing on a pick.
+const NARROW = window.matchMedia("(max-width: 760px)");
+function applyNarrow() {
+  const group = $("#lab-secondary"), menu = $("#lab-menu");
+  if (NARROW.matches && group.parentElement !== menu) {
+    menu.prepend(group, h("hr", { class: "narrow-sep" }));
+    group.classList.add("in-menu");
+    for (const b of group.querySelectorAll(".btn")) b.setAttribute("role", "menuitem");
+  } else if (!NARROW.matches && group.parentElement === menu) {
+    menu.querySelector(".narrow-sep")?.remove();
+    $("#lab-actions .menu-wrap").before(group);
+    group.classList.remove("in-menu");
+    for (const b of group.querySelectorAll(".btn")) b.removeAttribute("role");
+  }
+  if (NARROW.matches) setSidebarCollapsed?.(true, false);
 }
 
 function setTabsAvailable(views) {
@@ -1616,6 +1638,8 @@ function renderDiagram(fit) {
   }
 
   window.Trace?.decorate(g, P);
+  window.Annotations?.decorate(g);
+  window.Lanes?.decorate(g, P);  // last: behind the boxes
   g.append(labels);
   svg.replaceChildren(g);
   applyView(svg, "viewport", S.view);
@@ -1641,6 +1665,7 @@ function applyView(svg, viewportId, view) {
   svg.classList.toggle("lod-far", view.k < LOD_FAR);
   const level = svg.parentElement.querySelector(".zoom-level");
   if (level) level.textContent = `${Math.round(view.k * 100)}%`;
+  if (viewportId === "viewport") window.Minimap?.update();
 }
 
 // Zoom by ``factor`` around a point of the canvas (its centre by default)
@@ -1861,6 +1886,7 @@ function setupDiagramInteraction() {
   });
   setupZoom(svg, () => S.view, fitDiagram, () => applyView(svg, "viewport", S.view));
   $("#relayout").addEventListener("click", () => {
+    window.Lanes?.reset();
     S.positions = {};
     savePositions();
     for (const n of S.detail?.nodes || []) n.pos = null;
@@ -2926,15 +2952,22 @@ function setup() {
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
   $("#topo-search").addEventListener("input", () => renderSidebar());
   const side = $("#sidebar"), toggle = $("#side-toggle");
-  const setCollapsed = (on) => {
+  const setCollapsed = (on, persist = true) => {
     side.classList.toggle("collapsed", on);
     toggle.textContent = on ? "»" : "«";
     toggle.title = on ? "Expand the sidebar" : "Collapse the sidebar";
     toggle.setAttribute("aria-label", toggle.title);
     toggle.setAttribute("aria-expanded", String(!on));
-    try { localStorage.setItem("clab-sidebar", on ? "collapsed" : ""); } catch { /* private mode */ }
+    if (persist) try { localStorage.setItem("clab-sidebar", on ? "collapsed" : ""); } catch { /* private mode */ }
     requestAnimationFrame(() => { renderDiagram(false); window.Routing?.resize(); });
   };
+  setSidebarCollapsed = setCollapsed;
+  applyNarrow();
+  NARROW.addEventListener("change", applyNarrow);
+  // On a narrow screen the open sidebar covers the page: a pick closes it
+  side.addEventListener("click", (ev) => {
+    if (NARROW.matches && ev.target.closest(".lab-item") && !side.classList.contains("collapsed")) setCollapsed(true, false);
+  });
   try { if (localStorage.getItem("clab-sidebar") === "collapsed") setCollapsed(true); } catch { /* private mode */ }
   toggle.addEventListener("click", () => setCollapsed(!side.classList.contains("collapsed")));
   applyTheme(currentTheme);

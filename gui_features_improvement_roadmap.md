@@ -141,7 +141,7 @@ emits. The raw log stays one click away. Finished jobs raise a toast with
 ### C. Canvas
 
 **C1. Zoom controls and a minimap — S**
-**Done, without the minimap** (branch `gui-polish`): −, 100 %, + and Fit bottom-right on both canvases; `+` `-` `0` `1` and arrow keys when the canvas has focus.
+**Done** (branch `gui-polish`): −, 100 %, + and Fit bottom-right on both canvases; `+` `-` `0` `1` and arrow keys when the canvas has focus. The minimap followed (branch `gui-batch6`): from 16 nodes, on the Diagram, click or drag to move.
 Today: wheel to zoom, Fit button.
 Proposal: +, −, 100 % and Fit buttons grouped bottom-right, plus an
 optional minimap for labs with more than ~15 nodes. Keyboard: `+`/`-`,
@@ -165,6 +165,7 @@ Proposal: an optional layout that groups nodes into one tinted lane per
 host, with cross-host VXLAN links crossing lane borders. The same
 group-tint style as the AS and area regions in the Routing tab, so the
 visual language is shared.
+**Done** (branch `gui-batch6`): Host lanes on the Diagram of a multi-host lab moves each host's nodes into a tinted lane (keeping their layout within the host); off puts them back, Save layout keeps them.
 
 **C5. Gentle motion for state changes — S**
 A short pulse when a node or session changes state, edges fading between
@@ -219,6 +220,7 @@ Check every text and status token against WCAG AA in both themes; muted
 **E4. Narrow screens — M**
 Collapsible sidebar, inspector as a bottom sheet, the action row as a
 menu, the dock as a full-screen sheet. Useful on a tablet in a lab.
+**Done** (branch `gui-batch6`): below 760 px the sidebar is a rail opening over the page (closing on a pick), the secondary actions are in the ⋯ menu, top bar buttons are icons, tabs and diagram tools scroll, the inspector is a bottom sheet and an open dock fills the screen.
 
 ### F. Theming
 
@@ -301,3 +303,4 @@ projectors for training sessions.
 12. **Diagram annotations — S–M.** Sticky notes and labelled boxes
     ("DC1", "tenant A") saved as labels in the topology file, like
     positions.
+    **Done** (branch `gui-batch6`): Note and Box on the Diagram (operators; everyone sees them). Kept in `<file>.notes.json` next to the topology rather than as labels: a box belongs to no node, and containerlab checks the topology against its schema.

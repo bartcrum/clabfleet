@@ -455,6 +455,21 @@ an operator.
   bridged traffic the MAC and VXLAN tables, the EVPN MAC/IP routes, or
   the VLAN's flood list). The path is highlighted on the Diagram, VXLAN
   hops as arcs. It only reads; viewers can use it too.
+- **Notes and boxes:** operators can put sticky notes and labelled boxes
+  ("DC1", "tenant A") on the Diagram with Note and Box: drag to move, drag
+  a box's corner to resize, double-click to edit, Delete to remove.
+  Everyone sees them. They are kept next to the topology in
+  `<file>.notes.json` (not in the topology, which containerlab checks
+  against its schema), so copy both to move a lab.
+- **Host lanes:** in a multi-host lab, Host lanes groups the nodes into one
+  tinted lane per host, so the links between hosts (VXLAN) are the ones
+  crossing lane borders. Turning it off puts the nodes back; Save layout
+  keeps the lanes.
+- **Minimap:** labs of 16 nodes or more get a small map of the whole
+  diagram above the zoom buttons; click or drag in it to move there.
+- **Narrow screens:** on a tablet or phone the sidebar is a rail that opens
+  over the page, the secondary lab actions move into the ⋯ menu, the
+  inspector is a bottom sheet and an open dock takes the whole screen.
 - **Export:** Export on the Diagram and Routing tabs saves the view as SVG
   or PNG, light or dark, for documents and slides.
 - **Freshness:** live views say how old their data is ("live: read 4 s
