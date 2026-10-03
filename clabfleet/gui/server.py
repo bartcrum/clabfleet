@@ -308,6 +308,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/api/evpn-routes/{id:.+}", _evpn_routes)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
+    app.router.add_put("/api/annotations/{id:.+}", _save_annotations)
     app.router.add_put("/api/graph/{id:.+}", _save_graph)
     app.router.add_post("/api/topologies", _create_topology)
     app.router.add_get("/api/builder", _builder_info)
@@ -1090,6 +1091,22 @@ async def _save_positions(request):
     audit(request, "positions_saved", topology=topo_id,
           nodes=sorted((body.get("positions") or {}).keys()))
     return web.json_response(detail)
+
+
+async def _save_annotations(request):
+    """Notes and boxes on a lab's diagram: {notes: [...], boxes: [...]}."""
+    topo_id = request.match_info["id"]
+    body = await _json_body(request)
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        saved = await asyncio.to_thread(ws.save_annotations, topo_id, body)
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+    audit(request, "annotations_saved", topology=topo_id,
+          notes=len(saved["notes"]), boxes=len(saved["boxes"]))
+    return web.json_response(saved)
 
 
 @operator_only  # configs hold password hashes and keys

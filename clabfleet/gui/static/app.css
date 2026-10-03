@@ -197,7 +197,7 @@ body.viewer .operator-only { display: none !important; }
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
   padding: 14px 18px 10px; flex-wrap: wrap;
 }
-.lab-title { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; min-width: 0; flex: 1; }
+.lab-title { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; min-width: 0; flex: 1 1 240px; }
 .lab-title h1 { font-size: 18px; margin: 0; }
 .icon-btn {
   border: 0; background: none; color: var(--muted); cursor: pointer; padding: 2px 4px; border-radius: 4px; line-height: 1;
@@ -728,6 +728,34 @@ body.building #view-diagram .diagram-tools { top: 56px; }
 .zoom-tools .btn { border-color: transparent; padding: 3px 7px; }
 .zoom-tools .btn:hover:not(:disabled) { border-color: var(--line); }
 .zoom-tools .zoom-level { min-width: 48px; font-variant-numeric: tabular-nums; }
+/* Feature 12: annotations */
+.diagram .anno-box .anno-body { fill: var(--c); fill-opacity: .07; stroke: var(--c); stroke-opacity: .6; stroke-width: 1.4; stroke-dasharray: 6 4; }
+.diagram .anno-box text { fill: var(--c); font-size: 13px; font-weight: 600; }
+.diagram .anno-note .anno-body { fill: color-mix(in srgb, var(--warn) 22%, var(--panel)); stroke: color-mix(in srgb, var(--warn) 60%, transparent); }
+.diagram .anno-note text { fill: var(--text); font: 12px var(--mono); }
+.diagram .anno.selected .anno-body { stroke: var(--select); stroke-opacity: 1; stroke-width: 2; }
+.diagram .anno-handle { fill: var(--select); cursor: nwse-resize; }
+body:not(.viewer) .diagram .anno { cursor: move; }
+.anno-dialog textarea { width: 100%; box-sizing: border-box; font: var(--fs-md) var(--sans); color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
+.anno-colors { display: flex; gap: 6px; margin-top: 8px; }
+.anno-swatch { width: 22px; height: 22px; border-radius: 50%; background: var(--c); border: 2px solid transparent; cursor: pointer; }
+.anno-swatch.active { border-color: var(--text); }
+/* C4: host lanes, tinted like the Routing tab's regions */
+.diagram .lane rect { fill: var(--c); fill-opacity: .08; stroke: var(--c); stroke-opacity: .45; stroke-width: 1.2; }
+.diagram .lane text { fill: var(--c); font-size: 12px; font-weight: 600; }
+.diagram-tools .btn.active { border-color: var(--select); color: var(--select); }
+/* C1: minimap above the zoom buttons */
+.minimap {
+  position: absolute; right: 12px; bottom: 52px; width: 180px; height: 120px; z-index: 2; cursor: crosshair;
+  background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden; touch-action: none;
+}
+.minimap svg { width: 100%; height: 100%; display: block; }
+.minimap .mm-link { stroke: var(--link); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: .7; }
+.minimap .mm-node { fill: var(--muted); }
+.minimap .mm-node.selected { fill: var(--select); }
+.minimap .mm-view { fill: color-mix(in srgb, var(--select) 12%, transparent); stroke: var(--select); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .diagram:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 .diagram.lod-far .iface, .diagram.lod-far .rt-label, .diagram.lod-far .node .kind,
 .diagram.lod-far .node .hostbadge { display: none; }
@@ -945,3 +973,43 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 /* ---------- utilisation (feature 5) and what-if (feature 6) ---------- */
 .diagram .link.busy { stroke: var(--c5); }
 .whatif:empty { display: none; }
+
+/* ---------- E4: narrow screens (tablets, phones) ---------- */
+@media (max-width: 760px) {
+  .layout { position: relative; }
+  /* Open, the sidebar slides over the page instead of squeezing it */
+  .sidebar:not(.collapsed) {
+    position: absolute; top: 0; bottom: 0; left: 0; z-index: 12; width: min(300px, 85vw);
+    box-shadow: 8px 0 24px rgb(0 0 0 / .35);
+  }
+  .topbar { gap: 6px; padding: 0 10px; }
+  .topbar .host-chip .meta { display: none; }
+  /* Top bar buttons as icons (their titles say what they do) */
+  .topbar .btn.small:not(#theme):not(#palette-open) { font-size: 0; padding: 5px 7px; }
+  .topbar .btn.small .ico { margin: 0; width: 15px; height: 15px; }
+  .lab-head { padding: 10px 12px 6px; gap: 8px; }
+  /* The secondary actions, moved into the ⋯ menu */
+  #lab-secondary.in-menu { display: grid; gap: 0; }
+  #lab-secondary.in-menu .btn {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: none;
+    padding: 6px 10px; border-radius: 5px; font-size: var(--fs-md);
+  }
+  #lab-secondary.in-menu .btn:hover:not(:disabled) { background: var(--panel-2); }
+  .tabs { padding: 0 8px; overflow-x: auto; scrollbar-width: none; }
+  .diagram-tools { left: 8px; right: 8px; overflow-x: auto; scrollbar-width: none; justify-content: flex-start; }
+  .diagram-tools > * { flex: none; }
+  .zoom-tools { right: 8px; bottom: 8px; }
+  .minimap { display: none; }
+  /* Open, the dock is a sheet over everything below the top bar */
+  .dock:not(.collapsed) {
+    position: fixed; left: 0; right: 0; top: 48px; bottom: 0; height: auto !important; max-height: none; z-index: 14;
+  }
+  .dock-resize { display: none; }
+  .run-bar input, #run-nodes, #run-cmd, #trace-dst { min-width: 0; width: 100%; max-width: none; flex: 1 1 100%; }
+  .trace-hops { min-width: 0; }
+}
+@media (max-width: 520px) {
+  .brand > span:not(.brand-mark) { display: none; }
+  #palette-open { display: none; }
+  .lab-title h1 { font-size: 16px; }
+}

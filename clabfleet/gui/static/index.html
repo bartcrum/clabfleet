@@ -152,6 +152,9 @@
                 <button id="edit-topo" class="btn ghost small operator-only" title="Add, link and remove nodes by drawing"><svg class="ico" aria-hidden="true"><use href="#i-pencil"/></svg>Edit</button>
                 <button id="save-layout" class="btn ghost small operator-only" title="Write node positions into the topology file (graph-posX/graph-posY labels)">Save layout</button>
                 <button id="relayout" class="btn ghost small" title="Discard manual positions">Auto layout</button>
+                <button id="add-note" class="btn ghost small anno-tool" hidden title="Add a sticky note (double-click one to edit it, Delete to remove)">Note</button>
+                <button id="add-box" class="btn ghost small anno-tool" hidden title="Add a labelled box around a group, e.g. DC1 (drag its corner to resize)">Box</button>
+                <button id="lanes-toggle" class="btn ghost small" hidden aria-pressed="false" title="One lane per host: links between hosts cross the lane borders">Host lanes</button>
                 <span class="menu-wrap export-wrap"><button id="export-diagram" class="btn ghost small" title="Save this view as SVG or PNG, light or dark" aria-haspopup="menu"><svg class="ico" aria-hidden="true"><use href="#i-download"/></svg>Export</button></span>
               </div>
               <div class="zoom-tools" role="group" aria-label="Zoom" data-zoom-for="diagram">
@@ -160,6 +163,7 @@
                 <button class="btn ghost small" data-zoom="in" title="Zoom in (+)" aria-label="Zoom in"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg></button>
                 <button id="fit" class="btn ghost small" data-zoom="fit" title="Fit the lab in view (0)"><svg class="ico" aria-hidden="true"><use href="#i-fit"/></svg>Fit</button>
               </div>
+              <div id="minimap" class="minimap" hidden title="The whole lab: click or drag to move there"><svg aria-hidden="true"></svg></div>
               <span id="diagram-fresh" class="fresh" hidden></span>
               <div id="diagram-error" class="diagram-error" hidden></div>
             </section>
@@ -416,6 +420,19 @@
   </dialog>
 
   <!-- Command palette (feature 7) -->
+  <!-- Feature 12: text of a diagram note or box -->
+  <dialog id="anno-dialog" class="confirm anno-dialog" aria-labelledby="anno-title">
+    <form method="dialog">
+      <h2 id="anno-title">Note</h2>
+      <textarea id="anno-text" rows="4" maxlength="500" aria-label="Text"></textarea>
+      <div id="anno-colors" class="anno-colors" role="group" aria-label="Colour"></div>
+      <p class="muted small">Enter to save, Shift+Enter for a new line. Kept in the lab's .notes.json file.</p>
+      <div class="confirm-actions">
+        <button class="btn" value="cancel">Cancel</button>
+        <button class="btn primary" value="ok">Save</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="palette" class="palette" aria-label="Commands">
     <input id="palette-input" class="sans" role="combobox" aria-expanded="true" aria-controls="palette-list"
            aria-autocomplete="list" placeholder="Type a lab, node, tab or action…" autocomplete="off" spellcheck="false">
@@ -450,5 +467,8 @@
   <script src="/static/export.js"></script>
   <script src="/static/run.js"></script>
   <script src="/static/trace.js"></script>
+  <script src="/static/minimap.js"></script>
+  <script src="/static/lanes.js"></script>
+  <script src="/static/annotations.js"></script>
 </body>
 </html>
