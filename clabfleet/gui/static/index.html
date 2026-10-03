@@ -120,7 +120,7 @@
         <div class="lab-body">
           <div class="views">
             <section id="view-diagram" class="view">
-              <svg id="diagram" class="diagram" tabindex="0" aria-label="Topology diagram. Plus and minus zoom, 0 fits, arrow keys pan."></svg>
+              <svg id="diagram" class="diagram" tabindex="0" role="application" aria-roledescription="topology diagram" aria-label="Topology diagram. Arrow keys move between connected nodes, Enter selects, T opens a terminal, Escape leaves the nodes; then arrow keys pan. Plus and minus zoom, 0 fits."></svg>
               <!-- Builder: palette and edit bar, shown while editing -->
               <div id="builder-bar" class="builder-bar" hidden>
                 <span id="builder-status" class="small"></span>
@@ -156,7 +156,7 @@
               </table>
             </section>
             <section id="view-routing" class="view" hidden>
-              <svg id="routing" class="diagram routing" tabindex="0" aria-label="Routing protocol diagram. Plus and minus zoom, 0 fits, arrow keys pan."></svg>
+              <svg id="routing" class="diagram routing" tabindex="0" role="application" aria-roledescription="routing diagram" aria-label="Routing protocol diagram. Arrow keys move between routers, Enter selects, Escape leaves the nodes; then arrow keys pan. Plus and minus zoom, 0 fits."></svg>
               <div class="routing-bar">
                 <div id="routing-modes" class="seg" role="group" aria-label="Intended or live"></div>
                 <div id="routing-protos" class="seg" role="group" aria-label="Protocol"></div>
@@ -368,6 +368,8 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" hidden></div>
+  <!-- Screen readers (E2): job results, problems appearing and clearing, canvas focus -->
+  <div id="announcer" class="sr-only" aria-live="polite"></div>
 
   <script src="/static/vendor/xterm.js"></script>
   <script src="/static/vendor/addon-fit.js"></script>
