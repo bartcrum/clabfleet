@@ -221,6 +221,34 @@ async def steps(page):
             text = await page.js(f"window.Export.build(document.querySelector('#{svg}'), '{vp}', '{theme}').text")
             assert text.startswith("<svg") and "--bg:" in text and "<symbol" in text, svg
     await page.js("showView('diagram')")
+    # Stop: on a deployed lab, asks first (cancelled here)
+    await page.js("document.querySelector('[data-action=\"stop\"]').click()")
+    await page.until("document.querySelector('#confirm').open")
+    assert "Stop" in await page.js("document.querySelector('#confirm-title').textContent")
+    await page.js("document.querySelector('#confirm-cancel').click()")
+    await page.until("!document.querySelector('#confirm').open")
+    # Job steps: a two-host deploy's lines, half way, then failed on one host
+    steps = await page.js("""(() => {
+      const st = newSteps({action: 'deploy', status: 'running'});
+      const lines = ["$ deploy t.clab.yml", "» Probing 2 cluster hosts", "» Computing placement with strategy 'bin-pack'",
+        "» Pulling ceos:4.35 on clab-1", "» Running containerlab deploy on clab-1", "» Running containerlab deploy on clab-2",
+        "[clab-1] 19:26:17 INFO Creating container name=Leaf-1", "[clab-1] 19:26:18 INFO Created link: Spine-1:eth1 ▪┄┄▪ Leaf-1:eth1",
+        "[clab-2] 19:26:17 INFO Creating container name=Leaf-2"];
+      lines.forEach((l, i) => stepLine(st, l, i));
+      const now = {}; for (const [hst, row] of st.rows) now[hst] = Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v.state]));
+      finishSteps(st, 'error', 20);
+      const end = {}; for (const [hst, row] of st.rows) end[hst] = Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v.state]));
+      return {now, end};
+    })()""")
+    assert steps["now"]["lab"]["plan"] == "done" and steps["now"]["lab"]["images"] == "active"
+    assert steps["now"]["clab-1"]["deploy"] == "done" and steps["now"]["clab-1"]["links"] == "active"
+    assert steps["now"]["clab-2"]["deploy"] == "active" and steps["now"]["clab-2"]["links"] == "pending"
+    assert steps["end"]["clab-2"]["deploy"] == "failed" and steps["end"]["clab-1"]["links"] == "failed"
+    # Run on nodes: the tab opens with the selected node; the line diff
+    await page.js("window.Run.open()")
+    await page.until("!document.querySelector('.pane[data-pane=\"run\"]').classList.contains('active') === false")
+    diff = await page.js("window.Run.lineDiff('a\\nb\\nc', 'a\\nB\\nc').map(l => l.op + l.text).join('|')")
+    assert diff == " a|+B|-b| c" or diff == " a|-b|+B| c", diff
     # Command palette: find a node and jump to it
     await page.js("window.Palette.open()")
     await page.js("const i = document.querySelector('#palette-input'); i.value = 'leaf-3'; "

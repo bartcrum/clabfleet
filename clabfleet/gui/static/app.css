@@ -876,3 +876,43 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 :root[data-theme="contrast"] .dev { opacity: 1; }
 /* Lines are white here: what is filled with the line colour gets dark text */
 :root[data-theme="contrast"] .seg-btn.active { background: var(--text); color: var(--bg); }
+
+/* ---------- run on many nodes (feature 8) ---------- */
+.pane.run-pane.active { display: flex; flex-direction: column; }
+.run-bar { flex-wrap: wrap; }
+.run-bar input, .run-bar select {
+  font: var(--fs-md) var(--mono); color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px;
+}
+.run-bar select { font-family: var(--sans); }
+#run-nodes { width: 190px; }
+#run-cmd { flex: 1; min-width: 220px; }
+.run-out { flex: 1; min-height: 0; overflow: auto; padding: 8px 14px; }
+.run-hint { margin: 4px 0; }
+.run-block { margin-bottom: 12px; }
+.run-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.run-out pre { margin: 0; padding: 8px 10px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+.run-out pre .ok { color: var(--ok); }
+.run-out pre .err { color: var(--danger); }
+.run-side { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(320px, 1fr); gap: 10px; overflow-x: auto; }
+.run-col pre { white-space: pre; overflow: auto; max-height: 60vh; }
+.run-err { color: var(--danger); margin: 0 0 6px; }
+
+/* ---------- job steps (B5) and toasts with actions ---------- */
+.job-steps { flex: none; display: grid; gap: 4px; padding: 6px 14px; border-bottom: 1px solid var(--line); }
+.job-steps[hidden] { display: none; }
+.step-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--fs-sm); }
+.step-host { min-width: 90px; color: var(--muted); }
+.step { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted); }
+.step .step-dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--muted); }
+.step.active { color: var(--text); border-color: var(--warn); }
+.step.active .step-dot { box-shadow: none; border: 2px solid var(--warn); border-top-color: transparent; animation: spin .9s linear infinite; }
+.step.done { color: var(--text); }
+.step.done .step-dot { background: var(--ok); box-shadow: none; }
+.step.failed { color: var(--danger); border-color: var(--danger); }
+.step.failed .step-dot { background: var(--danger); box-shadow: none; border-radius: 1.5px; }
+.toast { display: flex; align-items: center; gap: 10px; }
+.toast.good { border-color: var(--line); }
+.toast[hidden] { display: none; }

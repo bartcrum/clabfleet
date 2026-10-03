@@ -302,6 +302,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/api/routing/{id:.+}", _routing)
     app.router.add_get("/api/routing-live/{id:.+}", _routing_live)
     app.router.add_get("/api/events/{id:.+}", _events)
+    app.router.add_post("/api/exec/{id:.+}", _exec)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
     app.router.add_put("/api/graph/{id:.+}", _save_graph)
@@ -971,6 +972,43 @@ async def _events(request):
     except ValueError:
         raise web.HTTPBadRequest(text="since must be a number")
     return web.json_response({"events": ws.events.events(topo_id, since)})
+
+
+EXEC_TIMEOUT = 30            # seconds per node for the GUI's Run on nodes
+EXEC_MAX_COMMAND = 2000      # characters
+EXEC_MAX_OUTPUT = 200_000    # characters kept per node
+
+
+async def _exec(request):
+    """Run one command on many nodes of the lab (``clabfleet exec``):
+    ``{"command", "nodes": [glob, ...], "mode": auto|cli|shell|ssh}``."""
+    from ..execute import MODES, LabExecutor
+
+    ws: Workspace = request.app[WORKSPACE]
+    topo_id = request.match_info["id"]
+    body = await _json_body(request)
+    command, mode = body.get("command"), body.get("mode", "auto")
+    patterns = body.get("nodes") or []
+    if not isinstance(command, str) or not command.strip():
+        raise web.HTTPBadRequest(text="Enter a command")
+    if len(command) > EXEC_MAX_COMMAND:
+        raise web.HTTPBadRequest(text=f"Commands are at most {EXEC_MAX_COMMAND} characters")
+    if mode not in MODES or not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        raise web.HTTPBadRequest(text=f"mode is one of {', '.join(MODES)}; nodes a list of names or globs")
+    try:
+        path = ws.topology_path(topo_id)
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
+    audit(request, "exec", topology=topo_id, command=command, nodes=patterns, mode=mode)
+    executor = LabExecutor(ws.cluster, timeout=EXEC_TIMEOUT)
+    try:
+        out = await asyncio.to_thread(executor.run, path, command, [p for p in patterns if p.strip()] or None, mode)
+    except ValueError as exc:  # no node matches a pattern
+        raise web.HTTPBadRequest(text=str(exc))
+    for r in out["results"]:
+        if len(r.get("output") or "") > EXEC_MAX_OUTPUT:
+            r["output"] = r["output"][:EXEC_MAX_OUTPUT] + "\n[output cut]\n"
+    return web.json_response(out)
 
 
 async def _save_positions(request):
