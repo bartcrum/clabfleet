@@ -899,6 +899,31 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 .run-col pre { white-space: pre; overflow: auto; max-height: 60vh; }
 .run-err { color: var(--danger); margin: 0 0 6px; }
 
+.rt-learned { margin-top: 10px; }
+.rt-learned-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rt-learned-head h4 { margin: 0; font-size: var(--fs-md); }
+.rt-learned p { margin: 4px 0; }
+.rt-learned td:first-child, .rt-learned td:last-child { white-space: nowrap; }
+
+/* ---------- path trace (feature 1) ---------- */
+.pane.trace-pane.active { display: flex; flex-direction: column; }
+#trace-dst { flex: 1; min-width: 160px; max-width: 280px; }
+.trace-verdict { margin: 2px 0 8px; font-weight: 600; }
+.trace-verdict.ok { color: var(--ok); }
+.trace-verdict.err { color: var(--danger); }
+.trace-cols { display: flex; flex-wrap: wrap; gap: 8px 28px; }
+.trace-hops { list-style: none; margin: 0; padding: 0; min-width: 260px; }
+.trace-hop { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.trace-n { color: var(--muted); min-width: 1.5em; text-align: right; }
+.trace-edges { list-style: none; margin: 0; padding: 0; }
+.trace-edges li { padding: 2px 0; }
+.trace-edges li.overlay { color: var(--c5); }
+.diagram .link.traced { stroke: var(--select); stroke-width: 3.2; stroke-dasharray: none; }
+.diagram .trace-overlay { stroke: var(--c5); stroke-width: 2.4; fill: none; stroke-dasharray: 7 4; pointer-events: stroke; }
+.diagram .trace-overlay.flood { opacity: .6; stroke-dasharray: 2 4; }
+.diagram .node.traced rect:first-of-type { stroke: var(--select); stroke-width: 2.2; }
+.diagram .node.trace-src rect:first-of-type, .diagram .node.trace-dst rect:first-of-type { stroke-width: 3.2; }
+
 /* ---------- job steps (B5) and toasts with actions ---------- */
 .job-steps { flex: none; display: grid; gap: 4px; padding: 6px 14px; border-bottom: 1px solid var(--line); }
 .job-steps[hidden] { display: none; }

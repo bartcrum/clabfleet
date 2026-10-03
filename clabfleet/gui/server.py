@@ -304,6 +304,8 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/api/events/{id:.+}", _events)
     app.router.add_post("/api/exec/{id:.+}", _exec)
     app.router.add_post("/api/whatif/{id:.+}", _whatif)
+    app.router.add_post("/api/trace/{id:.+}", _trace)
+    app.router.add_get("/api/evpn-routes/{id:.+}", _evpn_routes)
     app.router.add_post("/api/validate/{id:.+}", _validate)
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
     app.router.add_put("/api/graph/{id:.+}", _save_graph)
@@ -1032,6 +1034,41 @@ async def _whatif(request):
     except Exception as exc:  # noqa: BLE001 - docker or the node refused
         raise web.HTTPBadGateway(text=str(exc))
     return web.json_response({"done": done})
+
+
+@allow_viewer
+async def _trace(request):
+    """Path trace: ``{"src": node, "dst": node or address}`` (reads the
+    nodes' routing tables now; nothing changes)."""
+    ws: Workspace = request.app[WORKSPACE]
+    body = await _json_body(request)
+    src, dst = body.get("src"), body.get("dst")
+    if not isinstance(src, str) or not isinstance(dst, str) or not dst.strip():
+        raise web.HTTPBadRequest(text="Expected src and dst")
+    try:
+        result = await asyncio.to_thread(ws.trace, request.match_info["id"], src, dst.strip())
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+    except Exception as exc:  # noqa: BLE001 - a node could not be asked
+        raise web.HTTPBadGateway(text=f"Trace failed: {exc}")
+    return web.json_response(result)
+
+
+async def _evpn_routes(request):
+    """?node=X: a cEOS VTEP's EVPN routes (hosts and prefixes per VNI)."""
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        routes = await asyncio.to_thread(ws.evpn_routes, request.match_info["id"],
+                                         request.query.get("node", ""))
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+    except Exception as exc:  # noqa: BLE001 - the node could not be asked
+        raise web.HTTPBadGateway(text=f"Could not read the EVPN routes: {exc}")
+    return web.json_response({"routes": routes})
 
 
 async def _save_positions(request):

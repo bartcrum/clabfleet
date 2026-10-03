@@ -28,6 +28,7 @@ const RT = {
   mode: "intended",     // "intended" | "live"
   live: null,           // /api/routing-live/<id>, plus its topology id
   liveLoading: false,
+  learned: null,        // EVPN routes read from a VTEP: {node, topo, routes|error|loading, at}
 };
 
 const RT_PROTO_LABEL = { ospf: "OSPF", bgp: "BGP", evpn: "EVPN" };
@@ -768,8 +769,44 @@ function rtNodeCard(id) {
       rtTable(["L2 VNI", "VLAN", "RD", "RT"], vt.l2_vnis.map((x) => [x.vni, x.vlan || "?", x.rd, rt(x)])),
       rtTable(["L3 VNI", "VRF", "RD", "RT"], vt.l3_vnis.map((x) => [x.vni, x.vrf, x.rd, rt(x)])),
       rtCardProblems(nodeProblems),
+      rtDeployed() ? rtLearned(id) : null,
     ],
   };
+}
+
+// Feature 3: the hosts (type-2) and prefixes (type-5) a VTEP has learned,
+// per VNI, read from the node on demand
+function rtLearned(id) {
+  const st = RT.learned?.node === id && RT.learned.topo === RT.topo ? RT.learned : null;
+  const read = async () => {
+    RT.learned = { node: id, topo: RT.topo, loading: true };
+    rtRenderCard();
+    try {
+      const { routes } = await api(`/api/evpn-routes/${topoPath(RT.topo)}?node=${encodeURIComponent(id)}`);
+      RT.learned = { node: id, topo: RT.topo, routes, at: Date.now() };
+    } catch (e) {
+      RT.learned = { node: id, topo: RT.topo, error: e.message };
+    }
+    if (RT.sel?.id === id) rtRenderCard();
+  };
+  const head = h("div", { class: "rt-learned-head" },
+    h("h4", {}, "Learned (EVPN routes)"),
+    h("button", { class: "btn small", disabled: st?.loading || null, onclick: read },
+      st?.loading ? "Reading…" : st?.routes ? "Read again" : "Read from node"));
+  if (!st || st.loading) return h("div", { class: "rt-learned" }, head);
+  if (st.error) return h("div", { class: "rt-learned" }, head, h("p", { class: "run-err small" }, st.error));
+  const vni = RT.vni === "all" ? null : String(RT.vni);
+  const rows = st.routes.filter((r) => !vni || String(r.vni) === vni || String(r.l3_vni) === vni);
+  const what = (r) => r.type === "ip-prefix" ? r.prefix : r.ip ? `${r.ip}  ${r.mac}` : r.mac;
+  const hosts = rows.filter((r) => r.type === "mac-ip"), prefixes = rows.filter((r) => r.type === "ip-prefix");
+  return h("div", { class: "rt-learned" }, head,
+    h("p", { class: "muted small" },
+      `${hosts.length} host route${hosts.length === 1 ? "" : "s"} (type 2), ${prefixes.length} prefix${prefixes.length === 1 ? "" : "es"} (type 5)` +
+      `${vni ? ` on VNI ${vni}` : ""} · read ${new Date(st.at).toLocaleTimeString()}`),
+    rtTable(["VNI", "Host / prefix", "From"], rows.map((r) => [
+      r.l3_vni ? `${r.vni} · L3 ${r.l3_vni}` : r.vni,
+      h("span", { class: "mono" }, what(r)),
+      r.local ? h("span", { class: "muted" }, "local") : r.from || r.vtep])));
 }
 
 // One line per protocol a node runs, for the node inspector of the
@@ -1003,7 +1040,7 @@ window.Routing = {
   // The Routing tab was opened
   show() { rtRender(); if (rtLiveOn()) rtLoadLive(); },
   // Another topology was selected
-  reset() { RT.topo = null; RT.data = null; RT.live = null; RT.sel = null; RT.extPos = {}; RT.vni = "all"; },
+  reset() { RT.topo = null; RT.data = null; RT.live = null; RT.sel = null; RT.extPos = {}; RT.vni = "all"; RT.learned = null; },
   // The topology file changed (saved YAML, finished job): re-read the
   // configs (the Health panel lists their problems on every tab)
   changed() { rtLoad(); },

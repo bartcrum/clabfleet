@@ -1,0 +1,230 @@
+import json
+
+import pytest
+
+from clabfleet.routing.evpn_routes import parse_eos_evpn_routes
+from clabfleet.routing.trace import Lab, TraceError, same_iface, trace
+
+# H1 - L1 = S1/S2 = L2 - H2, and H3 on L2 (the spine-leaf EVPN lab, small)
+LINKS = [("H1", "eth1", "L1", "eth3"), ("L1", "eth1", "S1", "eth1"), ("L1", "eth2", "S2", "eth1"),
+         ("S1", "eth2", "L2", "eth1"), ("S2", "eth2", "L2", "eth2"), ("L2", "eth3", "H2", "eth1"),
+         ("L2", "eth4", "H3", "eth1")]
+KINDS = {"H1": "linux", "H2": "linux", "H3": "linux", "L1": "arista_ceos", "L2": "arista_ceos",
+         "S1": "arista_ceos", "S2": "arista_ceos"}
+VTEPS = {"10.255.2.1": "L1", "10.255.2.2": "L2"}
+
+
+def lab():
+    view = {"links": [{"a": {"node": a, "iface": ai}, "b": {"node": b, "iface": bi}} for a, ai, b, bi in LINKS]}
+    return Lab(view, KINDS, VTEPS)
+
+
+def route(vrf, prefix, kind, vias, connected=False):
+    return json.dumps({"vrfs": {vrf: {"routes": {prefix: {"routeType": kind, "vias": vias, "directlyConnected": connected}}}}})
+
+
+EMPTY_MAC = json.dumps({"unicastTable": {"tableEntries": []}})
+
+
+def asker(answers):
+    asked = []
+
+    def ask(node, command):
+        asked.append((node, command))
+        for (n, prefix), out in answers.items():
+            if n == node and command.startswith(prefix):
+                return out
+        raise RuntimeError(f"unexpected {node}: {command}")
+    ask.asked = asked
+    return ask
+
+
+def test_same_iface():
+    assert same_iface("arista_ceos", "eth3", "Ethernet3")
+    assert same_iface("cisco_iol", "Ethernet0/1", "eth1")
+    assert not same_iface("arista_ceos", "eth3", "Ethernet4")
+
+
+def test_underlay_ecmp_to_an_address():
+    ask = asker({
+        ("L1", "show ip route"): route("default", "10.255.1.2/32", "eBGP",
+                                       [{"interface": "Ethernet1"}, {"interface": "Ethernet2"}]),
+        ("S1", "show ip route"): route("default", "10.255.1.2/32", "eBGP", [{"interface": "Ethernet2"}]),
+        ("S2", "show ip route"): route("default", "10.255.1.2/32", "eBGP", [{"interface": "Ethernet2"}]),
+        ("L2", "show ip route"): route("default", "10.255.1.2/32", "connected", [{"interface": "Loopback0"}], True),
+    })
+    r = trace(lab(), ask, "L1", "10.255.1.2")
+    assert r["reached"] and [h["node"] for h in r["hops"]] == ["L1", "S1", "S2", "L2"]
+    pairs = [(e["a"], e["b"], e["a_iface"]) for e in r["edges"]]
+    # Both spines, and L2 once each from them (no duplicates)
+    assert pairs == [("L1", "S1", "eth1"), ("L1", "S2", "eth2"), ("S1", "L2", "eth2"), ("S2", "L2", "eth2")]
+
+
+def test_routed_over_vxlan_to_a_host():
+    ask = asker({
+        ("H1", "ip route get"): "10.20.20.12 via 10.10.10.1 dev eth1  src 10.10.10.11 \n",
+        ("L1", "show ip route"): route("TENANT", "10.20.20.12/32", "eBGP",
+                                       [{"vtepAddr": "10.255.2.2", "vni": 50001, "localInterface": "Vxlan1"}]),
+        ("L2", "show ip route"): route("TENANT", "10.20.20.0/24", "connected", [{"interface": "Vlan20"}], True),
+        ("L2", "show ip arp"): json.dumps({"ipV4Neighbors": [{"hwAddress": "aac1.abab.df07", "interface": "Vlan20, Ethernet3"}]}),
+    })
+    r = trace(lab(), ask, "H1", "10.20.20.12", "H2")
+    assert r["reached"]
+    assert [h["node"] for h in r["hops"]] == ["H1", "L1", "L2", "H2"]
+    assert r["hops"][1]["vrf"] == "TENANT" and "(VRF TENANT)" in r["hops"][1]["route"]
+    overlay = [e for e in r["edges"] if e["overlay"]]
+    assert overlay == [{"a": "L1", "b": "L2", "a_iface": "", "b_iface": "", "overlay": True, "vni": 50001, "flood": False}]
+    assert r["edges"][-1]["a_iface"] == "eth3"  # Ethernet3 is the topology's eth3
+    # L2 looked the address up in L1's VRF
+    assert ("L2", "show ip route vrf all 10.20.20.12 | json") in ask.asked
+
+
+def test_bridged_with_aged_out_mac_floods_and_finds_the_host():
+    ask = asker({
+        ("H1", "ip route get"): "10.10.10.13 dev eth1  src 10.10.10.11 \n",
+        ("H1", "ip neigh show"): "10.10.10.13 dev eth1 lladdr aa:c1:ab:8f:40:85 STALE\n",
+        ("L1", "show ip route"): route("TENANT", "10.10.10.0/24", "connected", [{"interface": "Vlan10"}], True),
+        ("L1", "show ip arp"): json.dumps({"ipV4Neighbors": []}),
+        ("L1", "show mac address-table"): EMPTY_MAC,
+        ("L1", "show vxlan address-table"): json.dumps({"addresses": []}),
+        ("L1", "show bgp evpn route-type mac-ip"): json.dumps({"evpnRoutes": {}}),
+        ("L1", "show vxlan flood vtep vlan 10"): json.dumps({"floodMap": {"10": {"vteps": ["10.255.2.2"]}}}),
+        ("L2", "show mac address-table"): EMPTY_MAC,
+    })
+    r = trace(lab(), ask, "H1", "10.10.10.13", "H3")
+    assert r["reached"]
+    assert ("L1", "show mac address-table address aac1.ab8f.4085 | json") in ask.asked  # the host's MAC, EOS style
+    flood = [e for e in r["edges"] if e["overlay"]]
+    assert flood and flood[0]["flood"] and flood[0]["b"] == "L2"
+    assert r["edges"][-1] == {"a": "L2", "b": "H3", "a_iface": "eth4", "b_iface": "eth1", "overlay": False,
+                              "vni": None, "flood": False}
+    assert "not learned" in r["hops"][2]["notes"][0]
+
+
+def test_bridged_mac_found_by_its_evpn_route():
+    ask = asker({
+        ("H1", "ip route get"): "10.10.10.13 dev eth1  src 10.10.10.11 \n",
+        ("H1", "ip neigh show"): "",
+        ("L1", "show ip route"): route("TENANT", "10.10.10.0/24", "connected", [{"interface": "Vlan10"}], True),
+        ("L1", "show ip arp"): json.dumps({"ipV4Neighbors": []}),
+        ("L1", "show bgp evpn route-type mac-ip"): json.dumps({"evpnRoutes": {
+            "RD: 10.255.1.2:10010 mac-ip aac1.ab8f.4085 10.10.10.13": {"evpnRoutePaths": [{"nextHop": "10.255.2.2"}]},
+            "RD: 10.255.1.2:10010 mac-ip aac1.ab8f.4085": {"evpnRoutePaths": [{"nextHop": "10.255.2.2"}]}}}),
+        ("L2", "show mac address-table"): json.dumps({"unicastTable": {"tableEntries": [
+            {"interface": "Ethernet4", "macAddress": "aa:c1:ab:8f:40:85"}]}}),
+        ("H3", "ip route get"): "local 10.10.10.13 dev lo table local src 10.10.10.13 \n",
+    })
+    r = trace(lab(), ask, "H1", "10.10.10.13")  # an address: H3 says it is its own
+    assert r["reached"] and [h["node"] for h in r["hops"]] == ["H1", "L1", "L2", "H3"]
+    assert any(e["b"] == "H3" and e["a_iface"] == "eth4" for e in r["edges"])
+    assert not any(e.get("flood") for e in r["edges"])
+
+
+def test_dead_ends_and_errors():
+    ask = asker({
+        ("H1", "ip route get"): "8.8.8.8 via 10.10.10.1 dev eth1\n",
+        ("L1", "show ip route"): json.dumps({"vrfs": {"default": {"routes": {}}}}),
+    })
+    r = trace(lab(), ask, "H1", "8.8.8.8")
+    assert not r["reached"] and r["hops"][1]["route"] == "no route to 8.8.8.8"
+    with pytest.raises(TraceError, match="not an IP"):
+        trace(lab(), ask, "H1", "Leaf-9")
+
+    def fails(node, command):
+        raise RuntimeError("container is not running")
+    r = trace(lab(), fails, "H1", "10.0.0.1")
+    assert r["hops"] == [{"node": "H1", "vrf": None, "error": "could not ask: container is not running"}]
+    weird = Lab({"links": []}, {"X": "nokia_srlinux"}, {})
+    assert "cannot look up routes" in trace(weird, fails, "X", "10.0.0.1")["hops"][0]["error"]
+    # A next hop out of an interface no link uses
+    ask = asker({("L1", "show ip route"): route("default", "0.0.0.0/0", "static", [{"interface": "Ethernet9"}])})
+    assert trace(lab(), ask, "L1", "9.9.9.9")["hops"][0]["notes"] == ["Ethernet9 leads out of the lab"]
+
+
+def test_parse_eos_evpn_routes():
+    mac_ip = json.dumps({"evpnRoutes": {
+        "RD: 10.255.1.3:10010 mac-ip aac1.ab8f.4085": {"evpnRoutePaths": [
+            {"nextHop": "10.255.2.2", "routeType": {"active": True}, "routeDetail": {"label": {"value": "10010"}}}]},
+        "RD: 10.255.1.1:10010 mac-ip aac1.abb1.0eff 10.10.10.11": {"evpnRoutePaths": [
+            {"nextHop": "", "routeType": {"active": True},
+             "routeDetail": {"label": {"value": "10010"}, "l3Label": {"value": "50001"}}}]},
+        "RD: x mac-ip aaaa.bbbb.cccc": {"evpnRoutePaths": []}}})
+    prefix = json.dumps({"evpnRoutes": {
+        "RD: 10.255.1.2:50001 ip-prefix 10.20.20.0/24": {"evpnRoutePaths": [
+            {"nextHop": "10.255.2.9", "routeType": {"active": False}, "routeDetail": {"label": {"value": "50001"}}},
+            {"nextHop": "10.255.2.2", "routeType": {"active": True}, "routeDetail": {"label": {"value": "50001"}}}]}}})
+    rows = parse_eos_evpn_routes(mac_ip, prefix, VTEPS)
+    assert rows == [
+        {"type": "mac-ip", "vni": 10010, "l3_vni": 50001, "mac": "aac1.abb1.0eff", "ip": "10.10.10.11",
+         "prefix": "", "vtep": "", "from": "", "local": True},
+        {"type": "mac-ip", "vni": 10010, "l3_vni": None, "mac": "aac1.ab8f.4085", "ip": "", "prefix": "",
+         "vtep": "10.255.2.2", "from": "L2", "local": False},
+        {"type": "ip-prefix", "vni": 50001, "l3_vni": None, "mac": "", "ip": "", "prefix": "10.20.20.0/24",
+         "vtep": "10.255.2.2", "from": "L2", "local": False},  # the active path, not the first
+    ]
+    assert parse_eos_evpn_routes("", "  ", {}) == []
+
+
+def test_trace_and_evpn_endpoints(tmp_path, monkeypatch):
+    import asyncio
+
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from clabfleet.cluster import ClusterConfig, HostInfo
+    from clabfleet.gui import server
+    from clabfleet.gui.auth import UserStore
+    from clabfleet.gui.state import Workspace
+
+    (tmp_path / "t.clab.yml").write_text("name: t\ntopology:\n  nodes:\n    R1: {kind: linux, image: a}\n")
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    users = UserStore(tmp_path / "users.yaml")
+    viewer = users.add("vic", "viewer")
+
+    def fake_trace(self, topo_id, src, dst):
+        if dst == "bad":
+            raise ValueError("'bad' is not an IP address")
+        if dst == "boom":
+            raise RuntimeError("docker is gone")
+        return {"src": src, "dst": dst, "reached": True, "hops": [], "edges": []}
+
+    def fake_routes(self, topo_id, node):
+        if node != "R1":
+            raise ValueError("EVPN routes can be read from cEOS nodes only")
+        return [{"type": "mac-ip", "vni": 10}]
+
+    monkeypatch.setattr(Workspace, "trace", fake_trace)
+    monkeypatch.setattr(Workspace, "evpn_routes", fake_routes)
+
+    async def scenario():
+        async with TestClient(TestServer(server.create_app(ws, users=users))) as client:
+            await client.post("/login", json={"token": viewer})  # read-only: viewers may
+            resp = await client.post("/api/trace/t.clab.yml", json={"src": "R1", "dst": " 10.0.0.1 "})
+            assert resp.status == 200 and (await resp.json())["dst"] == "10.0.0.1"
+            for body, status in [({"src": "R1"}, 400), ({"src": "R1", "dst": "bad"}, 400),
+                                 ({"src": 1, "dst": "x"}, 400), ({"src": "R1", "dst": "boom"}, 502)]:
+                assert (await client.post("/api/trace/t.clab.yml", json=body)).status == status, body
+            resp = await client.get("/api/evpn-routes/t.clab.yml?node=R1")
+            assert resp.status == 200 and (await resp.json())["routes"] == [{"type": "mac-ip", "vni": 10}]
+            assert (await client.get("/api/evpn-routes/t.clab.yml?node=X")).status == 400
+
+    asyncio.run(scenario())
+
+
+def test_ios_routes():
+    view = {"links": [{"a": {"node": "R1", "iface": "Ethernet0/1"}, "b": {"node": "R2", "iface": "Ethernet0/1"}}]}
+    ios_lab = Lab(view, {"R1": "cisco_iol", "R2": "cisco_iol"}, {})
+    ask = asker({
+        ("R1", "show ip route"): (
+            "Routing entry for 10.0.0.2/32\n  Known via \"ospf 1\", distance 110, metric 11, type intra area\n"
+            "  Routing Descriptor Blocks:\n  * 10.1.1.2, from 10.0.0.2, 00:05:12 ago, via Ethernet0/1\n"),
+        ("R2", "show ip route"): (
+            "Routing entry for 10.0.0.2/32\n  Known via \"connected\", distance 0, metric 0 (connected, via interface)\n"
+            "  Routing Descriptor Blocks:\n  * directly connected, via Loopback0\n"),
+    })
+    r = trace(ios_lab, ask, "R1", "10.0.0.2")
+    assert r["reached"] and r["hops"][0]["route"] == "Routing entry for 10.0.0.2/32"
+    assert r["edges"] == [{"a": "R1", "b": "R2", "a_iface": "Ethernet0/1", "b_iface": "Ethernet0/1",
+                           "overlay": False, "vni": None, "flood": False}]
+    ask = asker({("R1", "show ip route"): "% Network not in table\n"})
+    assert trace(ios_lab, ask, "R1", "10.9.9.9")["hops"][0]["route"] == "no route to 10.9.9.9"

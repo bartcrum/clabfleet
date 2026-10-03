@@ -740,6 +740,7 @@ async function selectTopology(id) {
   if (!(await confirmDiscard())) return;
   window.Builder?.reset();
   window.Run?.reset();
+  window.Trace?.reset();
   S.selected = { type: "topo", id };
   S.selectedNode = null;
   try {
@@ -1614,6 +1615,7 @@ function renderDiagram(fit) {
     g.append(el);
   }
 
+  window.Trace?.decorate(g, P);
   g.append(labels);
   svg.replaceChildren(g);
   applyView(svg, "viewport", S.view);

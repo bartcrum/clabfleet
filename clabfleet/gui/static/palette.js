@@ -46,6 +46,7 @@ function buildCommands() {
     }
     if (op && window.Builder && !window.Builder.editing) add("Lab", "Edit the drawing", () => { showView("diagram"); $("#edit-topo").click(); });
     if (op && st.deployed && window.Run) add("Lab", "Run a command on nodes…", () => window.Run.open());
+    if (st.deployed && window.Trace) add("Lab", "Trace a path…", () => window.Trace.open(S.selectedNode || undefined));
     for (const n of S.detail.nodes) {
       const rt = nodeRuntime(S.detail.name, n.name);
       const running = rt?.state === "running";
@@ -54,6 +55,7 @@ function buildCommands() {
         for (const m of n.modes) add("Terminals", `${MODE_LABEL[m]} on ${n.name}`, () => openTerminal(S.detail.name, n.name, m));
       }
       if (op && rt) add("Terminals", `Logs of ${n.name}`, () => openTerminal(S.detail.name, n.name, "logs"));
+      if (running && window.Trace) add("Trace", `Trace a path from ${n.name}…`, () => window.Trace.open(n.name));
       if (op && running) add("Configs", `Config drift of ${n.name}`, () => openDiff(S.selected.id, n.name, "running"),
         "running vs startup");
     }

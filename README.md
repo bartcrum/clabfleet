@@ -448,6 +448,13 @@ an operator.
   its neighbours time out). The inspector offers them on links and nodes;
   disruptive ones ask first, all are audited (`whatif`), and nothing is
   saved to any config. Watch the Routing tab in Live mode reconverge.
+- **Trace:** the Trace tab follows traffic from a node to another node or
+  an address through the running lab's tables, hop by hop: routes on cEOS
+  (VRFs included), IOS kinds and Linux hosts, every equal-cost branch, and
+  on an EVPN fabric the VXLAN hop to the VTEP (from the route, or for
+  bridged traffic the MAC and VXLAN tables, the EVPN MAC/IP routes, or
+  the VLAN's flood list). The path is highlighted on the Diagram, VXLAN
+  hops as arcs. It only reads; viewers can use it too.
 - **Export:** Export on the Diagram and Routing tabs saves the view as SVG
   or PNG, light or dark, for documents and slides.
 - **Freshness:** live views say how old their data is ("live: read 4 s
@@ -510,6 +517,9 @@ an operator.
   EVPN sessions (control plane) and the VXLAN tunnels between VTEPs (data
   plane), either or both, for all VNIs or one. Click a node for its
   router-id, interfaces, sessions or VNIs, or an edge for both ends.
+  On a deployed lab a cEOS VTEP's card can also read what it has
+  **learned**: the hosts (EVPN type-2 MAC/IP routes) and prefixes
+  (type-5) on each VNI, and which VTEP each came from.
   The button at the top right counts the problems found in the configs
   and opens them in the Health panel. Nodes without the protocol are
   dimmed. **Cabling** shows the physical links faintly behind.
@@ -1198,7 +1208,8 @@ clabfleet/
   templates.py     # Lab templates (clabfleet new)
   linkcheck.py     # Ping and UDP checks between cluster hosts
   readiness.py     # Is a node's CLI/SSH up yet (deploy --wait, GUI)
-  routing/         # OSPF/BGP/EVPN views from startup configs (clabfleet routing, GUI)
+  routing/         # OSPF/BGP/EVPN views from startup configs (clabfleet routing, GUI),
+                   # live state, EVPN routes and path trace from running nodes
   cli.py           # CLI entrypoint
   gui/
     server.py      # aiohttp app: API, auth middleware, terminal websockets
