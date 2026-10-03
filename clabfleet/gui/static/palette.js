@@ -40,11 +40,12 @@ function buildCommands() {
     const busy = !!runningJob(S.selected.id);
     if (op && !busy) {
       const acts = st.deployed
-        ? [["redeploy", "Redeploy"], ["save", "Save configs"], ["snapshot", "Snapshot"], ["destroy", "Destroy lab…"]]
+        ? [["redeploy", "Redeploy"], ["save", "Save configs"], ["snapshot", "Snapshot"], ["stop", "Stop"], ["destroy", "Destroy lab…"]]
         : [["deploy", "Deploy"]];
       for (const [a, label] of acts) add("Lab", `${label} ${S.detail.name}`, () => runAction(a));
     }
     if (op && window.Builder && !window.Builder.editing) add("Lab", "Edit the drawing", () => { showView("diagram"); $("#edit-topo").click(); });
+    if (op && st.deployed && window.Run) add("Lab", "Run a command on nodes…", () => window.Run.open());
     for (const n of S.detail.nodes) {
       const rt = nodeRuntime(S.detail.name, n.name);
       const running = rt?.state === "running";

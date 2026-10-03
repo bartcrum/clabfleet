@@ -186,7 +186,7 @@ def test_job_manager_runs_labs_in_parallel_and_keeps_history(tmp_path, monkeypat
             release.wait(5)
             return {"hosts": {"localhost": {"status": "deployed", "seconds": 1.5}}}
 
-        def destroy(self, path):
+        def destroy(self, path, cleanup=True):
             return {"hosts": {"localhost": {"error": "boom"}}}
 
     monkeypatch.setattr(state, "LabDeployer", FakeDeployer)
@@ -361,3 +361,40 @@ def test_logs_terminal_over_websocket(tmp_path, monkeypatch):
     assert "args: logs --follow --tail 2000 clab-l-r1" in output
     assert "booting line 1" in output
     assert exit_msg == {"t": "exit", "code": 0}
+
+
+def test_stop_saves_first_and_keeps_the_lab_directory(tmp_path, monkeypatch):
+    calls = []
+    save_fails = [False]
+
+    class FakeDeployer:
+        def __init__(self, cluster, on_output=None, interactive_sudo=True):
+            pass
+
+        def save(self, path):
+            calls.append("save")
+            if save_fails[0]:
+                return {"hosts": {"localhost": {"error": "node unreachable", "seconds": 0.1}}}
+            return {"hosts": {"localhost": {"status": "saved", "seconds": 0.2}}}
+
+        def destroy(self, path, cleanup=True):
+            calls.append(("destroy", cleanup))
+            return {"hosts": {"localhost": {"status": "ok", "seconds": 0.5}}}
+
+    monkeypatch.setattr(state, "LabDeployer", FakeDeployer)
+    ws = _workspace(tmp_path)
+    ws.topologies()
+    jobs = JobManager(ws)
+    job = jobs.start("stop", "t.clab.yml")
+    _wait(job)
+    assert job.status == "ok" and calls == ["save", ("destroy", False)]
+    job = jobs.start("destroy", "t.clab.yml")
+    _wait(job)
+    assert calls[-1] == ("destroy", True)
+    # A failed save removes nothing
+    calls.clear()
+    save_fails[0] = True
+    job = jobs.start("stop", "t.clab.yml")
+    _wait(job)
+    assert job.status == "error" and calls == ["save"]
+    assert any("not stopped" in line for line in job.lines)

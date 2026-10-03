@@ -136,6 +136,7 @@ Proposal: above the log, a stepper per host (plan → images → deploy →
 links → ready) with durations, built from the log lines the job already
 emits. The raw log stays one click away. Finished jobs raise a toast with
 "View" and "Open lab" links.
+**Done** (branch `gui-batch3`): a row of plan / images / deploy / links / ready per host above the log, from the job's lines (durations when followed live, each host's total otherwise); finished jobs toast with View and Open lab.
 
 ### C. Canvas
 
@@ -280,6 +281,7 @@ projectors for training sessions.
 8. **Run a command on many nodes — M.** `clabfleet exec` in the GUI:
    select nodes or a glob, run a command, compare outputs side by side or
    diffed.
+   **Done** (branch `gui-batch3`): a Run tab (operators): node globs, mode, command; outputs as a list, side by side, or diffed against the first node; audited.
 9. **Node detail page — S.** Interfaces with config IPs, live state and
    the protocols on each, in one table. Fits the inspector (B2).
 10. **New lab wizard — M.** The `clabfleet new` templates as a form with

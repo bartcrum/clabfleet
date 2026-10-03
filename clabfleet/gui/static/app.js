@@ -112,12 +112,30 @@ function announce(msg) {
 }
 
 let toastTimer;
-function toast(msg) {
+// ``opts``: {ok: true} for good news (a neutral border), and actions,
+// [{label, run}], shown as buttons (the toast then stays a little longer)
+function toast(msg, opts = {}) {
   const el = $("#toast");
-  el.textContent = msg;
+  const actions = opts.actions || [];
+  el.replaceChildren(h("span", {}, msg), ...actions.map((a) => h("button", {
+    class: "btn small", onclick: () => { el.hidden = true; a.run(); },
+  }, a.label)));
+  el.classList.toggle("good", !!opts.ok);
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), 6000);
+  toastTimer = setTimeout(() => (el.hidden = true), actions.length ? 12000 : 6000);
+}
+
+// A finished job, success or not: say so, with a way to its output and lab
+function jobDone(j) {
+  const ok = j.status === "ok";
+  toast(`${j.action} ${j.lab || j.topology} ${ok ? "finished" : "failed"}`, {
+    ok,
+    actions: [
+      { label: "View", run: () => { activatePane("activity", true); trackJob(j.id, false); } },
+      ...(S.selected?.id === j.topology ? [] : [{ label: "Open lab", run: () => selectTopology(j.topology) }]),
+    ],
+  });
 }
 
 const MODE_LABEL = { cli: "CLI", shell: "Shell", ssh: "SSH", logs: "Logs" };
@@ -335,7 +353,7 @@ async function refreshState() {
   // Jobs that finished in the background (the viewed one reports itself)
   for (const j of S.state.jobs) {
     if (before.get(j.id) === "running" && j.status !== "running" && j.id !== S.viewJob) {
-      if (j.status !== "ok") toast(`${j.action} ${j.lab} failed — see Activity`);
+      jobDone(j);
       announce(`${j.action} ${j.lab} ${j.status === "ok" ? "finished" : "failed"}`);
       if (S.selected?.type === "topo" && S.selected.id === j.topology) reloadDetail();
     }
@@ -706,6 +724,7 @@ async function selectTopology(id) {
   if (S.selected?.type === "topo" && S.selected.id === id) { reloadDetail(); return; }
   if (!(await confirmDiscard())) return;
   window.Builder?.reset();
+  window.Run?.reset();
   S.selected = { type: "topo", id };
   S.selectedNode = null;
   try {
@@ -2138,6 +2157,15 @@ function actionImpact(action, lab) {
       ],
     };
   }
+  if (action === "stop") {
+    return {
+      title: `Stop ${lab}?`, ok: "Stop lab", danger: true,
+      body: [
+        `Saves every node's running config, then removes ${n}${where} to free their memory and disk.`,
+        `The lab directory clab-${lab}/ with the saved configs stays, so the next Deploy starts from them. If saving fails, nothing is removed. Destroy (in the ⋯ menu) also deletes the lab directory.`,
+      ],
+    };
+  }
   if (action === "redeploy") {
     return {
       title: `Redeploy ${lab}?`, ok: "Redeploy lab", danger: true, typeToConfirm: big,
@@ -2178,6 +2206,94 @@ function appendActivity(lines) {
   if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
 
+// ---------------------------------------------------------------------------
+// Job steps (B5): from the lines a deploy prints, each host's way through
+// plan → images → deploy → links → ready. Durations come from when lines
+// arrived, so only for a job followed while it ran.
+// ---------------------------------------------------------------------------
+
+const STEPS = ["plan", "images", "deploy", "links", "ready"];
+const LAB_STEPS = new Set(["plan", "images"]);
+const STEP_OF = [
+  [/Probing \d+ cluster hosts|Computing placement|Using VNIs|Checking VXLAN|Lab '.*' is on/, "plan"],
+  [/Pulling \S+ on |images? (missing|check)/i, "images"],
+  [/Deploying '.*' locally|Copying '.*' \(|Running containerlab deploy|Creating lab directory|Creating container|Creating docker network/, "deploy"],
+  [/Created link|Creating virtual wire|vxlan/i, "links"],
+  [/Running postdeploy|Waiting up to|Adding host entries|Adding SSH config/, "ready"],
+];
+
+function newSteps(job) {
+  return { action: job?.action, rows: new Map(), lastHost: null, live: false, status: job?.status };
+}
+
+function stepRow(st, host) {
+  if (!st.rows.has(host)) st.rows.set(host, Object.fromEntries(STEPS.map((k) => [k, { state: "pending" }])));
+  return st.rows.get(host);
+}
+
+// Mark ``step`` active on ``host`` (and the earlier steps done)
+function enterStep(st, host, step, t) {
+  const row = stepRow(st, host);
+  const idx = STEPS.indexOf(step);
+  STEPS.forEach((k, i) => {
+    const s0 = row[k];
+    if (i < idx && s0.state !== "done") { s0.state = "done"; s0.end ??= t; s0.start ??= t; }
+  });
+  const cur = row[step];
+  if (cur.state === "pending") { cur.state = "active"; cur.start = t; }
+}
+
+function stepLine(st, line, t) {
+  if (!["deploy", "redeploy"].includes(st.action)) return;
+  const m = /^\[([^\]]+)\] (.*)$/.exec(line);
+  let host = m ? m[1] : null;
+  const text = m ? m[2] : line;
+  const named = / on ([\w.-]+?)(?:[ ,:]|$)| to ([\w.-]+):/.exec(text);
+  if (!host && named) host = named[1] || named[2];
+  for (const [re, step] of STEP_OF) {
+    if (!re.test(text)) continue;
+    if (LAB_STEPS.has(step)) enterStep(st, "lab", step, t);
+    else enterStep(st, host || st.lastHost || "this host", step, t);
+    break;
+  }
+  if (host) st.lastHost = host;
+}
+
+function finishSteps(st, status, t) {
+  st.status = status;
+  for (const row of st.rows.values()) {
+    for (const k of STEPS) {
+      const s0 = row[k];
+      if (s0.state === "active") { s0.state = status === "ok" ? "done" : "failed"; s0.end = t; }
+    }
+  }
+}
+
+function renderSteps(job) {
+  const box = $("#job-steps");
+  const st = S.steps;
+  if (!st || !st.rows.size) { box.hidden = true; return; }
+  const now = Date.now() / 1000;
+  const fmt = (s0) => (st.live && s0.start != null ? fmtDuration((s0.end ?? now) - s0.start) : "");
+  // One host: lines carry no host name, the job's times do
+  const timed = Object.keys(job?.host_times || (S.state?.jobs || []).find((j) => j.id === S.viewJob)?.host_times || {});
+  if (st.rows.has("this host") && timed.length === 1 && !st.rows.has(timed[0])) {
+    st.rows.set(timed[0], st.rows.get("this host"));
+    st.rows.delete("this host");
+  }
+  job = job || (S.state?.jobs || []).find((j) => j.id === S.viewJob);
+  const rows = [...st.rows].sort(([a], [b]) => (a === "lab" ? -1 : b === "lab" ? 1 : naturalCmp(a, b)));
+  box.replaceChildren(...rows.map(([host, row]) => h("div", { class: "step-row" },
+    h("span", { class: "step-host mono", title: host === "lab" ? "Steps for the whole lab" : host },
+      host === "lab" ? "lab" : host),
+    ...STEPS.filter((k) => (host === "lab") === LAB_STEPS.has(k)).map((k) => h("span", {
+      class: `step ${row[k].state}`, title: `${k}: ${row[k].state}`,
+    }, h("span", { class: "step-dot", "aria-hidden": "true" }), k, h("span", { class: "muted" }, fmt(row[k])))),
+    host !== "lab" && !st.live && job?.host_times?.[host] != null
+      ? h("span", { class: "muted small" }, `${fmtDuration(job.host_times[host])} in all`) : null)));
+  box.hidden = false;
+}
+
 // Show a job's output in the Activity pane, following it while it runs
 function trackJob(id, fromStart) {
   clearTimeout(S.jobPolling);
@@ -2188,6 +2304,8 @@ function trackJob(id, fromStart) {
   pre.textContent = "";
   let offset = 0;
   let sawRunning = false;
+  S.steps = newSteps((S.state?.jobs || []).find((j) => j.id === id));
+  renderSteps();
   if (fromStart) activatePane("activity", true);
   renderJobPicker();
 
@@ -2201,6 +2319,14 @@ function trackJob(id, fromStart) {
     }
     if (S.viewJob !== id) return;  // switched to another job meanwhile
     if (job.lines.length) appendActivity(job.lines);
+    if (S.steps) {
+      S.steps.action ??= job.action;
+      if (job.status === "running") S.steps.live = true;
+      const now = Date.now() / 1000;
+      for (const line of job.lines) stepLine(S.steps, line, now);
+      if (job.status !== "running") finishSteps(S.steps, job.status, now);
+      renderSteps(job);
+    }
     offset = job.offset;
     const known = (S.state?.jobs || []).find((j) => j.id === id);
     if (known) Object.assign(known, { status: job.status, finished: job.finished, host_times: job.host_times });
@@ -2213,7 +2339,7 @@ function trackJob(id, fromStart) {
     }
     S.jobPolling = null;
     if (!sawRunning) return;  // a finished job opened from history
-    if (job.status !== "ok") toast(`${job.action} failed — see Activity`);
+    jobDone(job);
     announce(`${job.action} ${job.lab || job.topology} ${job.status === "ok" ? "finished" : "failed"}`);
     await refreshState();
     await reloadDetail();
@@ -2741,7 +2867,12 @@ function setup() {
   refreshHosts();
   $("#job-select").addEventListener("change", (e) => trackJob(e.target.value, false));
   setInterval(() => { if (!document.hidden) refreshState(); }, 5000);
-  setInterval(() => { if (!document.hidden) { renderJobMeta(); renderFreshness(); } }, 1000);
+  setInterval(() => {
+    if (document.hidden) return;
+    renderJobMeta();
+    renderFreshness();
+    if (S.steps?.live && S.steps.status === "running") renderSteps();
+  }, 1000);
   setInterval(() => { if (!document.hidden) refreshHosts(); }, 30000);
 }
 

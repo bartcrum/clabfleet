@@ -529,8 +529,20 @@ an operator.
   stat to open the tab it comes from. The ⧉ button copies the topology
   file's path.
 - **Deploy** while the lab is not deployed; **Redeploy / Save configs /
-  Snapshot** once it is, and **Destroy** in the ⋯ menu, with containerlab's
-  output streamed into the Activity panel. Different labs can run jobs at the
+  Snapshot / Stop** once it is, and **Destroy** in the ⋯ menu, with
+  containerlab's output streamed into the Activity panel. **Stop** turns
+  the lab down to free memory and disk: it saves every node's running
+  config, then removes the containers and keeps the lab directory (a few
+  MB), so the next Deploy starts from the saved configs. If saving fails
+  on a host, nothing is removed. **Destroy** also deletes the lab
+  directory. Above the output, Activity
+  shows each host's steps (plan, images, deploy, links, ready) and how
+  long each took; a finished job pops up with View and Open lab.
+- **Run on nodes:** the Run tab (operators) runs one command on every node
+  matching names or globs (`Leaf-*`), like `clabfleet exec`: the CLI on
+  cEOS and SR Linux, SSH on VM kinds, else a shell. Show the outputs as a
+  list, side by side, or as diffs against the first node, to spot the odd
+  one out. Commands are audited (`exec`). Different labs can run jobs at the
   same time, up to four, with one job per lab. Pick any job, running or
   past, from the Activity panel's list to see its output, how long it
   took, and the time each host took. The last 50 jobs are kept in
