@@ -1072,7 +1072,7 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 .diagram .rack-dev rect.led { fill: var(--led-off); stroke: none; }
 .diagram .rack-dev rect.led.up { fill: var(--ok); }
 .diagram .rack-dev rect.led.down { fill: var(--danger); }
-.diagram .rack-dev .pnum { font: 7.5px var(--mono); fill: var(--rack-muted); text-anchor: middle; }
+.diagram .rack-dev .pnum { font: 7.5px var(--mono); fill: var(--rack-muted); }
 
 .diagram .cable { fill: none; stroke-width: 3; stroke-linecap: round; }
 .diagram .cable.fabric { stroke: var(--cable-fabric); }

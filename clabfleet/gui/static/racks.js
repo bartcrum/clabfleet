@@ -29,8 +29,7 @@ const U = 32;             // one rack unit
 const RAIL = 16;
 const FACE_W = RW - 2 * RAIL;
 const TEXT_W = 150;       // left part of a faceplate: status, name, kind
-const PITCH = 17;         // port spacing
-const PER_ROW = Math.floor((FACE_W - TEXT_W - 10) / PITCH);
+const PITCH = 17;         // port spacing, wider when the port names are long
 const LANE = 7;           // cable tray lane spacing
 const MGR_LANES = 16;     // cable manager lanes before they repeat
 
@@ -69,6 +68,14 @@ function portsOf(model) {
 function portLabel(iface) {
   const m = /(\d+(?:[/:-]\d+)*)$/.exec(iface || "");
   return truncate(m ? m[1] : iface || "", 4);
+}
+
+// Port spacing of a device and how many fit in a row: each port needs room
+// for its LED and its name above the jack
+function portGeom(list) {
+  const chars = Math.max(0, ...(list || []).map((i) => portLabel(i).length));
+  const pitch = Math.max(PITCH, Math.ceil(8.5 + chars * 4.6));
+  return { pitch, perRow: Math.floor((FACE_W - TEXT_W - 10) / pitch) };
 }
 
 // What a cable is for: to a host, a pair's parallel links, the fabric, or outside the lab
@@ -118,7 +125,7 @@ function draw(g, model) {
     for (const nd of nodes) {
       if (last !== null && tier(nd) !== last) u++;
       last = tier(nd);
-      const rows = Math.max(1, Math.ceil((ports[nd.id]?.length || 0) / PER_ROW));
+      const rows = Math.max(1, Math.ceil((ports[nd.id]?.length || 0) / portGeom(ports[nd.id]).perRow));
       slots[nd.id] = { rack: i, unit: u, rows };
       u += rows;
     }
@@ -173,7 +180,9 @@ function draw(g, model) {
       const sub = nd.pseudo ? "outside the lab"
         : kindName(nd.node.kind) + (use?.cpu != null ? ` · ${fmtCpu(use.cpu)} · ${fmtBytes(use.mem)}` : "");
       // Text gets the faceplate up to the first row of ports
-      const room = FACE_W - 34 - Math.min(PER_ROW, (ports[nd.id] || []).length) * PITCH;
+      const list = ports[nd.id] || [];
+      const { pitch, perRow } = portGeom(list);
+      const room = FACE_W - 34 - Math.min(perRow, list.length) * pitch;
       const el = s("g", {
         class: `${nd.pseudo ? "pseudo" : "node"} rack-dev${S.selectedNode === nd.id ? " selected" : ""}`,
         "data-f": nd.id, ...(nd.pseudo ? {} : { "data-id": nd.id, role: "img", "aria-label": nodeLabel(nd.id) }),
@@ -183,15 +192,15 @@ function draw(g, model) {
         s("text", { class: "name", x: x + 24, y: y + 14 }, truncate(nd.pseudo ? nd.label : nd.id, Math.floor(room / 7.5))),
         s("text", { class: "kind", x: x + 24, y: y + 25 }, truncate(sub, Math.floor(room / 5.8))),
         nd.pseudo ? null : s("title", {}, nodeLabel(nd.id)));
-      const list = ports[nd.id] || [];
+      // LED and name sit above the jack: cables leave it sideways and sag below
       list.forEach((iface, k) => {
-        const row = Math.floor(k / PER_ROW), col = k % PER_ROW;
-        const inRow = Math.min(PER_ROW, list.length - row * PER_ROW);
-        const px = x + FACE_W - 10 - (inRow - col) * PITCH + 2, py = y + 9 + row * U;
-        const led = s("rect", { class: "led", x: px + 1.5, y: py - 5, width: 3, height: 3 });
+        const row = Math.floor(k / perRow), col = k % perRow;
+        const inRow = Math.min(perRow, list.length - row * perRow);
+        const px = x + FACE_W - 10 - (inRow - col) * pitch + 2, py = y + 12 + row * U;
+        const led = s("rect", { class: "led", x: px, y: py - 6.5, width: 3, height: 3 });
         el.append(s("rect", { class: "jack", x: px, y: py, width: 13, height: 11, rx: 1.5 }), led,
-          s("text", { class: "pnum", x: px + 6.5, y: py + 18.5 }, portLabel(iface)));
-        const ring = s("rect", { class: "port-ring", x: px - 2, y: py - 7, width: 17, height: 20, rx: 2.5 });
+          s("text", { class: "pnum", x: px + 4.5, y: py - 2.5 }, portLabel(iface)));
+        const ring = s("rect", { class: "port-ring", x: px - 2, y: py - 10, width: pitch, height: 23, rx: 2.5 });
         rings.append(ring);
         port[`${nd.id}:${iface}`] = { x: px + 6.5, y: py + 5.5, rack: sl.rack, rx, led, ring };
       });
@@ -225,8 +234,11 @@ function draw(g, model) {
       // A loop out to the cable manager and back
       const k = mgr[A.rack]++ % MGR_LANES;
       const mx = A.rx + RW + 6 + k * 3.2 + Math.min(14, Math.abs(A.y - B.y) / 7);
-      const sag = 10 + (k % 3) * 3;
-      d = `M${A.x},${A.y} C${A.x + 6},${A.y + sag} ${mx},${A.y + 4} ${mx},${(A.y + B.y) / 2} S${B.x + 6},${B.y + sag} ${B.x},${B.y}`;
+      // Along the faceplate it droops below the jacks, clear of the port names,
+      // and only turns up or down once it is past the rail
+      const ex = A.rx + RW - RAIL + 2, sag = 8 + (k % 3) * 2;
+      d = `M${A.x},${A.y} C${A.x + 5},${A.y + sag} ${ex - 10},${A.y + 2} ${ex},${A.y + 2} Q${mx},${A.y + 2} ${mx},${(A.y + B.y) / 2} ` +
+          `Q${mx},${B.y + 2} ${ex},${B.y + 2} C${ex - 10},${B.y + 2} ${B.x + 5},${B.y + sag} ${B.x},${B.y}`;
     }
     const where = A.rack !== B.rack ? `\nbetween hosts${vni !== undefined ? `, VNI ${vni}` : ""}` : "";
     const rate = ls?.rate;
