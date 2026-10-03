@@ -82,12 +82,19 @@ def test_whatif(tmp_path, monkeypatch):
 
     def run_docker(runner, argv, sudo):
         ran.append(argv)
+        if argv[-4:] == ["route", "show", "dev", "eth1"]:
+            return CommandResult(0, "default via 10.0.0.1 \n10.0.0.0/24 scope link  src 10.0.0.2 \n", "")
         return CommandResult(0, "", "")
 
     monkeypatch.setattr(state, "run_docker", run_docker)
     assert ws.whatif("w.clab.yml", "link-down", "r1", "Ethernet0/1") == "r1:Ethernet0/1 shut"
     assert ran[-1] == ["docker", "exec", "clab-w-r1", "ip", "link", "set", "dev", "eth1", "down"]  # IOL's kernel name
+    # A host loses its routes with a shut interface: kept, and put back on no shut
+    assert ws.whatif("w.clab.yml", "link-down", "h", "eth1") == "h:eth1 shut"
     assert ws.whatif("w.clab.yml", "link-up", "h", "eth1") == "h:eth1 up again"
+    assert ran[-1] == ["docker", "exec", "clab-w-h", "ip", "route", "replace", "default", "via", "10.0.0.1", "dev", "eth1"]
+    assert ws.whatif("w.clab.yml", "link-up", "h", "eth1") == "h:eth1 up again"  # nothing kept: nothing replaced
+    assert ran[-1][-1] == "up"
     assert ws.whatif("w.clab.yml", "freeze", "h") == "h frozen" and ran[-1] == ["docker", "pause", "clab-w-h"]
     assert ws.whatif("w.clab.yml", "resume", "h") == "h resumed" and ran[-1] == ["docker", "unpause", "clab-w-h"]
     for args, error in [(("explode", "h"), "action must be"), (("link-down", "h", "eth9"), "no link on 'eth9'"),

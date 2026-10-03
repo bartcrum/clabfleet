@@ -44,6 +44,8 @@ from ..topology import (
 
 logger = logging.getLogger(__name__)
 
+LINUX_KINDS = {"linux"}  # kinds whose routes are the kernel's own (no routing daemon)
+
 TOPOLOGY_SUFFIXES = (".clab.yml", ".clab.yaml")
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox"}
 MAX_SCAN_DEPTH = 5
@@ -182,6 +184,7 @@ class Workspace:
         self.live = LiveCache(LIVE_INTERVAL)
         self.protocols = LiveCache(PROTOCOL_INTERVAL)
         self.events = EventLog()  # changes between live reads, for the timeline
+        self._shut_routes: dict[tuple, tuple[str, list[str]]] = {}  # what-if: routes to put back
         self._live_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="live")
         self._last_runtime: Optional[tuple[float, list[HostState]]] = None
         self._runtime_lock = threading.Lock()
@@ -380,15 +383,37 @@ class Workspace:
             state = "down" if action == "link-down" else "up"
             candidates, _ = linux_iface_names(container.get("kind", ""), iface)
             errors = []
+            key = (topo.name, node, iface)
             for linux in candidates:  # the kernel name, then the topology's own
+                if state == "down" and container.get("kind") in LINUX_KINDS:
+                    # The kernel drops a down interface's routes (a host's default
+                    # route): keep them to put back on no shut
+                    routes = run_docker(runner, ["docker", "exec", name, "ip", "-4", "route", "show",
+                                                 "dev", linux], host.sudo)
+                    if routes.exit_code == 0:
+                        kept = [r.strip() for r in routes.stdout.splitlines() if " via " in f" {r} "]
+                        if kept:
+                            self._shut_routes[key] = (linux, kept)
                 res = run_docker(runner, ["docker", "exec", name, "ip", "link", "set", "dev", linux, state],
                                  host.sudo)
                 if res.exit_code == 0:
+                    if state == "up":
+                        self._restore_routes(runner, host, name, key)
                     return f"{node}:{iface} {'shut' if state == 'down' else 'up again'}"
                 errors.append((res.stderr or res.stdout).strip()[-200:])
             raise RuntimeError(f"ip link set {state} failed: {'; '.join(errors)}")
         finally:
             self.invalidate_runtime()
+
+    def _restore_routes(self, runner, host, container: str, key: tuple) -> None:
+        """Put back the routes a shut interface lost (see ``whatif``)."""
+        linux, routes = self._shut_routes.pop(key, (None, []))
+        for route in routes:
+            res = run_docker(runner, ["docker", "exec", container, "ip", "route", "replace",
+                                      *route.split(), "dev", linux], host.sudo)
+            if res.exit_code != 0:
+                logger.warning("Could not restore route '%s' on %s: %s", route, container,
+                               (res.stderr or res.stdout).strip()[-200:])
 
     def running_diff(self, topo_id: str, node: str) -> dict:
         """A node's running config, read now, against its startup config.
