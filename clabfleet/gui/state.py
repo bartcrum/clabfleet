@@ -22,12 +22,12 @@ from ..capture import sweep_helpers
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
 from ..livestate import LiveCache, link_states, probe_ifaces, probe_stats
-from ..nodes import InspectError, access_modes, inspect_all, parse_inspect
+from ..nodes import InspectError, access_modes, inspect_all, parse_inspect, run_docker
 from ..readiness import ReadinessCache, check_ready
 from ..execute import ssh_exec
 from ..routing import routing_view
-from ..routing.live import collect as collect_protocols, overlay as protocol_overlay
-from ..snapshots import Snapshotter, diff_lab
+from ..routing.live import collect as collect_protocols, family as cli_family, overlay as protocol_overlay
+from ..snapshots import Snapshotter, diff_lab, startup_config, unified_diff
 from ..validate import validate_text
 from .editing import EditConflict, apply_graph, set_positions, text_hash, write_if_unchanged
 from ..runner import Runner
@@ -327,11 +327,67 @@ class Workspace:
         return result
 
     def node_diff(self, topo_id: str, node: str, against: str) -> dict:
-        """One node's config in the latest snapshot against ``previous`` or ``startup``."""
+        """One node's config in the latest snapshot against ``previous`` or
+        ``startup``; or with ``running``, its running config read now against
+        its startup-config (for drift, nothing saved first)."""
+        if against == "running":
+            return self.running_diff(topo_id, node)
         if against not in ("previous", "startup"):
-            raise ValueError("against must be 'previous' or 'startup'")
+            raise ValueError("against must be 'previous', 'startup' or 'running'")
         out = diff_lab(self.topology_path(topo_id), nodes=[node], against=against)
         return {**out, **out["nodes"][0]}
+
+    def running_diff(self, topo_id: str, node: str) -> dict:
+        """A node's running config, read now, against its startup config.
+
+        On cEOS this is EOS's own ``show running-config diffs``: both sides
+        in its canonical form, against the startup-config on the node's
+        flash (what it booted with, or what Save configs last wrote). Other
+        kinds get a text diff with the topology's startup-config, which can
+        show lines the OS only writes differently.
+        """
+        topo = load_topology(self.topology_path(topo_id))
+        if node not in topo.nodes:
+            raise ValueError(f"No node '{node}' in {topo_id}")
+        kind = topo.effective_node(node)["kind"] or ""
+        out = {"lab": topo.name, "node": node, "from": "running-config"}
+        if cli_family(kind) == "eos":
+            text = self.running_config(topo.name, node, "show running-config diffs")
+            diff = "".join(line + "\n" for line in text.splitlines()
+                           if line.strip() and not line.startswith("> "))
+            return {**out, "against": "startup-config on the node",
+                    "status": "changed" if diff else "same", "diff": diff}
+        startup, why = startup_config(topo, node)
+        if startup is None:
+            return {**out, "against": "startup-config", "status": "skipped", "reason": why, "diff": ""}
+        running = self.running_config(topo.name, node)
+        diff = unified_diff(startup, running, f"{node} startup-config", f"{node} running-config", kind)
+        return {**out, "against": "startup-config (text diff)",
+                "status": "changed" if diff else "same", "diff": diff}
+
+    def running_config(self, lab: str, node: str, command: str = "show running-config") -> str:
+        """``command`` (``show running-config``) on a running node: through
+        ``docker exec`` on cEOS, over SSH on IOS kinds. ValueError for others."""
+        container = next((c for hs in self._recent_runtime() for c in hs.containers
+                          if c["lab"] == lab and c["node"] == node), None)
+        if not container or container.get("state") != "running":
+            raise ValueError(f"{node} is not running")
+        fam = cli_family(container.get("kind", ""))
+        host = self.host(container["host"])
+        runner = self.runner(host)
+        if fam == "eos":
+            res = run_docker(runner, ["docker", "exec", container["container"], "Cli", "-p", "15",
+                                      "-c", command], host.sudo)
+            if res.exit_code != 0:
+                raise RuntimeError((res.stderr or res.stdout).strip()[-300:] or "show running-config failed")
+            return res.stdout
+        if fam == "ios":
+            code, text = ssh_exec(runner, container["kind"], container["ipv4"], command,
+                                  timeout=PROTOCOL_SSH_TIMEOUT)
+            if code != 0:
+                raise RuntimeError(text.strip()[-300:] or "show running-config failed")
+            return text
+        raise ValueError(f"Reading the running config of kind '{container.get('kind')}' is not supported")
 
     # --- editing ---
 

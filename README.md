@@ -421,7 +421,18 @@ an operator.
   ask in a dialog that says what will be removed; labs of 10 or more
   nodes ask you to type the lab name.
 - **Sidebar:** every `*.clab.yml` under the current directory (or each
-  `--dir`), with live state, plus any other labs running on your hosts
+  `--dir`), with live state, plus any other labs running on your hosts.
+  Filter it with the box at the top; deployed labs come first, with a ring
+  showing how many nodes run, and labs are grouped by folder when there
+  are several. « collapses it to a rail of state dots.
+- **Command palette:** Ctrl+K (⌘K) or the Ctrl K button: type to jump to
+  a lab, tab or node, open a node's CLI, shell, logs or config drift, run
+  Deploy, Save configs and the other lab actions, switch the theme, and
+  more. Arrow keys and Enter pick.
+- **Freshness:** live views say how old their data is ("live: read 4 s
+  ago"). When it stops updating (a host or the GUI's server not
+  answering), the label says so and the live colours turn grey instead of
+  passing for the present.
 - **Diagram:** nodes coloured by state (amber while booting), interface names on links, the host
   each node runs on (multi-host), and cross-host VXLAN links highlighted.
   Drag nodes to arrange them, scroll to zoom, double-click a node to open
@@ -514,6 +525,11 @@ an operator.
   took, and the time each host took. The last 50 jobs are kept in
   `.clabfleet/jobs/` under the first workspace directory, so they survive
   a restart of the GUI.
+- **Drift:** problems that come from a running config differing from the
+  startup config (a session up that the startup config lacks, a neighbour
+  not in it) offer **Config diff**, which reads the node's running config
+  now and diffs it against its startup config (on cEOS with EOS's own
+  `show running-config diffs`), and **Save configs** to keep the change.
 - **Config diff:** the inspector's button opens a tab with the node's
   config in the latest snapshot against its `startup-config` or the
   previous snapshot

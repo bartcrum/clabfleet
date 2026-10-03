@@ -980,7 +980,9 @@ async def _save_positions(request):
 
 @operator_only  # configs hold password hashes and keys
 async def _node_diff(request):
-    """?node=X&against=previous|startup: the node's latest snapshot diff."""
+    """?node=X&against=previous|startup|running: the node's latest snapshot
+    against the one before or its startup-config, or its running config
+    (read now) against its startup-config."""
     ws: Workspace = request.app[WORKSPACE]
     try:
         result = await asyncio.to_thread(
@@ -990,6 +992,8 @@ async def _node_diff(request):
         raise web.HTTPNotFound(text=str(exc))
     except (SnapshotError, ValueError) as exc:  # no snapshots yet, unknown node
         raise web.HTTPBadRequest(text=str(exc))
+    except Exception as exc:  # noqa: BLE001 - reading the node failed (SSH, docker)
+        raise web.HTTPBadGateway(text=f"Could not read the running config: {exc}")
     return web.json_response(result)
 
 

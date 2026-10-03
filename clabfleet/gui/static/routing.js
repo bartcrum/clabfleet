@@ -9,7 +9,7 @@
 // Uses app.js globals: S, $, h, s, api, toast, NODE_W, NODE_H, PSEUDO_W,
 // PSEUDO_H, graphModel, ensurePositions, savePositions, truncate, ifaceLabel,
 // nodeRuntime, nodeState, canOperate, openTerminal, nodeFace, TEXT_X,
-// applyView, zoomAt, setupZoom, setupNodeKeys, markKb, announce.
+// applyView, zoomAt, setupZoom, setupNodeKeys, markKb, announce, freshness.
 // ---------------------------------------------------------------------------
 
 const RT = {
@@ -546,10 +546,12 @@ function rtRenderBar() {
   status.hidden = !rtLiveOn();
   if (rtLiveOn()) {
     const errs = L ? Object.keys(L.errors || {}).length + Object.values(L.nodes || {}).filter((n) => Object.keys(n.errors || {}).length).length : 0;
-    status.textContent = !L ? "reading the nodes…"
-      : L.error ? `could not read: ${L.error}`
-      : `read ${Math.max(0, Math.round(Date.now() / 1000 - L.updated))}s ago${errs ? ` · ${errs} not readable` : ""}`;
-    status.classList.toggle("warn", !!(L && (L.error || errs)));
+    const f = freshness(RT.live?.id === rtTopoId() ? RT.live : null);
+    status.textContent = L?.error ? `could not read: ${L.error}` : `${f.text}${errs ? ` · ${errs} not readable` : ""}`;
+    status.classList.toggle("warn", !!(L && (L.error || errs)) || f.stale);
+    $("#routing").classList.toggle("stale", f.stale);
+  } else {
+    $("#routing").classList.remove("stale");
   }
   const protos = $("#routing-protos");
   protos.replaceChildren(...["ospf", "bgp", "evpn"].map((p) => h("button", {
@@ -639,7 +641,8 @@ function rtHealth() {
       live.push({ sev: st.state === "partial" ? "warn" : "error", proto, tag,
                   msg: `${a} ↔ ${b} is ${RT_LIVE_TEXT[st.state]}${st.detail ? `: ${st.detail}` : ""}`, go });
     }
-    if (st.drift) live.push({ sev: "warn", proto, tag, msg: st.drift, go });
+    // Drift: the running config differs from the startup config on b's side
+    if (st.drift) live.push({ sev: "warn", proto, tag, msg: st.drift, go, drift: b });
   }
   for (const kind of ["ospf", "bgp", "evpn"]) {
     (L.extra?.[kind] || []).forEach((x, i) => {
@@ -647,7 +650,7 @@ function rtHealth() {
       live.push({
         sev: "warn", proto, tag: kind.toUpperCase(),
         msg: `${x.node} runs a ${kind.toUpperCase()} neighbor ${x.ip}${x.peer ? ` (${x.peer})` : ""} that is not in its startup config`,
-        go: () => rtFocus(proto, { type: "edge", id: `extra-${kind}-${i}` }, true),
+        go: () => rtFocus(proto, { type: "edge", id: `extra-${kind}-${i}` }, true), drift: x.node,
       });
     });
   }
@@ -811,6 +814,7 @@ function rtLiveEdgeParts(id) {
     st.detail ? h("p", { class: "small muted" }, st.detail) : null,
     rtDl(rows),
     st.drift ? h("p", { class: "small rt-drift" }, st.drift) : null,
+    st.drift ? driftActions(e.b) : null,
   ];
 }
 
@@ -843,6 +847,7 @@ function rtEdgeCard(id) {
               ["Router ID", x.router_id], ["Interface", x.iface], ["State", x.detail || x.state],
               ["Up", rtUptime(x.uptime)], ["Prefixes", x.pfx_rcvd]]),
         h("p", { class: "small muted" }, "Configured on the running node (for example on the CLI) but not in its startup-config. Save configs to keep it."),
+        driftActions(x.node),
       ],
     };
   }

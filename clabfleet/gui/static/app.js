@@ -301,9 +301,15 @@ async function refreshState() {
   try {
     S.state = await api("/api/state");
   } catch (e) {
-    toast(`Could not load state: ${e.message}`);
+    // D3: a banner while the server does not answer, instead of a toast each time
+    if ($("#offline").hidden) announce("Cannot reach the clabfleet server");
+    $("#offline").hidden = false;
+    document.body.classList.add("server-offline");
     return;
   }
+  if (!$("#offline").hidden) announce("Connected to the clabfleet server again");
+  $("#offline").hidden = true;
+  document.body.classList.remove("server-offline");
   // Jobs that finished in the background (the viewed one reports itself)
   for (const j of S.state.jobs) {
     if (before.get(j.id) === "running" && j.status !== "running" && j.id !== S.viewJob) {
@@ -368,6 +374,38 @@ async function refreshLive() {
   if (!data.updated) S.liveRetry = setTimeout(refreshLive, 2500);
 }
 
+// How fresh live data is (D3), the same way for every live view: stale once
+// six refresh intervals (at least 30 s) passed without a new read
+function freshness(data) {
+  if (!data?.updated) return { text: "reading the nodes…", stale: false };
+  const age = Math.max(0, Date.now() / 1000 - data.updated);
+  const stale = age > Math.max(30, 6 * (data.interval || 5));
+  return { stale, text: `${stale ? "stale: last read" : "live: read"} ${fmtDuration(age)} ago` };
+}
+
+// Hosts of the open lab that do not answer: its live state cannot be fresh
+function unreachableHosts() {
+  const lab = currentLabName();
+  const used = new Set(labContainers(lab).map((c) => c.host));
+  return (S.state?.runtime || []).filter((r) => !r.ok && used.has(r.host)).map((r) => r.host);
+}
+
+// The Diagram's freshness label and stale look
+function renderFreshness() {
+  const label = $("#diagram-fresh"), svg = $("#diagram");
+  const deployed = S.selected?.type === "topo" && S.detail && labStatus(S.detail.name).deployed;
+  label.hidden = !deployed;
+  if (!deployed) { svg.classList.remove("stale"); return; }
+  const f = freshness(liveData());
+  const down = unreachableHosts();
+  const offline = document.body.classList.contains("server-offline");
+  const stale = f.stale || down.length > 0 || offline;
+  label.textContent = offline ? "server not answering: showing the last state"
+    : down.length ? `${down.join(", ")} not answering: showing the last state` : f.text;
+  label.classList.toggle("stale", stale);
+  svg.classList.toggle("stale", stale);
+}
+
 function liveData() {
   return S.live && S.selected?.type === "topo" && S.live.id === S.selected.id ? S.live : null;
 }
@@ -396,26 +434,51 @@ function fmtMem(mb) {
 // Sidebar
 // ---------------------------------------------------------------------------
 
+// A ring filling up as nodes run (B4): reads at a glance even collapsed
+function progressRing(running, total, state) {
+  const r = 6.5, c = 2 * Math.PI * r, part = total ? Math.min(running / total, 1) : 0;
+  return s("svg", { class: `ring ${state}`, width: 18, height: 18, viewBox: "0 0 18 18", "aria-hidden": "true" },
+    s("circle", { class: "track", cx: 9, cy: 9, r }),
+    s("circle", { class: "fill", cx: 9, cy: 9, r, "stroke-dasharray": `${part * c} ${c}`,
+                  transform: "rotate(-90 9 9)" }));
+}
+
+// The sidebar's topologies (B4): filtered by the search box, deployed labs
+// first, grouped by folder when the workspace has subfolders
 function renderSidebar() {
   const topos = S.state.topologies;
   const topoNames = new Set(topos.map((t) => t.name));
-
-  $("#topo-list").replaceChildren(...topos.map((t) => {
-    const st = labStatus(t.name, t.nodes);
+  const words = ($("#topo-search")?.value || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = topos.filter((t) => words.every((w) => `${t.name} ${t.id}`.toLowerCase().includes(w)))
+    .map((t) => ({ t, st: labStatus(t.name, t.nodes) }))
+    .sort((a, b) => (b.st.deployed > 0) - (a.st.deployed > 0) || naturalCmp(a.t.id, b.t.id));
+  const folder = (id) => (id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "");
+  const grouped = new Set(shown.map((x) => folder(x.t.id))).size > 1;
+  const items = [];
+  let group = null;
+  for (const { t, st } of grouped ? [...shown].sort((a, b) => naturalCmp(folder(a.t.id), folder(b.t.id))) : shown) {
+    if (grouped && folder(t.id) !== group) {
+      group = folder(t.id);
+      items.push(h("li", { class: "lab-group" }, group || "(top level)"));
+    }
     const active = S.selected?.type === "topo" && S.selected.id === t.id;
     const busy = !!runningJob(t.id);
-    return h("li", {},
+    const state = busy ? "busy" : t.error ? "error" : st.state;
+    items.push(h("li", {},
       h("button", {
         class: `lab-item${active ? " active" : ""}`,
         onclick: () => selectTopology(t.id),
-        title: t.error || t.path,
+        title: `${t.name}\n${t.error || t.path}${st.deployed ? `\n${st.running}/${t.nodes} running` : ""}`,
       },
-        h("span", { class: `dot ${busy ? "busy" : t.error ? "error" : st.state}` }),
+        h("span", { class: `dot ${state}` }),
         h("span", { class: "txt" },
           h("span", { class: "title" }, t.name),
           h("span", { class: "sub" }, t.id)),
-        st.deployed ? h("span", { class: "count" }, `${st.running}/${t.nodes}`) : null));
-  }));
+        st.deployed ? h("span", { class: "count", "aria-label": `${st.running} of ${t.nodes} running` },
+          progressRing(st.running, t.nodes, st.state), `${st.running}/${t.nodes}`) : null)));
+  }
+  if (!shown.length) items.push(h("li", { class: "lab-none muted small" }, topos.length ? "No lab matches." : "No topologies."));
+  $("#topo-list").replaceChildren(...items);
 
   renderWelcome();
   const others = [...new Set(allContainers().map((c) => c.lab))].filter((l) => !topoNames.has(l));
@@ -929,9 +992,23 @@ function healthItems() {
   }
 
   if (isTopo) {
-    for (const p of window.Routing?.health() || []) add(p.sev, "routing", p.msg, p.go, p.tag);
+    for (const p of window.Routing?.health() || []) {
+      add(p.sev, "routing", p.msg, p.go, p.tag);
+      items[items.length - 1].drift = p.drift;
+    }
   }
   return items.sort((a, b) => HEALTH_SEV_ORDER[a.sev] - HEALTH_SEV_ORDER[b.sev]);
+}
+
+// Drift (feature 4): the running config differs from the startup config.
+// One click to see how, one to keep it.
+function driftActions(node) {
+  if (!canOperate() || S.selected?.type !== "topo" || !node || node.startsWith("ext:")) return null;
+  return h("span", { class: "drift-actions" },
+    h("button", { class: "btn small", title: `Diff ${node}'s running config, read now, against its startup-config`,
+                  onclick: () => openDiff(S.selected.id, node, "running") }, "Config diff"),
+    h("button", { class: "btn small", title: "Save every node's running config into the lab directory",
+                  disabled: !!runningJob(S.selected.id), onclick: () => runAction("save") }, "Save configs"));
 }
 
 // Select a node on the Diagram (or the Nodes table for labs without a file)
@@ -1014,11 +1091,12 @@ function renderHealth(items = healthItems()) {
     list.replaceChildren(h("li", { class: "health-empty" },
       items.length ? "Nothing matches this filter." : `No problems found in ${currentLabName()}.`));
   } else {
-    list.replaceChildren(...shown.map((i) => h("li", {},
+    list.replaceChildren(...shown.map((i) => h("li", { class: "health-item" },
       h("button", { class: `health-row ${i.sev}`, onclick: i.go || null, disabled: !i.go },
         h("span", { class: `sev ${i.sev}`, "aria-label": { error: "Error", warn: "Warning", info: "Note" }[i.sev] }),
         h("span", { class: "tag" }, i.tag),
-        h("span", { class: "msg" }, i.msg)))));
+        h("span", { class: "msg" }, i.msg)),
+      i.drift ? driftActions(i.drift) : null)));
   }
   return c;
 }
@@ -1422,6 +1500,7 @@ function renderDiagram(fit) {
   svg.replaceChildren(g);
   applyView(svg, "viewport", S.view);
   markKb(svg);
+  renderFreshness();
   refocusDiagram();
   if (fit) fitDiagram();
 }
@@ -2153,11 +2232,13 @@ function openTermTab(label, wsPath, params, opts = {}) {
 }
 
 // A node's latest snapshot against its startup-config or the snapshot before
-function openDiff(topoId, node) {
+function openDiff(topoId, node, against = "startup") {
   const id = `diff-${++termSeq}`;
-  const select = h("select", { class: "small", "aria-label": "Compare with" },
-    h("option", { value: "startup" }, "vs startup-config"),
-    h("option", { value: "previous" }, "vs previous snapshot"));
+  const select = h("select", { class: "small", "aria-label": "Compare" },
+    h("option", { value: "startup" }, "latest snapshot vs startup-config"),
+    h("option", { value: "previous" }, "latest snapshot vs previous snapshot"),
+    h("option", { value: "running" }, "running config now vs its startup config"));
+  select.value = against;
   const meta = h("span", { class: "muted small mono" });
   const pre = h("pre", { class: "activity mono" }, "Loading…");
   const pane = h("div", { class: "pane activity-pane", "data-pane": id },
@@ -2179,7 +2260,11 @@ function openDiff(topoId, node) {
       const d = await api(`/api/diff/${topoPath(topoId)}?${qs}`);
       meta.textContent = `${d.from} vs ${d.against}`;
       if (d.status === "skipped") { pre.textContent = `Not compared: ${d.reason}`; return; }
-      if (!d.diff) { pre.textContent = "No differences."; return; }
+      if (!d.diff) {
+        pre.textContent = select.value === "running" ? "No drift: the running config matches the startup config."
+          : "No differences.";
+        return;
+      }
       pre.replaceChildren(...d.diff.split("\n").map((line) => {
         const cls = /^(\+\+\+|---)/.test(line) ? "info" : line.startsWith("+") ? "ok" : line.startsWith("-") ? "err" : line.startsWith("@@") ? "info" : null;
         return cls ? h("span", { class: cls }, line + "\n") : line + "\n";
@@ -2533,6 +2618,19 @@ function setup() {
   setupLabMenu();
   $("#lab-path").addEventListener("click", copyLabPath);
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
+  $("#topo-search").addEventListener("input", () => renderSidebar());
+  const side = $("#sidebar"), toggle = $("#side-toggle");
+  const setCollapsed = (on) => {
+    side.classList.toggle("collapsed", on);
+    toggle.textContent = on ? "»" : "«";
+    toggle.title = on ? "Expand the sidebar" : "Collapse the sidebar";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-expanded", String(!on));
+    try { localStorage.setItem("clab-sidebar", on ? "collapsed" : ""); } catch { /* private mode */ }
+    requestAnimationFrame(() => { renderDiagram(false); window.Routing?.resize(); });
+  };
+  try { if (localStorage.getItem("clab-sidebar") === "collapsed") setCollapsed(true); } catch { /* private mode */ }
+  toggle.addEventListener("click", () => setCollapsed(!side.classList.contains("collapsed")));
   applyTheme(currentTheme);
   $("#theme").addEventListener("click", () => {
     const order = Object.keys(THEMES);
@@ -2561,7 +2659,7 @@ function setup() {
   refreshHosts();
   $("#job-select").addEventListener("change", (e) => trackJob(e.target.value, false));
   setInterval(() => { if (!document.hidden) refreshState(); }, 5000);
-  setInterval(() => { if (!document.hidden) renderJobMeta(); }, 1000);
+  setInterval(() => { if (!document.hidden) { renderJobMeta(); renderFreshness(); } }, 1000);
   setInterval(() => { if (!document.hidden) refreshHosts(); }, 30000);
 }
 

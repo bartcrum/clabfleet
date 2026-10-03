@@ -49,17 +49,27 @@
     <button id="password" class="btn ghost small" hidden title="Change your password"><svg class="ico" aria-hidden="true"><use href="#i-key"/></svg>Password</button>
     <button id="logout" class="btn ghost small" hidden><svg class="ico" aria-hidden="true"><use href="#i-logout"/></svg>Log out</button>
     <button id="theme" class="btn ghost small" title="Colour theme: follow the system, light or dark"></button>
+    <button id="palette-open" class="btn ghost small" title="Commands: jump to a lab, node or tab, open terminals, run actions (Ctrl+K)"><kbd>Ctrl K</kbd></button>
     <button id="refresh" class="btn ghost small" title="Refresh now"><svg class="ico" aria-hidden="true"><use href="#i-reload"/></svg>Refresh</button>
   </header>
 
+  <!-- D3: the GUI's own server stopped answering -->
+  <div id="offline" class="offline" role="alert" hidden>Cannot reach the clabfleet server; retrying.
+    What you see is the last state it sent.</div>
+
   <div class="layout">
-    <aside class="sidebar">
+    <aside id="sidebar" class="sidebar">
+      <button id="side-toggle" class="icon-btn side-toggle" title="Collapse the sidebar" aria-label="Collapse the sidebar" aria-expanded="true">«</button>
       <section>
+        <input id="topo-search" class="side-search" type="search" placeholder="Filter labs" aria-label="Filter labs"
+               autocomplete="off" spellcheck="false">
         <div class="side-head">
           <h2>Topologies</h2>
           <button id="new-lab" class="btn ghost small operator-only" title="Draw a new lab, or start from a template"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>New lab</button>
         </div>
-        <ul id="topo-list" class="lab-list"></ul>
+        <ul id="topo-list" class="lab-list">
+          <li class="skeleton"></li><li class="skeleton"></li><li class="skeleton"></li>
+        </ul>
       </section>
       <section id="others-section" hidden>
         <h2>Other running labs</h2>
@@ -77,7 +87,7 @@
           <li><b>Work with it.</b> <span>Double-click a node for its CLI, see routing live, capture packets on a link.</span></li>
         </ol>
         <h2>Topologies</h2>
-        <div id="welcome-labs" class="cards"></div>
+        <div id="welcome-labs" class="cards"><div class="card skeleton"></div><div class="card skeleton"></div></div>
         <h2 class="operator-only">Start a new lab</h2>
         <div id="welcome-new" class="cards operator-only"></div>
       </div>
@@ -147,6 +157,7 @@
                 <button class="btn ghost small" data-zoom="in" title="Zoom in (+)" aria-label="Zoom in"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg></button>
                 <button id="fit" class="btn ghost small" data-zoom="fit" title="Fit the lab in view (0)"><svg class="ico" aria-hidden="true"><use href="#i-fit"/></svg>Fit</button>
               </div>
+              <span id="diagram-fresh" class="fresh" hidden></span>
               <div id="diagram-error" class="diagram-error" hidden></div>
             </section>
             <section id="view-nodes" class="view" hidden>
@@ -352,6 +363,13 @@
     </form>
   </dialog>
 
+  <!-- Command palette (feature 7) -->
+  <dialog id="palette" class="palette" aria-label="Commands">
+    <input id="palette-input" class="sans" role="combobox" aria-expanded="true" aria-controls="palette-list"
+           aria-autocomplete="list" placeholder="Type a lab, node, tab or action…" autocomplete="off" spellcheck="false">
+    <ul id="palette-list" class="palette-list" role="listbox" aria-label="Commands"></ul>
+  </dialog>
+
   <dialog id="confirm" class="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-body">
     <form method="dialog">
       <h2 id="confirm-title"></h2>
@@ -376,5 +394,6 @@
   <script src="/static/app.js"></script>
   <script src="/static/routing.js"></script>
   <script src="/static/builder.js"></script>
+  <script src="/static/palette.js"></script>
 </body>
 </html>

@@ -25,4 +25,7 @@ jobs:
       - name: Install
         run: pip install -e ".[gui,dev]"
       - name: Test
+        # The GUI's browser smoke test must run here (the runners have Chrome)
+        env:
+          CLABFLEET_REQUIRE_BROWSER: "1"
         run: pytest -v
