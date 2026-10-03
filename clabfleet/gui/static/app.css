@@ -1079,7 +1079,7 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 .diagram .cable.peer { stroke: var(--cable-peer); }
 .diagram .cable.access { stroke: var(--cable-access); }
 .diagram .cable.special { stroke: var(--cable-special); stroke-dasharray: 2 5; }
-.diagram .cable.down { stroke-dasharray: 7 5; }
+.diagram .cable.down { stroke: var(--danger); stroke-dasharray: 7 5; }
 .diagram .cable.selected { stroke: var(--select); stroke-width: 4; }
 .diagram .boot { fill: var(--rack-jack); }
 .diagram .flow { fill: none; stroke: #fff; stroke-opacity: .85; stroke-width: 1.5; stroke-linecap: round;
