@@ -124,6 +124,8 @@ async function startEditing() {
   renderPalette();
   S.selectedLink = null;
   showView("diagram");
+  // From the rack view the drawing changes to the logical one: frame it
+  if (window.Racks?.on) renderDiagram(true);
 }
 
 function stopEditing() {
@@ -136,7 +138,7 @@ function stopEditing() {
   $("#edit-topo").hidden = false;
   S.selectedLink = null;
   if (S.selectedNode && !S.detail?.nodes?.some((n) => n.name === S.selectedNode)) S.selectedNode = null;
-  renderDiagram(false);
+  renderDiagram(!!window.Racks?.on);  // back to the racks: frame them again
   renderNodeCard();
 }
 
