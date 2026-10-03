@@ -138,6 +138,12 @@ def test_captures_are_operator_only_and_audited(ws, tmp_path, monkeypatch):
             await client.post("/login", json={"token": op_token})
             resp = await client.get(url)
             assert resp.status == 200 and await resp.read() == b"\xd4\xc3\xb2\xa1"
+            # capture_finished is written after the last byte went out: wait
+            # for it before the server shuts down
+            for _ in range(250):
+                if "capture_finished" in audit_path.read_text():
+                    break
+                await asyncio.sleep(0.02)
 
     asyncio.run(scenario())
     events = [json.loads(line) for line in audit_path.read_text().splitlines()]

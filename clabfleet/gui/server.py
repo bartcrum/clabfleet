@@ -1243,11 +1243,18 @@ async def _run_terminal(request, ws_resp, entry, mode, cols, rows, read_only):
     try:
         await _serve_session(request, ws_resp, session, entry, read_only)
     finally:
-        session.close()
-        await session.wait_closed()
-        audit(request, "terminal_closed", **where, seconds=round(time.monotonic() - opened, 1),
-              exit_code=session.exit_code)
+        await asyncio.shield(_close_terminal(request, session, where, opened))
     return ws_resp
+
+
+async def _close_terminal(request, session, where: dict, opened: float) -> None:
+    """Close a terminal, wait for its process and record it. Shielded: when
+    the browser closes the connection while the process is being reaped,
+    aiohttp cancels the handler, and the record must still be written."""
+    session.close()
+    await session.wait_closed()
+    audit(request, "terminal_closed", **where, seconds=round(time.monotonic() - opened, 1),
+          exit_code=session.exit_code)
 
 
 # ----------------------------------------------------------------------
