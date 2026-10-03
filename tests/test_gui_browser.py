@@ -33,7 +33,9 @@ from clabfleet.gui import server  # noqa: E402
 from clabfleet.gui.state import HostState, Workspace  # noqa: E402
 
 TOPOLOGIES = Path(__file__).resolve().parent.parent / "topologies"
-BROWSERS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome")
+# Google Chrome first: on Ubuntu (and GitHub's runners) /usr/bin/chromium
+# can be a stub for a snap that is not installed, which never starts
+BROWSERS = ("google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser")
 
 
 def _browser():
@@ -134,14 +136,17 @@ def test_gui_pages_load_without_errors(tmp_path, monkeypatch):
         await srv.start_server()
         port = _free_port()
         profile = tempfile.mkdtemp(prefix="clabfleet-browser-")
+        log = open(os.path.join(profile, "browser.log"), "w+")
         proc = subprocess.Popen(
             [browser, "--headless=new", f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
              "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--no-sandbox",
              "--window-size=1440,900", "about:blank"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=log, stderr=subprocess.STDOUT)
         try:
             async with aiohttp.ClientSession() as http:
-                for _ in range(100):
+                for _ in range(200):
+                    if proc.poll() is not None:
+                        break
                     try:
                         async with http.get(f"http://127.0.0.1:{port}/json") as resp:
                             tabs = await resp.json()
@@ -149,7 +154,11 @@ def test_gui_pages_load_without_errors(tmp_path, monkeypatch):
                     except aiohttp.ClientError:
                         await asyncio.sleep(0.1)
                 else:
-                    raise AssertionError("Chrome's DevTools did not come up")
+                    tabs = None
+                if proc.poll() is not None or tabs is None:
+                    log.seek(0)
+                    raise AssertionError(f"{browser} did not start its DevTools "
+                                         f"(exit {proc.poll()}):\n{log.read()[-2000:]}")
                 tab = next(t for t in tabs if t["type"] == "page")
                 async with http.ws_connect(tab["webSocketDebuggerUrl"], max_msg_size=0) as sock:
                     page = Page(sock)
@@ -160,7 +169,12 @@ def test_gui_pages_load_without_errors(tmp_path, monkeypatch):
                     assert page.errors == [], "\n".join(page.errors)
         finally:
             proc.terminate()
-            proc.wait(10)
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            log.close()
             shutil.rmtree(profile, ignore_errors=True)
             await srv.close()
 

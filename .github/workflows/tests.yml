@@ -28,4 +28,5 @@ jobs:
         # The GUI's browser smoke test must run here (the runners have Chrome)
         env:
           CLABFLEET_REQUIRE_BROWSER: "1"
+          CLABFLEET_BROWSER: google-chrome
         run: pytest -v
