@@ -363,3 +363,66 @@ def test_apply_graph_renames_the_hostname_and_fills_missing_images():
     assert "startup-config: |" in out
     assert nodes["H2"]["image"] == "alpine:3.20"   # linux has no image under kinds here
     assert "image" not in nodes["R2"]              # arista_ceos has one under kinds
+
+
+# --- drift: running config against the startup config ------------------------------
+
+DRIFT_TOPO = """\
+name: d
+topology:
+  nodes:
+    sw: {kind: arista_ceos, image: ceos}
+    r1:
+      kind: cisco_iol
+      image: iol
+      startup-config: |
+        hostname r1
+        interface Ethernet0/1
+         ip address 10.0.0.1 255.255.255.254
+    h: {kind: linux, image: alpine}
+"""
+
+
+def test_running_diff(tmp_path, monkeypatch):
+    (tmp_path / "d.clab.yml").write_text(DRIFT_TOPO)
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    ws.topologies()
+    asked = []
+
+    def running_config(self, lab, node, command="show running-config"):
+        asked.append((node, command))
+        if node == "sw":
+            return "\n> show running-config diffs\n--- flash:/startup-config\n+++ system:/running-config\n" \
+                   "+interface Loopback99\n"
+        if node == "r1":
+            return "hostname r1\ninterface Ethernet0/1\n ip address 10.0.0.1 255.255.255.254\n shutdown\n"
+        raise ValueError("Reading the running config of kind 'linux' is not supported")
+
+    monkeypatch.setattr(Workspace, "running_config", running_config)
+    eos = ws.node_diff("d.clab.yml", "sw", "running")
+    # EOS compares itself, canonically; the command echo is dropped
+    assert asked[-1] == ("sw", "show running-config diffs")
+    assert eos["status"] == "changed" and eos["diff"].startswith("--- flash:/startup-config")
+    assert "> show" not in eos["diff"] and eos["against"] == "startup-config on the node"
+    ios = ws.node_diff("d.clab.yml", "r1", "running")
+    assert ios["status"] == "changed" and "+ shutdown" in ios["diff"]
+    # No startup config to compare with: said so, without asking the node
+    host = ws.node_diff("d.clab.yml", "h", "running")
+    assert host["status"] == "skipped" and "no startup-config" in host["reason"]
+    assert ("h", "show running-config") not in asked
+    with pytest.raises(ValueError, match="No node"):
+        ws.node_diff("d.clab.yml", "nope", "running")
+    with pytest.raises(ValueError, match="against must be"):
+        ws.node_diff("d.clab.yml", "sw", "yesterday")
+
+
+def test_running_config_needs_a_running_node(tmp_path, monkeypatch):
+    (tmp_path / "d.clab.yml").write_text(DRIFT_TOPO)
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    monkeypatch.setattr(Workspace, "_recent_runtime", lambda self: [
+        state.HostState("localhost", ok=True, containers=[
+            {"lab": "d", "node": "sw", "state": "exited", "kind": "arista_ceos"}])])
+    with pytest.raises(ValueError, match="sw is not running"):
+        ws.running_config("d", "sw")
+    with pytest.raises(ValueError, match="r1 is not running"):
+        ws.running_config("d", "r1")

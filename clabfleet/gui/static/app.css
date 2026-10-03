@@ -762,3 +762,74 @@ body.building #view-diagram .diagram-tools { top: 56px; }
 /* The node the keyboard is on, while its canvas has focus */
 .diagram:focus .node.kb > rect:first-of-type { stroke: var(--blue); stroke-width: 3; }
 .diagram:focus .node.kb { outline: none; }
+
+/* ---------- loading, freshness, stale (D3) ---------- */
+.offline {
+  flex: none; padding: 7px 16px; font-size: var(--fs-md); text-align: center;
+  background: color-mix(in srgb, var(--danger) 18%, var(--panel)); border-bottom: 1px solid var(--danger);
+}
+.offline[hidden] { display: none; }
+.skeleton {
+  list-style: none; height: 34px; margin: 4px 8px; border-radius: 6px;
+  background: linear-gradient(90deg, var(--panel-2), var(--line), var(--panel-2));
+  background-size: 200% 100%; animation: shimmer 1.4s linear infinite;
+}
+.card.skeleton { height: 86px; margin: 0; cursor: default; border: 0; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+.fresh {
+  position: absolute; left: 12px; bottom: 14px; z-index: 2; font-size: var(--fs-sm); color: var(--muted);
+  padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--panel) 85%, transparent);
+  border: 1px solid var(--line);
+}
+.fresh[hidden] { display: none; }
+.fresh.stale { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+/* Stale live colours fade to grey, so they do not pass for the present */
+.diagram.stale .link, .diagram.stale .rt-edge, .diagram.stale .status, .diagram.stale .cpubar {
+  filter: grayscale(1); opacity: .5;
+}
+body.building #view-diagram .fresh { display: none; }
+.health-item { display: flex; align-items: center; gap: 8px; }
+.health-item .health-row { flex: 1; min-width: 0; }
+.drift-actions { display: inline-flex; gap: 6px; flex: none; }
+.insp-card .drift-actions { margin: 4px 0 8px; }
+
+/* ---------- command palette (feature 7) ---------- */
+.palette {
+  width: min(620px, calc(100vw - 32px)); margin-top: 12vh; padding: 0; color: var(--text);
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 20px 50px rgb(0 0 0 / .4);
+}
+.palette::backdrop { background: rgb(0 0 0 / .35); }
+.palette input {
+  width: 100%; padding: 12px 14px; font: 15px var(--sans); color: var(--text);
+  background: transparent; border: 0; border-bottom: 1px solid var(--line); outline: none;
+}
+.palette-list { list-style: none; margin: 0; padding: 4px; max-height: 50vh; overflow: auto; }
+.pal-group { padding: 8px 10px 3px; font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.pal-item { display: flex; justify-content: space-between; gap: 12px; padding: 6px 10px; border-radius: 5px; cursor: pointer; font-size: var(--fs-md); }
+.pal-item.active { background: color-mix(in srgb, var(--select) 18%, transparent); }
+.pal-empty { padding: 10px; }
+kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); }
+#palette-open { display: inline-flex; align-items: center; }
+
+/* ---------- sidebar search, groups, rings, collapse (B4) ---------- */
+.sidebar { position: relative; }
+.side-search {
+  width: calc(100% - 44px); margin: 0 8px 6px; padding: 5px 8px; font: var(--fs-md) var(--sans);
+  color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+}
+.side-toggle { position: absolute; top: 14px; right: 8px; font-size: 14px; }
+.lab-group { padding: 8px 8px 2px; font-size: var(--fs-xs); color: var(--muted); font-family: var(--mono); }
+.lab-none { padding: 6px 8px; }
+.lab-item .count { display: inline-flex; align-items: center; gap: 5px; }
+.ring circle { fill: none; stroke-width: 2.5; }
+.ring .track { stroke: var(--line); }
+.ring .fill { stroke: var(--ok); stroke-linecap: round; }
+.ring.partial .fill, .ring.booting .fill { stroke: var(--warn); }
+/* Collapsed: a rail of state dots (titles carry the names) */
+.sidebar.collapsed { width: 52px; padding: 48px 4px 12px; overflow-x: hidden; }
+.sidebar.collapsed .side-search, .sidebar.collapsed h2, .sidebar.collapsed .side-head .btn,
+.sidebar.collapsed .lab-item .txt, .sidebar.collapsed .lab-item .count, .sidebar.collapsed .lab-group,
+.sidebar.collapsed .lab-none { display: none; }
+.sidebar.collapsed .lab-item { justify-content: center; padding: 9px 0; }
+.sidebar.collapsed .side-toggle { right: 14px; }

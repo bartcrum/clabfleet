@@ -128,6 +128,7 @@ Today: a flat list of topologies with path and "6/6".
 Proposal: a search box; group by folder; running labs first with a
 progress ring instead of "6/6"; a collapsed state showing only icons and
 state dots, to give the canvas more room.
+**Done** (branch `gui-batch1`): filter box, folders as groups when there are several, deployed labs first, a progress ring, and a collapsed rail of state dots.
 
 **B5. Activity as steps, not just a log — M**
 Today: the Activity panel shows raw containerlab output.
@@ -192,6 +193,7 @@ Skeleton placeholders while topologies and live state load; one
 consistent "updated 4 s ago" freshness label for every live view; a clear
 "stale" style when live data stops updating (host unreachable) instead of
 silently keeping the last colours.
+**Done** (branch `gui-batch1`): skeletons for the lab list and cards, one "live: read 4 s ago" label for the Diagram and Routing, stale after six intervals (or a silent host, or the GUI's own server gone, with a banner) with grey live colours.
 
 ### E. Accessibility and responsiveness
 
@@ -256,6 +258,7 @@ projectors for training sessions.
    of roadmap 4.2 left for later.
 4. **Drift → diff in one click — S.** A drift warning links to the config
    diff tab for that node, with Save configs next to it.
+   **Done** (branch `gui-batch1`): drift rows (Health, routing cards) get Config diff and Save configs; the diff tab gains "running config now vs its startup config" (EOS's own `show running-config diffs` on cEOS).
 
 **Live state and traffic**
 
@@ -279,6 +282,7 @@ projectors for training sessions.
     a live diagram preview before writing the file.
     **Done as a drawing builder** (branch `topology-builder`): New lab from
     blank or a template, and an Edit mode on the Diagram tab.
+   **Done** (branch `gui-batch1`).
 
 **Docs and sharing**
 
