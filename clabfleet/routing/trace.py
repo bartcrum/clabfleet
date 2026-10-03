@@ -51,10 +51,17 @@ def same_iface(kind: str, topo_iface: str, os_iface: str) -> bool:
 class Lab:
     """What the walk needs to know about the lab."""
 
-    def __init__(self, view: dict, kinds: dict[str, str], vteps: dict[str, str]):
+    def __init__(self, view: dict, kinds: dict[str, str], vteps: dict[str, list[str]],
+                 port_channels: Optional[dict[str, dict[str, list[str]]]] = None):
         self.links = [link for link in view["links"] if link["a"].get("node") and link["b"].get("node")]
         self.kinds = kinds    # node -> kind
-        self.vteps = vteps    # VTEP address -> node
+        self.vteps = vteps    # VTEP address -> its nodes (two for an MLAG pair)
+        self.port_channels = port_channels or {}  # node -> Port-channel<n> -> member interfaces
+
+    def members(self, node: str, os_iface: str) -> list[str]:
+        """The member interfaces of a port-channel (from the config), else []."""
+        from ..ifmap import canonical
+        return (self.port_channels.get(node) or {}).get(canonical(os_iface), [])
 
     def link_to(self, node: str, peer: str) -> Optional[str]:
         """``node``'s topology interface on a link to ``peer``."""
@@ -203,6 +210,17 @@ def _linux_lookup(ask, node: str, dst: str) -> tuple[str, list, str]:
     return "next", [hop], first
 
 
+def _linux_bond_members(ask, node: str, dev: str) -> list[str]:
+    """The interfaces enslaved to a Linux bond (``ip -o link show master``)."""
+    if not re.fullmatch(r"[\w.-]{1,15}", dev):
+        return []
+    try:
+        text = ask(node, f"ip -o link show master {dev}")
+    except Exception:  # noqa: BLE001 - not a bond, or no answer
+        return []
+    return [m.group(1).split("@")[0] for m in re.finditer(r"^\d+:\s+([^:\s]+):", text, re.M)]
+
+
 _IOS_VIA = re.compile(r"(\d+\.\d+\.\d+\.\d+)(?:, from [^,]+)?(?:, [^,]+ ago)?, via (\S+)")
 _IOS_CONNECTED = re.compile(r"directly connected, via (\S+)")
 
@@ -278,29 +296,44 @@ def trace(lab: Lab, ask: Callable[[str, str], str], src: str, dst: str,
                 hop.setdefault("notes", []).append(f"{dst_node}'s MAC is not learned here; it is on {direct}")
         for nxt in nexts:
             if "vtep" in nxt:
-                peer = lab.vteps.get(nxt["vtep"])
-                if not peer:
+                peers = lab.vteps.get(nxt["vtep"]) or []
+                if not peers:
                     hop.setdefault("notes", []).append(f"VTEP {nxt['vtep']} is not a lab node")
                     continue
-                if nxt.get("flood") and (peer, vrf) in seen:
-                    continue  # never flooded back
-                edges.append({"a": node, "b": peer, "a_iface": "", "b_iface": "", "overlay": True,
-                              "vni": nxt.get("vni"), "flood": bool(nxt.get("flood"))})
+                if len(peers) > 1:
+                    hop.setdefault("notes", []).append(
+                        f"VTEP {nxt['vtep']} is the MLAG pair {' + '.join(peers)}: either may take it")
                 mac = nxt.get("mac") or (known_mac if nxt.get("flood") else None)
                 if nxt.get("l2") and not mac:
                     arp = json.loads(ask(node, f"show ip arp vrf {vrf} {dst} | json"))
                     mac = next(iter(arp.get("ipV4Neighbors") or []), {}).get("hwAddress")
-                queue.append((peer, vrf, mac, mac))
+                for peer in peers:
+                    if nxt.get("flood") and (peer, vrf) in seen:
+                        continue  # never flooded back
+                    edges.append({"a": node, "b": peer, "a_iface": "", "b_iface": "", "overlay": True,
+                                  "vni": nxt.get("vni"), "flood": bool(nxt.get("flood"))})
+                    queue.append((peer, vrf, mac, mac))
                 continue
-            behind = lab.neighbour(node, nxt["iface"])
-            if not behind:
-                hop.setdefault("notes", []).append(f"{nxt['iface']} leads out of the lab")
-                continue
-            peer, my_iface, peer_iface = behind
-            edges.append({"a": node, "b": peer, "a_iface": my_iface, "b_iface": peer_iface,
-                          "overlay": False, "vni": None, "flood": False})
-            # Entering a host or a node at layer 2 starts its own lookup (new VRF)
-            queue.append((peer, None, None, nxt.get("mac")))
+            # A bundle (EOS port-channel, Linux bond) leaves on its members:
+            # each is a branch (the hash picks one per flow)
+            ifaces = [nxt["iface"]]
+            if not lab.neighbour(node, nxt["iface"]):
+                members = lab.members(node, nxt["iface"])
+                if not members and kind in LINUX:
+                    members = _linux_bond_members(ask, node, nxt["iface"])
+                if members:
+                    ifaces = members
+                    hop.setdefault("notes", []).append(f"{nxt['iface']} is a bundle of {', '.join(members)}")
+            for iface in ifaces:
+                behind = lab.neighbour(node, iface)
+                if not behind:
+                    hop.setdefault("notes", []).append(f"{iface} leads out of the lab")
+                    continue
+                peer, my_iface, peer_iface = behind
+                edges.append({"a": node, "b": peer, "a_iface": my_iface, "b_iface": peer_iface,
+                              "overlay": False, "vni": None, "flood": False})
+                # Entering a host or a node at layer 2 starts its own lookup (new VRF)
+                queue.append((peer, None, None, nxt.get("mac")))
     unique = []
     for e in edges:
         if e not in unique:

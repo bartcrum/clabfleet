@@ -240,6 +240,7 @@ Add `--strict` to fail on warnings as well.
 
 ```bash
 clabfleet routing topologies/evpn_fabric.clab.yml
+clabfleet routing topologies/evpn_mlag.clab.yml --protocol mlag
 clabfleet routing topologies/large_campus.clab.yml --protocol ospf
 clabfleet routing topologies/spine_leaf.clab.yml --json
 ```
@@ -260,7 +261,15 @@ host:
 - **EVPN:** VTEPs and their source address, L2 VNIs (VLAN) and L3 VNIs
   (VRF) with their RD and route targets, the BGP sessions that carry the
   EVPN address family, and a VXLAN tunnel between every two VTEPs that
-  share a VNI.
+  share a VNI. The two halves of an MLAG pair are one VTEP: no tunnel
+  between them, and their shared source address is not a duplicate.
+- **MLAG** (EOS `mlag configuration`): which leaves pair up (each one's
+  peer-address is the other's local interface), the peer-link and the
+  cables in it, the dual-homed ports (`mlag <n>` on a port-channel) with
+  their VLAN and the hosts behind them, and the shared VTEP. Problems: a
+  peer-address nobody has or that does not point back, different
+  domain-ids, a peer-link not cabled to the peer, an `mlag` id or VLAN on
+  one side only, and a pair whose VTEPs use different addresses.
 - **Problems:** a session configured on one side only, a `remote-as` that
   is not the peer's AS, loopback peering without `update-source` or
   `ebgp-multihop`, address families that differ between the two sides,
@@ -283,7 +292,9 @@ Every adjacency, session and VXLAN tunnel gets a state: **up**, **down**
 (with the reason: the BGP state such as `Active`, the OSPF state such as
 `EXSTART`, a neighbour missing from the running config, a remote VTEP not
 learned), **partial** (some address families down) or **unknown** (node
-not running or not readable). Up BGP sessions show their uptime and
+not running or not readable). An MLAG pair is up when both halves are
+active and connected with the peer-link up and the config consistent,
+and partly up while a dual-homed port is up on one side only. Up BGP sessions show their uptime and
 prefixes received. Neighbours that run but are not in the startup configs
 are listed, and so are sessions configured on one side in the startup
 configs but on both sides on the routers: both mean the running config
@@ -291,7 +302,7 @@ has drifted, for example after changes on the CLI.
 
 | Kind | How | Commands |
 |------|-----|----------|
-| Arista cEOS | one `docker exec`, JSON output | `show ip ospf neighbor vrf all`, `show ip bgp summary vrf all`, `show bgp evpn summary`, `show vxlan vtep` |
+| Arista cEOS | one `docker exec`, JSON output | `show ip ospf neighbor vrf all`, `show ip bgp summary vrf all`, `show bgp evpn summary`, `show vxlan vtep`, `show mlag` |
 | Cisco IOL, CSR1000v, Catalyst 8000v | SSH to the management address (as `exec`; password from `CLAB_NODE_PASSWORD`, default `admin`) | `show ip ospf neighbor`, `show ip bgp summary`, `show bgp l2vpn evpn summary`, `show nve peers` |
 
 A node is only asked about the protocols its startup config uses. Other
@@ -453,8 +464,10 @@ an operator.
   (VRFs included), IOS kinds and Linux hosts, every equal-cost branch, and
   on an EVPN fabric the VXLAN hop to the VTEP (from the route, or for
   bridged traffic the MAC and VXLAN tables, the EVPN MAC/IP routes, or
-  the VLAN's flood list). The path is highlighted on the Diagram, VXLAN
-  hops as arcs. It only reads; viewers can use it too.
+  the VLAN's flood list). A port-channel or a Linux bond branches to its
+  member links, and an MLAG pair's shared VTEP to both leaves. The path
+  is highlighted on the Diagram, VXLAN hops as arcs. It only reads;
+  viewers can use it too.
 - **Notes and boxes:** operators can put sticky notes and labelled boxes
   ("DC1", "tenant A") on the Diagram with Note and Box: drag to move, drag
   a box's corner to resize, double-click to edit, Delete to remove.
@@ -525,13 +538,15 @@ an operator.
   inside the VM still shows as up. Links whose state cannot be read keep
   their normal colour.
 - **Routing:** the `clabfleet routing` view as a diagram, on the same
-  node positions as the Diagram tab. Pick OSPF, BGP or EVPN at the top.
+  node positions as the Diagram tab. Pick OSPF, BGP, EVPN or MLAG at the top.
   OSPF colours adjacencies by area (and shades each area when there are
   several); BGP shades each AS and draws IPv4 and EVPN sessions, dashed for
   iBGP and red for sessions configured on one side only; EVPN shows the
   EVPN sessions (control plane) and the VXLAN tunnels between VTEPs (data
   plane), either or both, for all VNIs or one. Click a node for its
   router-id, interfaces, sessions or VNIs, or an edge for both ends.
+  MLAG shades each pair, draws its peer-link heavy and links each
+  dual-homed host to both leaves; a leaf's card lists its ports.
   On a deployed lab a cEOS VTEP's card can also read what it has
   **learned**: the hosts (EVPN type-2 MAC/IP routes) and prefixes
   (type-5) on each VNI, and which VTEP each came from.
@@ -1173,6 +1188,7 @@ fetch (such as `! Last configuration change`) are not a config change.
 | `topologies/spine_leaf.clab.yml` | 2-spine 4-leaf fabric with BGP (Arista cEOS) |
 | `topologies/large_campus.clab.yml` | 8-node IOL/IOL-L2 campus with placement labels for multi-host |
 | `topologies/evpn_fabric.clab.yml` | 2-spine 4-leaf EVPN/VXLAN fabric (Arista cEOS): eBGP underlay, EVPN overlay, L2 and L3 VNIs, 4 Linux hosts |
+| `topologies/evpn_mlag.clab.yml` | The same fabric with the leaves as two MLAG pairs (peer-links, one shared VTEP per pair) and 4 hosts dual-homed with LACP bonds |
 | `topologies/cluster.yaml` | 3-host cluster inventory |
 | `topologies/live_devices_example.yaml` | Device inventory for live network export |
 

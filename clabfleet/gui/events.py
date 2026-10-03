@@ -74,8 +74,10 @@ def protocol_items(snapshot: dict, view: dict) -> dict[str, dict]:
         ends[s["id"]] = ("bgp", "BGP", s["a"]["node"], s["b"]["node"])
     for t in (view.get("evpn") or {}).get("tunnels") or []:
         ends[t["id"]] = ("evpn", "VXLAN", t["a"]["node"], t["b"]["node"])
+    for p in (view.get("mlag") or {}).get("pairs") or []:
+        ends[p["id"]] = ("mlag", "MLAG", *p["nodes"])
     items = {}
-    for key in ("ospf", "bgp", "vxlan"):
+    for key in ("ospf", "bgp", "vxlan", "mlag"):
         for edge_id, entry in (snapshot.get(key) or {}).items():
             if edge_id not in ends:
                 continue

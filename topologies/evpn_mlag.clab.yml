@@ -1,0 +1,912 @@
+# EVPN / VXLAN fabric with MLAG leaf pairs
+# 2 spines + 4 leaves on Arista cEOS, and 4 Linux hosts, each dual-homed
+# to a leaf pair with LACP. The usual production layout: a host keeps
+# working when one of its two leaves (or a link) goes down.
+#
+#   Leaf-1 + Leaf-2: MLAG domain POD-A, AS 65001, shared VTEP 10.255.2.12
+#   Leaf-3 + Leaf-4: MLAG domain POD-B, AS 65002, shared VTEP 10.255.2.34
+#
+# In each pair:
+# - The peer-link is Port-Channel10 on Ethernet3-4 (LACP), a trunk
+#   carrying VLAN 4094 (MLAG peer control) and VLAN 4093 (iBGP underlay
+#   peering, a way round if a leaf loses both uplinks); spanning tree is
+#   off on both.
+# - Both leaves source VXLAN from the same Loopback1 address, so to the
+#   rest of the fabric the pair is one VTEP; `vxlan virtual-router
+#   encapsulation mac-address mlag-system-id` makes routed (L3 VNI)
+#   traffic use the pair's shared MAC too.
+# - Each host's two links form Port-Channel5 or 6 on both leaves, joined
+#   by `mlag 5` / `mlag 6`, so the host sees one LACP partner.
+#
+# Underlay: eBGP on the point-to-point links (spines AS 65000, one AS per
+# pair, so no allowas-in). Overlay: BGP EVPN from each leaf's Loopback0 to
+# both spines (route servers, next hop unchanged).
+#
+#   VLAN 10 -> VNI 10010, VLAN 20 -> VNI 10020 on every leaf
+#   VRF TENANT -> L3 VNI 50001 on every leaf  (symmetric IRB, anycast gateway .1)
+#
+#   Host-1 10.10.10.11  VLAN 10  on pair A    Host-3 10.10.10.13  VLAN 10  on pair B
+#   Host-2 10.20.20.12  VLAN 20  on pair A    Host-4 10.20.20.14  VLAN 20  on pair B
+#
+# The hosts run nicolaka/netshoot: Alpine's busybox `ip` cannot make an
+# LACP (802.3ad) bond, netshoot's iproute2 can.
+#
+# cEOS images are not public: download cEOS-lab from arista.com and import it:
+#   docker import cEOS64-lab-4.35.6M.tar.xz ceos:4.35.6M
+#
+# It needs about as much memory as the spine-leaf lab (6 cEOS nodes);
+# stop that one first on a small machine.
+#
+# Deploy:
+#   clabfleet deploy topologies/evpn_mlag.clab.yml
+#
+# Try it:
+#   docker exec clab-evpn-mlag-Host-1 ping -c3 10.10.10.13   # bridged across the pairs, VNI 10010
+#   docker exec clab-evpn-mlag-Host-1 ping -c3 10.20.20.14   # routed, L3 VNI 50001
+#   docker exec clab-evpn-mlag-Leaf-1 Cli -c "show mlag"     # state: active, peer-link up
+# Then shut one of Host-1's links (or freeze Leaf-1 from the GUI) and ping again.
+
+name: evpn-mlag
+
+topology:
+  kinds:
+    arista_ceos:
+      image: ceos:4.35.6M
+    linux:
+      image: nicolaka/netshoot:latest
+
+  nodes:
+    # -- Spines (underlay + EVPN route servers) --
+    Spine-1:
+      kind: arista_ceos
+      startup-config: |
+        hostname Spine-1
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        ip routing
+        !
+        interface Loopback0
+           ip address 10.255.0.1/32
+        !
+        interface Ethernet1
+           description to-Leaf-1
+           no switchport
+           ip address 10.0.1.0/31
+        !
+        interface Ethernet2
+           description to-Leaf-2
+           no switchport
+           ip address 10.0.1.2/31
+        !
+        interface Ethernet3
+           description to-Leaf-3
+           no switchport
+           ip address 10.0.1.4/31
+        !
+        interface Ethernet4
+           description to-Leaf-4
+           no switchport
+           ip address 10.0.1.6/31
+        !
+        router bgp 65000
+           router-id 10.255.0.1
+           maximum-paths 4
+           network 10.255.0.1/32
+           ! -- underlay: eBGP to each leaf; each MLAG pair is one AS --
+           neighbor LEAVES peer group
+           neighbor 10.0.1.1 peer group LEAVES
+           neighbor 10.0.1.1 remote-as 65001
+           neighbor 10.0.1.3 peer group LEAVES
+           neighbor 10.0.1.3 remote-as 65001
+           neighbor 10.0.1.5 peer group LEAVES
+           neighbor 10.0.1.5 remote-as 65002
+           neighbor 10.0.1.7 peer group LEAVES
+           neighbor 10.0.1.7 remote-as 65002
+           ! -- EVPN layer: route server for the leaves' loopbacks --
+           neighbor EVPN peer group
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN next-hop-unchanged
+           neighbor EVPN send-community extended
+           neighbor 10.255.1.1 peer group EVPN
+           neighbor 10.255.1.1 remote-as 65001
+           neighbor 10.255.1.2 peer group EVPN
+           neighbor 10.255.1.2 remote-as 65001
+           neighbor 10.255.1.3 peer group EVPN
+           neighbor 10.255.1.3 remote-as 65002
+           neighbor 10.255.1.4 peer group EVPN
+           neighbor 10.255.1.4 remote-as 65002
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+
+    Spine-2:
+      kind: arista_ceos
+      startup-config: |
+        hostname Spine-2
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        ip routing
+        !
+        interface Loopback0
+           ip address 10.255.0.2/32
+        !
+        interface Ethernet1
+           description to-Leaf-1
+           no switchport
+           ip address 10.0.2.0/31
+        !
+        interface Ethernet2
+           description to-Leaf-2
+           no switchport
+           ip address 10.0.2.2/31
+        !
+        interface Ethernet3
+           description to-Leaf-3
+           no switchport
+           ip address 10.0.2.4/31
+        !
+        interface Ethernet4
+           description to-Leaf-4
+           no switchport
+           ip address 10.0.2.6/31
+        !
+        router bgp 65000
+           router-id 10.255.0.2
+           maximum-paths 4
+           network 10.255.0.2/32
+           ! -- underlay: eBGP to each leaf; each MLAG pair is one AS --
+           neighbor LEAVES peer group
+           neighbor 10.0.2.1 peer group LEAVES
+           neighbor 10.0.2.1 remote-as 65001
+           neighbor 10.0.2.3 peer group LEAVES
+           neighbor 10.0.2.3 remote-as 65001
+           neighbor 10.0.2.5 peer group LEAVES
+           neighbor 10.0.2.5 remote-as 65002
+           neighbor 10.0.2.7 peer group LEAVES
+           neighbor 10.0.2.7 remote-as 65002
+           ! -- EVPN layer: route server for the leaves' loopbacks --
+           neighbor EVPN peer group
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN next-hop-unchanged
+           neighbor EVPN send-community extended
+           neighbor 10.255.1.1 peer group EVPN
+           neighbor 10.255.1.1 remote-as 65001
+           neighbor 10.255.1.2 peer group EVPN
+           neighbor 10.255.1.2 remote-as 65001
+           neighbor 10.255.1.3 peer group EVPN
+           neighbor 10.255.1.3 remote-as 65002
+           neighbor 10.255.1.4 peer group EVPN
+           neighbor 10.255.1.4 remote-as 65002
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+
+    # -- MLAG pair A: Leaf-1 + Leaf-2 --
+    Leaf-1:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-1
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        vlan 10
+           name Tenant-10
+        !
+        vlan 20
+           name Tenant-20
+        !
+        vlan 4093
+           name MLAG-iBGP
+           trunk group MLAGPEER
+        !
+        vlan 4094
+           name MLAG-peer
+           trunk group MLAGPEER
+        !
+        no spanning-tree vlan-id 4093-4094
+        !
+        vrf instance TENANT
+        !
+        ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
+        !
+        interface Loopback0
+           description router-id / EVPN peering
+           ip address 10.255.1.1/32
+        !
+        interface Loopback1
+           description VTEP source, shared with Leaf-2 (MLAG pair A)
+           ip address 10.255.2.12/32
+        !
+        interface Ethernet1
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.1/31
+        !
+        interface Ethernet2
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.1/31
+        !
+        interface Ethernet3
+           description MLAG peer-link to Leaf-2
+           channel-group 10 mode active
+        !
+        interface Ethernet4
+           description MLAG peer-link to Leaf-2
+           channel-group 10 mode active
+        !
+        interface Port-Channel10
+           description MLAG peer-link to Leaf-2
+           switchport mode trunk
+           switchport trunk group MLAGPEER
+        !
+        interface Ethernet5
+           description to-Host-1
+           channel-group 5 mode active
+        !
+        interface Port-Channel5
+           description to-Host-1 (dual-homed)
+           switchport access vlan 10
+           mlag 5
+        !
+        interface Ethernet6
+           description to-Host-2
+           channel-group 6 mode active
+        !
+        interface Port-Channel6
+           description to-Host-2 (dual-homed)
+           switchport access vlan 20
+           mlag 6
+        !
+        interface Vlan10
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.10.10.1/24
+        !
+        interface Vlan20
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.20.20.1/24
+        !
+        interface Vlan4093
+           description MLAG iBGP underlay peering
+           ip address 10.254.1.0/31
+        !
+        interface Vlan4094
+           description MLAG peer
+           no autostate
+           ip address 10.254.0.0/31
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan virtual-router encapsulation mac-address mlag-system-id
+           vxlan udp-port 4789
+           vxlan vlan 10 vni 10010
+           vxlan vlan 20 vni 10020
+           vxlan vrf TENANT vni 50001
+        !
+        mlag configuration
+           domain-id POD-A
+           local-interface Vlan4094
+           peer-address 10.254.0.1
+           peer-link Port-Channel10
+        !
+        router bgp 65001
+           router-id 10.255.1.1
+           maximum-paths 4
+           network 10.255.1.1/32
+           network 10.255.2.12/32
+           ! -- underlay: eBGP to both spines on the point-to-point links --
+           neighbor SPINES peer group
+           neighbor SPINES remote-as 65000
+           neighbor 10.0.1.0 peer group SPINES
+           neighbor 10.0.2.0 peer group SPINES
+           ! -- underlay: iBGP with the MLAG peer, over VLAN 4093 (a way round a lost uplink) --
+           neighbor MLAG-PEER peer group
+           neighbor MLAG-PEER remote-as 65001
+           neighbor MLAG-PEER next-hop-self
+           neighbor 10.254.1.1 peer group MLAG-PEER
+           ! -- EVPN layer: loopback to loopback with both spines --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN send-community extended
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 10
+              rd 10.255.1.1:10010
+              route-target both 10:10010
+              redistribute learned
+           !
+           vlan 20
+              rd 10.255.1.1:10020
+              route-target both 20:10020
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+           !
+           vrf TENANT
+              rd 10.255.1.1:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
+
+    Leaf-2:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-2
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        vlan 10
+           name Tenant-10
+        !
+        vlan 20
+           name Tenant-20
+        !
+        vlan 4093
+           name MLAG-iBGP
+           trunk group MLAGPEER
+        !
+        vlan 4094
+           name MLAG-peer
+           trunk group MLAGPEER
+        !
+        no spanning-tree vlan-id 4093-4094
+        !
+        vrf instance TENANT
+        !
+        ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
+        !
+        interface Loopback0
+           description router-id / EVPN peering
+           ip address 10.255.1.2/32
+        !
+        interface Loopback1
+           description VTEP source, shared with Leaf-1 (MLAG pair A)
+           ip address 10.255.2.12/32
+        !
+        interface Ethernet1
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.3/31
+        !
+        interface Ethernet2
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.3/31
+        !
+        interface Ethernet3
+           description MLAG peer-link to Leaf-1
+           channel-group 10 mode active
+        !
+        interface Ethernet4
+           description MLAG peer-link to Leaf-1
+           channel-group 10 mode active
+        !
+        interface Port-Channel10
+           description MLAG peer-link to Leaf-1
+           switchport mode trunk
+           switchport trunk group MLAGPEER
+        !
+        interface Ethernet5
+           description to-Host-1
+           channel-group 5 mode active
+        !
+        interface Port-Channel5
+           description to-Host-1 (dual-homed)
+           switchport access vlan 10
+           mlag 5
+        !
+        interface Ethernet6
+           description to-Host-2
+           channel-group 6 mode active
+        !
+        interface Port-Channel6
+           description to-Host-2 (dual-homed)
+           switchport access vlan 20
+           mlag 6
+        !
+        interface Vlan10
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.10.10.1/24
+        !
+        interface Vlan20
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.20.20.1/24
+        !
+        interface Vlan4093
+           description MLAG iBGP underlay peering
+           ip address 10.254.1.1/31
+        !
+        interface Vlan4094
+           description MLAG peer
+           no autostate
+           ip address 10.254.0.1/31
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan virtual-router encapsulation mac-address mlag-system-id
+           vxlan udp-port 4789
+           vxlan vlan 10 vni 10010
+           vxlan vlan 20 vni 10020
+           vxlan vrf TENANT vni 50001
+        !
+        mlag configuration
+           domain-id POD-A
+           local-interface Vlan4094
+           peer-address 10.254.0.0
+           peer-link Port-Channel10
+        !
+        router bgp 65001
+           router-id 10.255.1.2
+           maximum-paths 4
+           network 10.255.1.2/32
+           network 10.255.2.12/32
+           ! -- underlay: eBGP to both spines on the point-to-point links --
+           neighbor SPINES peer group
+           neighbor SPINES remote-as 65000
+           neighbor 10.0.1.2 peer group SPINES
+           neighbor 10.0.2.2 peer group SPINES
+           ! -- underlay: iBGP with the MLAG peer, over VLAN 4093 (a way round a lost uplink) --
+           neighbor MLAG-PEER peer group
+           neighbor MLAG-PEER remote-as 65001
+           neighbor MLAG-PEER next-hop-self
+           neighbor 10.254.1.0 peer group MLAG-PEER
+           ! -- EVPN layer: loopback to loopback with both spines --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN send-community extended
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 10
+              rd 10.255.1.2:10010
+              route-target both 10:10010
+              redistribute learned
+           !
+           vlan 20
+              rd 10.255.1.2:10020
+              route-target both 20:10020
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+           !
+           vrf TENANT
+              rd 10.255.1.2:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
+
+    # -- MLAG pair B: Leaf-3 + Leaf-4 --
+    Leaf-3:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-3
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        vlan 10
+           name Tenant-10
+        !
+        vlan 20
+           name Tenant-20
+        !
+        vlan 4093
+           name MLAG-iBGP
+           trunk group MLAGPEER
+        !
+        vlan 4094
+           name MLAG-peer
+           trunk group MLAGPEER
+        !
+        no spanning-tree vlan-id 4093-4094
+        !
+        vrf instance TENANT
+        !
+        ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
+        !
+        interface Loopback0
+           description router-id / EVPN peering
+           ip address 10.255.1.3/32
+        !
+        interface Loopback1
+           description VTEP source, shared with Leaf-4 (MLAG pair B)
+           ip address 10.255.2.34/32
+        !
+        interface Ethernet1
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.5/31
+        !
+        interface Ethernet2
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.5/31
+        !
+        interface Ethernet3
+           description MLAG peer-link to Leaf-4
+           channel-group 10 mode active
+        !
+        interface Ethernet4
+           description MLAG peer-link to Leaf-4
+           channel-group 10 mode active
+        !
+        interface Port-Channel10
+           description MLAG peer-link to Leaf-4
+           switchport mode trunk
+           switchport trunk group MLAGPEER
+        !
+        interface Ethernet5
+           description to-Host-3
+           channel-group 5 mode active
+        !
+        interface Port-Channel5
+           description to-Host-3 (dual-homed)
+           switchport access vlan 10
+           mlag 5
+        !
+        interface Ethernet6
+           description to-Host-4
+           channel-group 6 mode active
+        !
+        interface Port-Channel6
+           description to-Host-4 (dual-homed)
+           switchport access vlan 20
+           mlag 6
+        !
+        interface Vlan10
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.10.10.1/24
+        !
+        interface Vlan20
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.20.20.1/24
+        !
+        interface Vlan4093
+           description MLAG iBGP underlay peering
+           ip address 10.254.1.2/31
+        !
+        interface Vlan4094
+           description MLAG peer
+           no autostate
+           ip address 10.254.0.2/31
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan virtual-router encapsulation mac-address mlag-system-id
+           vxlan udp-port 4789
+           vxlan vlan 10 vni 10010
+           vxlan vlan 20 vni 10020
+           vxlan vrf TENANT vni 50001
+        !
+        mlag configuration
+           domain-id POD-B
+           local-interface Vlan4094
+           peer-address 10.254.0.3
+           peer-link Port-Channel10
+        !
+        router bgp 65002
+           router-id 10.255.1.3
+           maximum-paths 4
+           network 10.255.1.3/32
+           network 10.255.2.34/32
+           ! -- underlay: eBGP to both spines on the point-to-point links --
+           neighbor SPINES peer group
+           neighbor SPINES remote-as 65000
+           neighbor 10.0.1.4 peer group SPINES
+           neighbor 10.0.2.4 peer group SPINES
+           ! -- underlay: iBGP with the MLAG peer, over VLAN 4093 (a way round a lost uplink) --
+           neighbor MLAG-PEER peer group
+           neighbor MLAG-PEER remote-as 65002
+           neighbor MLAG-PEER next-hop-self
+           neighbor 10.254.1.3 peer group MLAG-PEER
+           ! -- EVPN layer: loopback to loopback with both spines --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN send-community extended
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 10
+              rd 10.255.1.3:10010
+              route-target both 10:10010
+              redistribute learned
+           !
+           vlan 20
+              rd 10.255.1.3:10020
+              route-target both 20:10020
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+           !
+           vrf TENANT
+              rd 10.255.1.3:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
+
+    Leaf-4:
+      kind: arista_ceos
+      startup-config: |
+        hostname Leaf-4
+        !
+        username admin privilege 15 secret admin
+        !
+        service routing protocols model multi-agent
+        !
+        vlan 10
+           name Tenant-10
+        !
+        vlan 20
+           name Tenant-20
+        !
+        vlan 4093
+           name MLAG-iBGP
+           trunk group MLAGPEER
+        !
+        vlan 4094
+           name MLAG-peer
+           trunk group MLAGPEER
+        !
+        no spanning-tree vlan-id 4093-4094
+        !
+        vrf instance TENANT
+        !
+        ip routing
+        ip routing vrf TENANT
+        !
+        ip virtual-router mac-address 00:1c:73:00:00:99
+        !
+        interface Loopback0
+           description router-id / EVPN peering
+           ip address 10.255.1.4/32
+        !
+        interface Loopback1
+           description VTEP source, shared with Leaf-3 (MLAG pair B)
+           ip address 10.255.2.34/32
+        !
+        interface Ethernet1
+           description to-Spine-1
+           no switchport
+           ip address 10.0.1.7/31
+        !
+        interface Ethernet2
+           description to-Spine-2
+           no switchport
+           ip address 10.0.2.7/31
+        !
+        interface Ethernet3
+           description MLAG peer-link to Leaf-3
+           channel-group 10 mode active
+        !
+        interface Ethernet4
+           description MLAG peer-link to Leaf-3
+           channel-group 10 mode active
+        !
+        interface Port-Channel10
+           description MLAG peer-link to Leaf-3
+           switchport mode trunk
+           switchport trunk group MLAGPEER
+        !
+        interface Ethernet5
+           description to-Host-3
+           channel-group 5 mode active
+        !
+        interface Port-Channel5
+           description to-Host-3 (dual-homed)
+           switchport access vlan 10
+           mlag 5
+        !
+        interface Ethernet6
+           description to-Host-4
+           channel-group 6 mode active
+        !
+        interface Port-Channel6
+           description to-Host-4 (dual-homed)
+           switchport access vlan 20
+           mlag 6
+        !
+        interface Vlan10
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.10.10.1/24
+        !
+        interface Vlan20
+           description anycast gateway
+           vrf TENANT
+           ip address virtual 10.20.20.1/24
+        !
+        interface Vlan4093
+           description MLAG iBGP underlay peering
+           ip address 10.254.1.3/31
+        !
+        interface Vlan4094
+           description MLAG peer
+           no autostate
+           ip address 10.254.0.3/31
+        !
+        interface Vxlan1
+           vxlan source-interface Loopback1
+           vxlan virtual-router encapsulation mac-address mlag-system-id
+           vxlan udp-port 4789
+           vxlan vlan 10 vni 10010
+           vxlan vlan 20 vni 10020
+           vxlan vrf TENANT vni 50001
+        !
+        mlag configuration
+           domain-id POD-B
+           local-interface Vlan4094
+           peer-address 10.254.0.2
+           peer-link Port-Channel10
+        !
+        router bgp 65002
+           router-id 10.255.1.4
+           maximum-paths 4
+           network 10.255.1.4/32
+           network 10.255.2.34/32
+           ! -- underlay: eBGP to both spines on the point-to-point links --
+           neighbor SPINES peer group
+           neighbor SPINES remote-as 65000
+           neighbor 10.0.1.6 peer group SPINES
+           neighbor 10.0.2.6 peer group SPINES
+           ! -- underlay: iBGP with the MLAG peer, over VLAN 4093 (a way round a lost uplink) --
+           neighbor MLAG-PEER peer group
+           neighbor MLAG-PEER remote-as 65002
+           neighbor MLAG-PEER next-hop-self
+           neighbor 10.254.1.2 peer group MLAG-PEER
+           ! -- EVPN layer: loopback to loopback with both spines --
+           neighbor EVPN peer group
+           neighbor EVPN remote-as 65000
+           neighbor EVPN update-source Loopback0
+           neighbor EVPN ebgp-multihop 3
+           neighbor EVPN send-community extended
+           neighbor 10.255.0.1 peer group EVPN
+           neighbor 10.255.0.2 peer group EVPN
+           !
+           vlan 10
+              rd 10.255.1.4:10010
+              route-target both 10:10010
+              redistribute learned
+           !
+           vlan 20
+              rd 10.255.1.4:10020
+              route-target both 20:10020
+              redistribute learned
+           !
+           address-family evpn
+              neighbor EVPN activate
+           !
+           address-family ipv4
+              no neighbor EVPN activate
+           !
+           vrf TENANT
+              rd 10.255.1.4:50001
+              route-target import evpn 50001:50001
+              route-target export evpn 50001:50001
+              redistribute connected
+
+    # -- Hosts: eth1 and eth2 bonded with LACP, one link to each leaf of the pair --
+    Host-1:
+      kind: linux
+      exec:
+        - ip link add bond0 type bond mode 802.3ad lacp_rate fast miimon 100
+        - ip link set eth1 down
+        - ip link set eth1 master bond0
+        - ip link set eth2 down
+        - ip link set eth2 master bond0
+        - ip link set bond0 up
+        - ip addr add 10.10.10.11/24 dev bond0
+        - ip route replace default via 10.10.10.1
+
+    Host-2:
+      kind: linux
+      exec:
+        - ip link add bond0 type bond mode 802.3ad lacp_rate fast miimon 100
+        - ip link set eth1 down
+        - ip link set eth1 master bond0
+        - ip link set eth2 down
+        - ip link set eth2 master bond0
+        - ip link set bond0 up
+        - ip addr add 10.20.20.12/24 dev bond0
+        - ip route replace default via 10.20.20.1
+
+    Host-3:
+      kind: linux
+      exec:
+        - ip link add bond0 type bond mode 802.3ad lacp_rate fast miimon 100
+        - ip link set eth1 down
+        - ip link set eth1 master bond0
+        - ip link set eth2 down
+        - ip link set eth2 master bond0
+        - ip link set bond0 up
+        - ip addr add 10.10.10.13/24 dev bond0
+        - ip route replace default via 10.10.10.1
+
+    Host-4:
+      kind: linux
+      exec:
+        - ip link add bond0 type bond mode 802.3ad lacp_rate fast miimon 100
+        - ip link set eth1 down
+        - ip link set eth1 master bond0
+        - ip link set eth2 down
+        - ip link set eth2 master bond0
+        - ip link set bond0 up
+        - ip addr add 10.20.20.14/24 dev bond0
+        - ip route replace default via 10.20.20.1
+
+  links:
+    # Spine-to-leaf
+    - endpoints: ["Spine-1:eth1", "Leaf-1:eth1"]
+    - endpoints: ["Spine-1:eth2", "Leaf-2:eth1"]
+    - endpoints: ["Spine-1:eth3", "Leaf-3:eth1"]
+    - endpoints: ["Spine-1:eth4", "Leaf-4:eth1"]
+    - endpoints: ["Spine-2:eth1", "Leaf-1:eth2"]
+    - endpoints: ["Spine-2:eth2", "Leaf-2:eth2"]
+    - endpoints: ["Spine-2:eth3", "Leaf-3:eth2"]
+    - endpoints: ["Spine-2:eth4", "Leaf-4:eth2"]
+    # MLAG peer-links (Port-Channel10)
+    - endpoints: ["Leaf-1:eth3", "Leaf-2:eth3"]
+    - endpoints: ["Leaf-1:eth4", "Leaf-2:eth4"]
+    - endpoints: ["Leaf-3:eth3", "Leaf-4:eth3"]
+    - endpoints: ["Leaf-3:eth4", "Leaf-4:eth4"]
+    # Hosts, dual-homed to a pair
+    - endpoints: ["Leaf-1:eth5", "Host-1:eth1"]
+    - endpoints: ["Leaf-2:eth5", "Host-1:eth2"]
+    - endpoints: ["Leaf-1:eth6", "Host-2:eth1"]
+    - endpoints: ["Leaf-2:eth6", "Host-2:eth2"]
+    - endpoints: ["Leaf-3:eth5", "Host-3:eth1"]
+    - endpoints: ["Leaf-4:eth5", "Host-3:eth2"]
+    - endpoints: ["Leaf-3:eth6", "Host-4:eth1"]
+    - endpoints: ["Leaf-4:eth6", "Host-4:eth2"]

@@ -1,6 +1,8 @@
 """Parse IOS-style configs (Cisco IOS / IOS-XE / NX-OS, Arista EOS) into the
 routing facts the logical view needs: interface addresses, OSPF processes,
-BGP neighbours and address families, and the VXLAN / EVPN setup.
+BGP neighbours and address families, the VXLAN / EVPN setup, and MLAG
+(EOS: the ``mlag configuration`` block, port-channels and their ``mlag``
+ids).
 
 The parser reads the indentation tree of the config and picks out the
 statements it knows, so anything else in the config is simply ignored. It
@@ -68,6 +70,9 @@ class Interface:
     ospf_network: str = ""                      # point-to-point, broadcast, ...
     ospf_passive: Optional[bool] = None         # interface-level passive (NX-OS, EOS)
     anycast: bool = False                       # same gateway address on every leaf (EVPN)
+    channel_group: Optional[int] = None         # member of Port-Channel<n>
+    mlag_id: Optional[int] = None               # EOS "mlag <n>" on a port-channel
+    access_vlan: Optional[int] = None
 
     @property
     def primary(self) -> Optional[ipaddress.IPv4Interface]:
@@ -202,12 +207,31 @@ class Vtep:
 
 
 @dataclass
+class Mlag:
+    """EOS ``mlag configuration``."""
+    domain_id: str = ""
+    local_interface: str = ""                   # Vlan4094
+    peer_address: str = ""
+    peer_link: str = ""                         # Port-Channel10
+    shutdown: bool = False
+
+
+@dataclass
 class NodeConfig:
     hostname: str = ""
     interfaces: dict[str, Interface] = field(default_factory=dict)
     ospf: list[OspfProcess] = field(default_factory=list)
     bgp: Optional[Bgp] = None
     vtep: Optional[Vtep] = None
+    mlag: Optional[Mlag] = None
+
+    def port_channel_members(self, name: str) -> list[str]:
+        """Interfaces in Port-Channel<n> (``channel-group <n>``)."""
+        number = re.search(r"(\d+)$", name)
+        if not number:
+            return []
+        return sorted((i.name for i in self.interfaces.values() if i.channel_group == int(number.group(1))),
+                      key=lambda n: [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", n)])
 
     def interface(self, name: str) -> Optional[Interface]:
         return self.interfaces.get(canonical(name))
@@ -285,6 +309,8 @@ def parse_config(text: str) -> NodeConfig:
                 if vni.isdigit():
                     for vlan in vlans:
                         vlan_vni[vlan] = int(vni)
+        elif w[:2] == ["mlag", "configuration"]:
+            cfg.mlag = _parse_mlag(line.children)
         elif w[:2] == ["vrf", "context"] and len(w) > 2:
             for child in line.children:
                 if child.words[0] == "vni" and len(child.words) > 1 and child.words[1].isdigit():
@@ -329,6 +355,12 @@ def _parse_interface(cfg: NodeConfig, name: str, children: list[Line]) -> None:
         elif w[0] == "vrf" and len(w) > 1:
             # EOS "vrf X", IOS-XE "vrf forwarding X", NX-OS "vrf member X"
             iface.vrf = w[-1]
+        elif w[0] == "channel-group" and len(w) > 1 and w[1].isdigit():
+            iface.channel_group = int(w[1])
+        elif w[0] == "mlag" and len(w) > 1 and w[1].isdigit():
+            iface.mlag_id = int(w[1])
+        elif w[:3] == ["switchport", "access", "vlan"] and len(w) > 3 and w[3].isdigit():
+            iface.access_vlan = int(w[3])
         elif w[:3] == ["ip", "vrf", "forwarding"] and len(w) > 3:
             iface.vrf = w[3]
         elif w[:2] == ["ip", "ospf"] and len(w) > 2:
@@ -548,3 +580,20 @@ def _parse_vtep(name: str, children: list[Line]) -> Vtep:
         elif w[:2] == ["host-reachability", "protocol"]:
             vtep.bgp_learning = w[2:3] == ["bgp"]
     return vtep
+
+
+def _parse_mlag(children: list[Line]) -> Mlag:
+    m = Mlag()
+    for child in children:
+        w = child.words
+        if w[0] == "domain-id" and len(w) > 1:
+            m.domain_id = w[1]
+        elif w[0] == "local-interface" and len(w) > 1:
+            m.local_interface = canonical(w[1])
+        elif w[0] == "peer-address" and len(w) > 1 and w[1] != "heartbeat":
+            m.peer_address = w[1]
+        elif w[0] == "peer-link" and len(w) > 1:
+            m.peer_link = canonical(w[1])
+        elif w[0] == "shutdown":
+            m.shutdown = True
+    return m

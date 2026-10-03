@@ -17,7 +17,7 @@ Usage:
                       [-c COUNT] [--duration SECONDS] [--snaplen BYTES] [--via auto|node|helper]
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
-    clabfleet routing <topology.clab.yml> [--protocol ospf|bgp|evpn] [--live [--cluster <cluster.yaml>]] [--json]
+    clabfleet routing <topology.clab.yml> [--protocol ospf|bgp|evpn|mlag] [--live [--cluster <cluster.yaml>]] [--json]
     clabfleet export-live [<inventory>] [-o output.clab.yml] [--netbox URL | --nautobot URL
                           | --ansible FILE] [--filter KEY=VALUE] [--allowed-network CIDR]
                           [--sanitise [--allow-residual] | --no-sanitise]

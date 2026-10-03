@@ -351,10 +351,15 @@ class Workspace:
         out = diff_lab(self.topology_path(topo_id), nodes=[node], against=against)
         return {**out, **out["nodes"][0]}
 
-    def _vteps(self, topo) -> dict[str, str]:
-        """VTEP address -> node, from the startup configs."""
+    def _vteps(self, topo) -> dict[str, list[str]]:
+        """VTEP address -> its nodes (both halves of an MLAG pair), from the
+        startup configs."""
         evpn = routing_view(topo).get("evpn") or {}
-        return {v["ip"]: n for n, v in (evpn.get("vteps") or {}).items() if v.get("ip")}
+        out: dict[str, list[str]] = {}
+        for n, v in sorted((evpn.get("vteps") or {}).items()):
+            if v.get("ip"):
+                out.setdefault(v["ip"], []).append(n)
+        return out
 
     def evpn_routes(self, topo_id: str, node: str) -> list[dict]:
         """A cEOS VTEP's EVPN routes: hosts and prefixes per VNI, and from
@@ -369,7 +374,7 @@ class Workspace:
         ask = lambda cmd: self.node_command(topo.name, node, cmd, shell=False)  # noqa: E731
         return parse_eos_evpn_routes(ask("show bgp evpn route-type mac-ip detail | json"),
                                      ask("show bgp evpn route-type ip-prefix ipv4 detail | json"),
-                                     self._vteps(topo))
+                                     {ip: " + ".join(nodes) for ip, nodes in self._vteps(topo).items()})
 
     def trace(self, topo_id: str, src: str, dst: str) -> dict:
         """Path trace from node ``src`` to a node or an address
@@ -384,7 +389,8 @@ class Workspace:
         if dst_node:
             dst = self._node_address(topo, dst_node)
         kinds = {n: topo.effective_node(n)["kind"] or "" for n in topo.nodes}
-        lab = Lab(topology_view(topo), kinds, self._vteps(topo))
+        view = routing_view(topo)
+        lab = Lab(topology_view(topo), kinds, self._vteps(topo), view.get("port_channels"))
         try:
             result = trace(lab, lambda node, cmd: self.node_command(topo.name, node, cmd), src, dst, dst_node)
         except TraceError as exc:

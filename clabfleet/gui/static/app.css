@@ -525,6 +525,9 @@ table.nodes td .open { display: flex; gap: 6px; }
 .diagram .rt-edge.ibgp { stroke-dasharray: 7 4; }
 .diagram .rt-edge.tunnel { stroke: var(--c5); stroke-width: 1.6; stroke-dasharray: 2 4; stroke-linecap: round; }
 .diagram .rt-edge.tunnel.colored { stroke: var(--c); }
+/* MLAG: the peer-link heavy, dual-homed host ports light */
+.diagram .rt-edge.mlag-peer { stroke: var(--c4); stroke-width: 5; stroke-linecap: round; }
+.diagram .rt-edge.mlag-port { stroke: var(--c1); stroke-width: 1.8; }
 .diagram .rt-edge.warn { stroke: var(--warn); }
 .diagram .rt-edge.one-sided { stroke: var(--danger); stroke-dasharray: 4 4; }
 .diagram .rt-edge.shut { opacity: .4; }
@@ -568,6 +571,8 @@ table.nodes td .open { display: flex; gap: 6px; }
 .routing-legend .sw { width: 22px; height: 0; border-top: 2px solid var(--link); }
 .routing-legend .sw.colored { border-top-color: var(--c); }
 .routing-legend .sw.fam-evpn { border-top-color: var(--evpn); }
+.routing-legend .sw.mlag-peer { border-top: 5px solid var(--c4); }
+.routing-legend .sw.mlag-port { border-top-color: var(--c1); }
 .routing-legend .sw.ibgp { border-top-style: dashed; }
 .routing-legend .sw.tunnel { border-top: 2px dotted var(--c5); }
 .routing-legend .sw.one-sided { border-top: 2px dashed var(--danger); }
