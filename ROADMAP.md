@@ -8,14 +8,15 @@ few days, **L** a week or more.
 Phases are a suggested order: phase 1 fixes real problems and adds the
 most-used commands, phase 2 deepens the cluster and GUI, phase 3 is the
 longer tail. Items marked **Done** are implemented and documented in the
-README; everything else is a proposal, not committed work.
+README and `docs/`; everything else is a proposal, not committed work.
 
 ## Phase 1 — foundations and daily use (done)
 
 ### 1.1 Per-lab VNI allocation (bug) — S
 
 **Done.** VNIs used by other labs are read from the hosts' lab
-directories before splitting; see "How cross-host links work" in the README.
+directories before splitting; see "How cross-host links work" in
+[docs/cluster.md](docs/cluster.md#how-cross-host-links-work).
 
 `split_topology()` in `clabfleet/deployer.py` restarts VNI numbering at
 `cluster.vni_base` on every deploy. Two labs on the same cluster therefore
