@@ -269,9 +269,11 @@ projectors for training sessions.
 5. **Link utilisation — M.** Links drawn thicker or hotter by traffic
    rate (rx/tx bytes from `/sys/class/net`, which the live probe already
    reads). Pairs with packet capture.
+   **Done** (branch `gui-batch4`): the link probe reads rx/tx byte counters too; each link gets a rate per direction from consecutive reads, drawn thicker (log scale from 10 kb/s) and shown in its tooltip and inspector.
 6. **Failure "what-if" — M.** Shut / no-shut an interface or stop a node
    from the diagram (operator only, confirmed) and watch the Live routing
    view reconverge.
+   **Done** (branch `gui-batch4`): shut / no shut a link end (ip link inside the node), shut or restore all of a node's links, and freeze / resume a node (docker pause: links stay up, the node stops answering). Operators, confirmed, audited; not stop/start, which loses a container's links until a redeploy.
 
 **Everyday use**
 

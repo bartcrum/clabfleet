@@ -33,11 +33,13 @@ logger = logging.getLogger(__name__)
 
 PROBE_TIMEOUT = 5  # seconds per probe command on the host
 
-# Prints "<name>\t<operstate>\t<flags>\t<ifalias>" per interface
+# Prints "<name>\t<operstate>\t<flags>\t<rx bytes>\t<tx bytes>\t<ifalias>"
+# per interface (the alias last: it may hold tabs)
 _IFACE_SCRIPT = (
     'cd /sys/class/net || exit 1; for i in *; do '
-    'printf "%s\\t%s\\t%s\\t%s\\n" "$i" "$(cat "$i/operstate" 2>/dev/null)" '
-    '"$(cat "$i/flags" 2>/dev/null)" "$(cat "$i/ifalias" 2>/dev/null)"; done'
+    'printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "$i" "$(cat "$i/operstate" 2>/dev/null)" '
+    '"$(cat "$i/flags" 2>/dev/null)" "$(cat "$i/statistics/rx_bytes" 2>/dev/null)" '
+    '"$(cat "$i/statistics/tx_bytes" 2>/dev/null)" "$(cat "$i/ifalias" 2>/dev/null)"; done'
 )
 IFF_UP = 0x1  # interface flag: administratively up
 
@@ -58,13 +60,22 @@ def oper_to_state(oper: str) -> str:
 
 
 def parse_iface_states(text: str) -> dict[str, dict]:
-    """Parse the interface probe's output: {name: {"oper", "admin_up", "alias"}}.
+    """Parse the interface probe's output: {name: {"oper", "admin_up", "rx",
+    "tx", "alias"}}.
 
-    ``admin_up`` is None when the flags could not be read.
+    ``admin_up`` is None when the flags could not be read, ``rx``/``tx``
+    (byte counters) when the statistics could not.
     """
+    def count(value):
+        value = value.strip()
+        return int(value) if value.isdigit() else None
+
     ifaces = {}
     for line in text.splitlines():
-        name, oper, flags, alias = (line.split("\t", 3) + ["", "", ""])[:4]
+        parts = line.split("\t", 5)
+        if len(parts) <= 4:  # name, oper, flags, alias: without counters
+            parts = (parts + [""] * 3)[:3] + ["", ""] + parts[3:4]
+        name, oper, flags, rx, tx, alias = (parts + [""] * 5)[:6]
         name = name.strip()
         if not name or name == "*":  # "*": the glob matched nothing
             continue
@@ -73,7 +84,7 @@ def parse_iface_states(text: str) -> dict[str, dict]:
         except ValueError:
             admin_up = None
         ifaces[name] = {"oper": oper.strip().lower(), "admin_up": admin_up,
-                        "alias": alias.strip()}
+                        "rx": count(rx), "tx": count(tx), "alias": alias.strip()}
     return ifaces
 
 
@@ -113,14 +124,21 @@ def linux_iface_names(kind: str, iface: str) -> tuple[list[str], bool]:
     return [iface], bool(_LINUX_NAME.fullmatch(iface))
 
 
+def find_iface(ifaces: dict, kind: str, iface: str) -> Optional[str]:
+    """The name a topology endpoint's interface has in the probe result."""
+    candidates, _ = linux_iface_names(kind, iface)
+    found = next((c for c in candidates if c in ifaces), None)
+    if found is None:  # containerlab sets no ifalias, but other tools might
+        found = next((n for n, i in ifaces.items() if i["alias"] == iface), None)
+    return found
+
+
 def endpoint_state(ifaces: Optional[dict], kind: str, iface: str) -> tuple[str, str]:
     """(up|down|unknown, detail) of one link end, given its node's probe result."""
     if ifaces is None:
         return "unknown", "interface state not available"
-    candidates, sure = linux_iface_names(kind, iface)
-    found = next((c for c in candidates if c in ifaces), None)
-    if found is None:  # containerlab sets no ifalias, but other tools might
-        found = next((n for n, i in ifaces.items() if i["alias"] == iface), None)
+    _, sure = linux_iface_names(kind, iface)
+    found = find_iface(ifaces, kind, iface)
     if found is None:
         return ("down", "interface missing") if sure else ("unknown", "interface not found")
     info = ifaces[found]
@@ -160,11 +178,43 @@ def link_states(links: list[dict], nodes: dict[str, dict]) -> dict[str, dict]:
                                                end["iface"])
             ends[side] = {"node": end["node"], "iface": end["iface"],
                           "state": state, "detail": detail}
+            found = node.get("ifaces") and find_iface(node["ifaces"], node.get("kind", ""), end["iface"])
+            if found:  # byte counters, for link_rates
+                ends[side]["rx"] = node["ifaces"][found].get("rx")
+                ends[side]["tx"] = node["ifaces"][found].get("tx")
         states = {e["state"] for e in ends.values()}
         overall = "down" if "down" in states else "unknown" if "unknown" in states or not ends \
             else "up"
         result[link["id"]] = {"state": overall, **ends}
     return result
+
+
+def link_rates(previous: Optional[dict], current: dict) -> None:
+    """Add each link's traffic, in bits per second, to ``current`` (a live
+    snapshot) from the byte counters of the read before: ``"rate": {"ab",
+    "ba"}``, a to b from a's transmit counter (else b's receive), b to a
+    likewise. Nothing when a counter is missing or went back (a restart)."""
+    if not previous or not previous.get("updated") or not current.get("updated"):
+        return
+    seconds = current["updated"] - previous["updated"]
+    if seconds <= 0:
+        return
+    before = previous.get("links") or {}
+
+    def delta(link_id, side, key):
+        new = (current["links"][link_id].get(side) or {}).get(key)
+        old = ((before.get(link_id) or {}).get(side) or {}).get(key)
+        if new is None or old is None or new < old:
+            return None
+        return (new - old) * 8 / seconds
+
+    for link_id in current.get("links") or {}:
+        ab = delta(link_id, "a", "tx")
+        ab = ab if ab is not None else delta(link_id, "b", "rx")
+        ba = delta(link_id, "b", "tx")
+        ba = ba if ba is not None else delta(link_id, "a", "rx")
+        if ab is not None or ba is not None:
+            current["links"][link_id]["rate"] = {"ab": round(ab or 0), "ba": round(ba or 0)}
 
 
 # --- docker stats ------------------------------------------------------

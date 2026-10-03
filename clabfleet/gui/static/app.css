@@ -916,3 +916,7 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 .toast { display: flex; align-items: center; gap: 10px; }
 .toast.good { border-color: var(--line); }
 .toast[hidden] { display: none; }
+
+/* ---------- utilisation (feature 5) and what-if (feature 6) ---------- */
+.diagram .link.busy { stroke: var(--c5); }
+.whatif:empty { display: none; }

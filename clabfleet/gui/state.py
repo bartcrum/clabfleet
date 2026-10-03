@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from ..capture import sweep_helpers
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
 from ..deployer import LabDeployer, read_placement_record
-from ..livestate import LiveCache, link_states, probe_ifaces, probe_stats
+from ..livestate import LiveCache, link_rates, link_states, linux_iface_names, probe_ifaces, probe_stats
 from ..nodes import InspectError, access_modes, inspect_all, parse_inspect, run_docker
 from ..readiness import ReadinessCache, check_ready
 from ..execute import ssh_exec
@@ -346,6 +346,50 @@ class Workspace:
         out = diff_lab(self.topology_path(topo_id), nodes=[node], against=against)
         return {**out, **out["nodes"][0]}
 
+    WHATIF = {"link-down", "link-up", "freeze", "resume"}
+
+    def whatif(self, topo_id: str, action: str, node: str, iface: str = "") -> str:
+        """A reversible failure on a running lab (what-if): shut or restore one
+        interface inside a node (``ip link set``), or freeze or resume a node
+        (``docker pause``: its links stay up, it stops answering, so its
+        neighbours time out). Returns what was done."""
+        if action not in self.WHATIF:
+            raise ValueError(f"action must be one of {', '.join(sorted(self.WHATIF))}")
+        topo = load_topology(self.topology_path(topo_id))
+        if node not in topo.nodes:
+            raise ValueError(f"No node '{node}' in {topo_id}")
+        container = next((c for hs in self.runtime(max_age=0) for c in hs.containers
+                          if c["lab"] == topo.name and c["node"] == node), None)
+        if not container:
+            raise ValueError(f"{node} is not deployed")
+        host = self.host(container["host"])
+        runner = self.runner(host)
+        name = container["container"]
+        try:
+            if action in ("freeze", "resume"):
+                verb = "pause" if action == "freeze" else "unpause"
+                res = run_docker(runner, ["docker", verb, name], host.sudo)
+                if res.exit_code != 0:
+                    raise RuntimeError((res.stderr or res.stdout).strip()[-300:] or f"docker {verb} failed")
+                return f"{node} {'frozen' if action == 'freeze' else 'resumed'}"
+            if container.get("state") != "running":
+                raise ValueError(f"{node} is not running")
+            if not any(e.get("iface") == iface for link in topology_view(topo)["links"]
+                       for e in (link["a"], link["b"]) if e.get("node") == node):
+                raise ValueError(f"{node} has no link on '{iface}'")
+            state = "down" if action == "link-down" else "up"
+            candidates, _ = linux_iface_names(container.get("kind", ""), iface)
+            errors = []
+            for linux in candidates:  # the kernel name, then the topology's own
+                res = run_docker(runner, ["docker", "exec", name, "ip", "link", "set", "dev", linux, state],
+                                 host.sudo)
+                if res.exit_code == 0:
+                    return f"{node}:{iface} {'shut' if state == 'down' else 'up again'}"
+                errors.append((res.stderr or res.stdout).strip()[-200:])
+            raise RuntimeError(f"ip link set {state} failed: {'; '.join(errors)}")
+        finally:
+            self.invalidate_runtime()
+
     def running_diff(self, topo_id: str, node: str) -> dict:
         """A node's running config, read now, against its startup config.
 
@@ -606,6 +650,7 @@ class Workspace:
                         "errors": {"": str(exc)}}
         else:
             self.events.observe(topo_id, "links", link_items(snapshot), snapshot["updated"])
+            link_rates(self.live.get(topo_id)[0], snapshot)
         self.live.store(topo_id, snapshot)
 
     def _recent_runtime(self) -> list[HostState]:
