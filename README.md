@@ -9,6 +9,11 @@ Topology files are **standard containerlab files** (`*.clab.yml`). Anything
 containerlab accepts works here, and every file in `topologies/` still
 deploys with plain `containerlab deploy`.
 
+![The web GUI's rack view of the EVPN MLAG lab: one rack for the host, a device per node with its ports and link LEDs, and a cable per link coloured by its role](docs/images/rack-view.png)
+
+*The [web GUI](docs/gui.md)'s rack view of `topologies/evpn_mlag.clab.yml`,
+running on one host.*
+
 ## Features
 
 - **Deploy / destroy / save / inspect** labs locally or on a remote host over SSH
