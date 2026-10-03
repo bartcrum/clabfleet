@@ -221,6 +221,7 @@
         <button class="dock-tab active" data-pane="activity"><span id="activity-dot" class="dot"></span>Activity</button>
         <button class="dock-tab" data-pane="health"><span id="health-dot" class="dot"></span>Health<span id="health-count" class="tab-count"></span></button>
         <button class="dock-tab operator-only" data-pane="run" title="Run a command on many nodes">Run</button>
+        <button class="dock-tab" data-pane="trace" title="Path trace: which way traffic goes">Trace</button>
         <button class="dock-tab" data-pane="events">Events<span id="events-count" class="tab-count" title="Changes in the last 10 minutes"></span></button>
       </div>
       <button id="dock-toggle" class="btn ghost small" title="Show/hide panel">▴</button>
@@ -263,6 +264,19 @@
           </div>
         </form>
         <div id="run-out" class="run-out"></div>
+      </div>
+      <!-- Feature 1: path trace -->
+      <div class="pane trace-pane" data-pane="trace">
+        <form id="trace-form" class="activity-bar run-bar">
+          <select id="trace-src" aria-label="From"></select>
+          <span class="muted small" aria-hidden="true">→</span>
+          <input id="trace-dst" class="mono" list="trace-nodes" placeholder="Node or IP address"
+                 aria-label="To (a node or an IP address)" autocomplete="off" spellcheck="false">
+          <datalist id="trace-nodes"></datalist>
+          <button id="trace-go" class="btn small primary">Trace</button>
+          <button id="trace-clear" type="button" class="btn small">Clear</button>
+        </form>
+        <div id="trace-out" class="run-out"></div>
       </div>
       <!-- Feature 2: what changed between live reads, so flaps stay visible -->
       <div class="pane events-pane" data-pane="events">
@@ -435,5 +449,6 @@
   <script src="/static/palette.js"></script>
   <script src="/static/export.js"></script>
   <script src="/static/run.js"></script>
+  <script src="/static/trace.js"></script>
 </body>
 </html>

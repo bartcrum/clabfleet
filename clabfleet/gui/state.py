@@ -349,6 +349,59 @@ class Workspace:
         out = diff_lab(self.topology_path(topo_id), nodes=[node], against=against)
         return {**out, **out["nodes"][0]}
 
+    def _vteps(self, topo) -> dict[str, str]:
+        """VTEP address -> node, from the startup configs."""
+        evpn = routing_view(topo).get("evpn") or {}
+        return {v["ip"]: n for n, v in (evpn.get("vteps") or {}).items() if v.get("ip")}
+
+    def evpn_routes(self, topo_id: str, node: str) -> list[dict]:
+        """A cEOS VTEP's EVPN routes: hosts and prefixes per VNI, and from
+        which VTEP (``routing.evpn_routes``)."""
+        from ..routing.evpn_routes import parse_eos_evpn_routes
+
+        topo = load_topology(self.topology_path(topo_id))
+        if node not in topo.nodes:
+            raise ValueError(f"No node '{node}' in {topo_id}")
+        if cli_family(topo.effective_node(node)["kind"] or "") != "eos":
+            raise ValueError("EVPN routes can be read from cEOS nodes only")
+        ask = lambda cmd: self.node_command(topo.name, node, cmd, shell=False)  # noqa: E731
+        return parse_eos_evpn_routes(ask("show bgp evpn route-type mac-ip detail | json"),
+                                     ask("show bgp evpn route-type ip-prefix ipv4 detail | json"),
+                                     self._vteps(topo))
+
+    def trace(self, topo_id: str, src: str, dst: str) -> dict:
+        """Path trace from node ``src`` to a node or an address
+        (``routing.trace``). A node destination is its router-id, or for a
+        host its first address outside the management network."""
+        from ..routing.trace import Lab, TraceError, trace
+
+        topo = load_topology(self.topology_path(topo_id))
+        if src not in topo.nodes:
+            raise ValueError(f"No node '{src}' in {topo_id}")
+        dst_node = dst if dst in topo.nodes else None
+        if dst_node:
+            dst = self._node_address(topo, dst_node)
+        kinds = {n: topo.effective_node(n)["kind"] or "" for n in topo.nodes}
+        lab = Lab(topology_view(topo), kinds, self._vteps(topo))
+        try:
+            result = trace(lab, lambda node, cmd: self.node_command(topo.name, node, cmd), src, dst, dst_node)
+        except TraceError as exc:
+            raise ValueError(str(exc)) from None
+        return {"src": src, "dst": dst, "dst_node": dst_node, **result}
+
+    def _node_address(self, topo, node: str) -> str:
+        view = routing_view(topo)
+        for proto in ("bgp", "ospf"):
+            rid = ((view.get(proto) or {}).get("nodes") or {}).get(node, {}).get("router_id")
+            if rid:
+                return rid
+        text = self.node_command(topo.name, node, "ip -o -4 addr show")
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) > 3 and parts[1] not in ("lo", "eth0") and parts[2] == "inet":
+                return parts[3].split("/")[0]
+        raise ValueError(f"{node} has no address to trace to; give an IP address")
+
     WHATIF = {"link-down", "link-up", "freeze", "resume"}
 
     def whatif(self, topo_id: str, action: str, node: str, iface: str = "") -> str:
@@ -446,6 +499,11 @@ class Workspace:
     def running_config(self, lab: str, node: str, command: str = "show running-config") -> str:
         """``command`` (``show running-config``) on a running node: through
         ``docker exec`` on cEOS, over SSH on IOS kinds. ValueError for others."""
+        return self.node_command(lab, node, command, shell=False)
+
+    def node_command(self, lab: str, node: str, command: str, shell: bool = True) -> str:
+        """A read-only command on a running node: the CLI on cEOS (``Cli``),
+        SSH on IOS kinds, and with ``shell`` ``sh -c`` on any other kind."""
         container = next((c for hs in self._recent_runtime() for c in hs.containers
                           if c["lab"] == lab and c["node"] == node), None)
         if not container or container.get("state") != "running":
@@ -457,14 +515,20 @@ class Workspace:
             res = run_docker(runner, ["docker", "exec", container["container"], "Cli", "-p", "15",
                                       "-c", command], host.sudo)
             if res.exit_code != 0:
-                raise RuntimeError((res.stderr or res.stdout).strip()[-300:] or "show running-config failed")
+                raise RuntimeError((res.stderr or res.stdout).strip()[-300:] or f"{command} failed")
             return res.stdout
         if fam == "ios":
             code, text = ssh_exec(runner, container["kind"], container["ipv4"], command,
                                   timeout=PROTOCOL_SSH_TIMEOUT)
             if code != 0:
-                raise RuntimeError(text.strip()[-300:] or "show running-config failed")
+                raise RuntimeError(text.strip()[-300:] or f"{command} failed")
             return text
+        if shell:
+            res = run_docker(runner, ["timeout", "15", "docker", "exec", container["container"],
+                                      "sh", "-c", command], host.sudo)
+            if res.exit_code != 0:
+                raise RuntimeError((res.stderr or res.stdout).strip()[-300:] or f"{command} failed")
+            return res.stdout
         raise ValueError(f"Reading the running config of kind '{container.get('kind')}' is not supported")
 
     # --- editing ---

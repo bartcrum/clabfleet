@@ -253,6 +253,7 @@ projectors for training sessions.
 1. **Path trace — M.** Pick two nodes or a prefix and highlight the hops
    traffic takes (from `show ip route` / `traceroute`), ECMP paths as
    parallel highlights.
+   **Done** (branch `gui-batch5`): a Trace tab (viewers too) walks the running tables from a node to a node or an address: cEOS routes (VRFs, VXLAN next hops to VTEPs), IOS and Linux routes, and for bridged traffic ARP, the MAC and VXLAN tables, EVPN MAC/IP routes or the flood list. Hops are listed and highlighted on the Diagram, every ECMP branch, VXLAN hops as arcs.
 2. **Protocol event timeline — S–M.** The live poller already reads every
    10 s; record changes ("Spine-1↔Leaf-2 down 14:02:11, up 14:02:40") in
    a strip under the diagram so flaps are visible after the fact.
@@ -260,6 +261,7 @@ projectors for training sessions.
 3. **EVPN MAC/IP per VNI — M.** Which hosts (type-2 / type-5 routes) are
    learned on each VNI and from which VTEP, in the VTEP's card. The part
    of roadmap 4.2 left for later.
+   **Done** (branch `gui-batch5`): a cEOS VTEP's EVPN card reads its type-2 and type-5 routes on demand: per VNI (the VNI filter applies), host MAC/IP or prefix, and the VTEP (lab node) it came from or "local".
 4. **Drift → diff in one click — S.** A drift warning links to the config
    diff tab for that node, with Save configs next to it.
    **Done** (branch `gui-batch1`): drift rows (Health, routing cards) get Config diff and Save configs; the diff tab gains "running config now vs its startup config" (EOS's own `show running-config diffs` on cEOS).
