@@ -377,6 +377,7 @@ async function refreshHosts() {
   const box = $("#hosts");
   try {
     const hosts = await api("/api/hosts");
+    S.hostInfo = hosts;
     box.replaceChildren(...hosts.map((hst) => {
       const meta = hst.ok
         ? `clab ${hst.version || "missing"} · ${hst.cpus ?? "?"} CPU · ${fmtMem(hst.mem_available_mb)} free`
@@ -1553,6 +1554,14 @@ function renderDiagram(fit) {
 
   const g = s("g", { id: "viewport", transform: `translate(${S.view.x},${S.view.y}) scale(${S.view.k})` });
 
+  // Rack view: hosts as racks, links as cables (racks.js)
+  window.Racks?.sync();
+  if (window.Racks?.active()) {
+    window.Racks.draw(g, diagramModel);
+    showDiagram(svg, g, fit);
+    return;
+  }
+
   // Interface labels go in their own layer above the nodes
   const labels = s("g", { class: "labels" });
 
@@ -1641,12 +1650,21 @@ function renderDiagram(fit) {
   window.Annotations?.decorate(g);
   window.Lanes?.decorate(g, P);  // last: behind the boxes
   g.append(labels);
+  showDiagram(svg, g, fit);
+}
+
+function showDiagram(svg, g, fit) {
   svg.replaceChildren(g);
   applyView(svg, "viewport", S.view);
   markKb(svg);
   renderFreshness();
   refocusDiagram();
   if (fit) fitDiagram();
+}
+
+// Where each node is drawn now: the rack view's slots or the logical positions
+function drawnPositions() {
+  return window.Racks?.active() ? window.Racks.positions() : S.positions;
 }
 
 function truncate(str, n) {
@@ -1806,11 +1824,12 @@ function nodeLabel(id) {
 function fitDiagram() {
   const svg = $("#diagram");
   const pts = Object.values(S.positions);
-  if (!pts.length) return;
+  const racks = window.Racks?.active() ? window.Racks.bounds() : null;
+  if (!pts.length && !racks) return;
   const w = svg.clientWidth || 800, hgt = svg.clientHeight || 500;
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
-  const minX = Math.min(...xs) - NODE_W, maxX = Math.max(...xs) + NODE_W;
-  const minY = Math.min(...ys) - NODE_H * 1.5, maxY = Math.max(...ys) + NODE_H * 1.5;
+  const minX = racks ? racks.x0 : Math.min(...xs) - NODE_W, maxX = racks ? racks.x1 : Math.max(...xs) + NODE_W;
+  const minY = racks ? racks.y0 : Math.min(...ys) - NODE_H * 1.5, maxY = racks ? racks.y1 : Math.max(...ys) + NODE_H * 1.5;
   const k = Math.min(1.4, Math.min(w / (maxX - minX), hgt / (maxY - minY)));
   S.view = { k, x: w / 2 - ((minX + maxX) / 2) * k, y: hgt / 2 - ((minY + maxY) / 2) * k };
   applyView(svg, "viewport", S.view);
@@ -1824,7 +1843,11 @@ function setupDiagramInteraction() {
   svg.addEventListener("pointerdown", (ev) => {
     const nodeEl = ev.target.closest(".node");
     svg.setPointerCapture(ev.pointerId);
-    if (nodeEl) {
+    if (nodeEl && window.Racks?.active()) {
+      // Rack slots are computed: a press on a device is a click, a drag pans
+      drag = { type: "pan", node: nodeEl.dataset.id, sx: ev.clientX, sy: ev.clientY, start: { ...S.view }, moved: false };
+      svg.classList.add("panning");
+    } else if (nodeEl) {
       const id = nodeEl.dataset.id;
       drag = { type: "node", id, sx: ev.clientX, sy: ev.clientY, start: [...S.positions[id]], moved: false };
     } else {
@@ -1855,7 +1878,8 @@ function setupDiagramInteraction() {
       if (drag.moved) savePositions();
       else nodeClicked(drag.id);
     } else if (!drag.moved) {
-      if (drag.link) selectLink(drag.link);
+      if (drag.node) nodeClicked(drag.node);
+      else if (drag.link) selectLink(drag.link);
       else selectNode(null);
     }
     drag = null;
@@ -1870,7 +1894,7 @@ function setupDiagramInteraction() {
 
   // Node keys first: they claim the arrows while on a node, zoom pans otherwise
   setupNodeKeys(svg, {
-    nodes: () => (diagramModel?.nodes || []).filter((n) => !n.pseudo).map((n) => ({ id: n.id, pos: S.positions[n.id] })),
+    nodes: () => (diagramModel?.nodes || []).filter((n) => !n.pseudo).map((n) => ({ id: n.id, pos: drawnPositions()[n.id] })),
     links: () => (diagramModel?.links || []).map((l) => [l.a.id, l.b.id]),
     label: nodeLabel,
     selected: () => S.selectedNode,

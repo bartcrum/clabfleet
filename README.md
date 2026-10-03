@@ -478,6 +478,14 @@ an operator.
   tinted lane per host, so the links between hosts (VXLAN) are the ones
   crossing lane borders. Turning it off puts the nodes back; Save layout
   keeps the lanes.
+- **Rack view:** Racks on the Diagram draws each host as a rack with the
+  nodes in its slots, one port per interface the topology uses, and each
+  link as a cable between those ports. Links inside a host loop through the
+  cable manager beside its rack; links between hosts run through the cable
+  tray on top with their VNI. Cable colour is the link's role (fabric,
+  parallel pair, host access, outside the lab), port LEDs its live state.
+  Clicking, terminals and capture work as in the logical view; the choice is
+  remembered in the browser.
 - **Minimap:** labs of 16 nodes or more get a small map of the whole
   diagram above the zoom buttons; click or drag in it to move there.
 - **Narrow screens:** on a tablet or phone the sidebar is a rail that opens

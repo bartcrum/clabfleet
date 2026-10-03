@@ -193,6 +193,17 @@ async def steps(page):
     assert await page.js("document.querySelectorAll('#diagram .node use.dev').length") == 10
     await page.until("document.querySelector('#diagram-fresh').textContent.startsWith('live')")
     assert "running" in await page.js("document.querySelector('#lab-stats').textContent")
+    # Rack view: one rack for the one host, a device per node, a cable per link; then back
+    await page.js("document.querySelector('#racks-toggle').click()")
+    await page.until("document.querySelectorAll('#diagram .rack-dev').length === 10")
+    assert await page.js("document.querySelectorAll('#diagram .rack').length") == 1
+    assert await page.js("document.querySelectorAll('#diagram .cable').length") == \
+        await page.js("document.querySelectorAll('#diagram .link-hit').length") > 0
+    assert await page.js("document.body.classList.contains('racks-view')")
+    await page.js("nodeClicked('Spine-1')")
+    await page.until("document.querySelector('#diagram .rack-dev.selected')?.dataset.id === 'Spine-1'")
+    await page.js("document.querySelector('#racks-toggle').click()")
+    await page.until("!document.querySelector('#diagram .rack-dev')")
     # Inspector, tabs, routing (intended and live), YAML
     await page.js("selectNode('Leaf-1')")
     await page.until("!document.querySelector('#inspector').hidden")
