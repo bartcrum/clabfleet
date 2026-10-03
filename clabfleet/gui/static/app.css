@@ -833,3 +833,46 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 .sidebar.collapsed .lab-none { display: none; }
 .sidebar.collapsed .lab-item { justify-content: center; padding: 9px 0; }
 .sidebar.collapsed .side-toggle { right: 14px; }
+
+/* ---------- events (feature 2) ---------- */
+.pane.events-pane.active { display: flex; flex-direction: column; }
+.events-strip { flex: none; width: 100%; height: 26px; display: block; border-bottom: 1px solid var(--line); }
+.ev-axis { stroke: var(--line); }
+.ev-tick { font-size: var(--fs-xs); fill: var(--muted); }
+.ev-mark.ok { fill: var(--ok); }
+.ev-mark.warn { fill: var(--warn); }
+.ev-mark.error { fill: var(--danger); }
+.sev.info.ok { box-shadow: none; background: var(--ok); }
+
+/* ---------- export (feature 11) and motion (C5) ---------- */
+.export-menu { min-width: 150px; }
+.diagram .node.pulse > rect:first-of-type { animation: node-pulse 1.2s ease-out 1 var(--pulse-delay, 0s) both; }
+.diagram .rt-edge.pulse { animation: edge-pulse 1.2s ease-out 1 var(--pulse-delay, 0s) both; }
+@keyframes node-pulse { 0% { stroke: var(--select); stroke-width: 6; } 100% { stroke-width: 1.2; } }
+@keyframes edge-pulse { 0% { stroke-width: 7; } 100% { stroke-width: 2; } }
+.diagram .link { transition: stroke .4s; }
+
+/* ---------- high contrast (F2): projectors, bright rooms ---------- */
+:root[data-theme="contrast"] {
+  --bg: #000000; --panel: #000000; --panel-2: #141414; --line: #ffffff;
+  --text: #ffffff; --muted: #e6e6e6;
+  --accent: #00e676; --accent-ink: #000000;
+  --ok: #00e676; --warn: #ffd600; --danger: #ff5252; --danger-ink: #000000;
+  --action: #ffffff; --action-ink: #000000; --select: #40c4ff; --blue: #40c4ff;
+  --node: #000000; --node-line: #ffffff; --link: #ffffff; --term-bg: #000000;
+  --c0: #40c4ff; --c1: #00e676; --c2: #ffd600; --c3: #ff4081;
+  --c4: #e040fb; --c5: #18ffff; --c6: #ff9100; --c7: #c6ff00; --evpn: #e040fb;
+  color-scheme: dark;
+}
+:root[data-theme="contrast"] .diagram .link,
+:root[data-theme="contrast"] .diagram .rt-edge { stroke-width: 2.6; }
+:root[data-theme="contrast"] .diagram .node rect { stroke-width: 2; }
+:root[data-theme="contrast"] .diagram .rt-group .tint,
+:root[data-theme="contrast"] .diagram .rt-underlay { display: none; }
+:root[data-theme="contrast"] .diagram .iface,
+:root[data-theme="contrast"] .diagram .rt-label { fill: var(--text); }
+:root[data-theme="contrast"] .btn, :root[data-theme="contrast"] .card,
+:root[data-theme="contrast"] .seg { border-width: 2px; }
+:root[data-theme="contrast"] .dev { opacity: 1; }
+/* Lines are white here: what is filled with the line colour gets dark text */
+:root[data-theme="contrast"] .seg-btn.active { background: var(--text); color: var(--bg); }

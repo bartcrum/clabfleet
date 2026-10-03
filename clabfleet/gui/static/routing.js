@@ -9,7 +9,7 @@
 // Uses app.js globals: S, $, h, s, api, toast, NODE_W, NODE_H, PSEUDO_W,
 // PSEUDO_H, graphModel, ensurePositions, savePositions, truncate, ifaceLabel,
 // nodeRuntime, nodeState, canOperate, openTerminal, nodeFace, TEXT_X,
-// applyView, zoomAt, setupZoom, setupNodeKeys, markKb, announce, freshness.
+// applyView, zoomAt, setupZoom, setupNodeKeys, markKb, announce, freshness, noteState.
 // ---------------------------------------------------------------------------
 
 const RT = {
@@ -447,7 +447,11 @@ function rtRender() {
     const selected = RT.sel?.type === "edge" && RT.sel.id === e.id;
     const style = e.color != null ? `--c: var(--c${e.color % RT_PALETTE})` : null;
     const ends = `${e.a}|${e.b}`;
-    g.append(s("path", { class: `${e.cls}${e.color != null ? " colored" : ""}${selected ? " selected" : ""}`, d: geo.d, style, "data-ends": ends }));
+    const live = rtLiveEntry(e.id)?.state;
+    const changed = live ? noteState(`${rtTopoId()}/${e.id}`, live) : null;
+    const pulse = changed != null ? `; --pulse-delay: -${Math.round(changed)}ms` : "";
+    g.append(s("path", { class: `${e.cls}${e.color != null ? " colored" : ""}${selected ? " selected" : ""}${changed != null ? " pulse" : ""}`,
+                         d: geo.d, style: style || pulse ? `${style || ""}${pulse}` : null, "data-ends": ends }));
     g.append(s("path", { class: "link-hit", d: geo.d, "data-edge": e.id }, s("title", {}, e.title)));
     if (e.label) {
       labels.append(s("text", { class: "rt-label", x: geo.mid[0], y: geo.mid[1] - 4, "text-anchor": "middle", "data-ends": ends }, e.label));
@@ -1007,6 +1011,7 @@ window.Routing = {
   prefetch() { if (RT.topo !== rtTopoId()) rtLoad(); },
   loaded() { return !!RT.data && RT.topo === rtTopoId() && !RT.data.error; },
   health: rtHealth,
+  focus: rtFocus,
   nodeSummary: rtNodeSummary,
   // Keep the live state fresh while the Health panel is open (called on
   // every render, so at most one request per few seconds)

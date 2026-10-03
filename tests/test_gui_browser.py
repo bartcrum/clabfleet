@@ -124,6 +124,12 @@ def test_gui_pages_load_without_errors(tmp_path, monkeypatch):
         shutil.copy(TOPOLOGIES / name, tmp_path / name)
     ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
     _fake_lab(monkeypatch, ws)
+    # A link that went down, for the Events tab
+    link = {"a": {"node": "Spine-1", "iface": "eth1"}, "b": {"node": "Leaf-1", "iface": "eth1"}}
+    for state in ("up", "down"):
+        ws.events.observe("spine_leaf.clab.yml", "links",
+                          {"link:x": {"kind": "link", "id": "x", "state": state, "label": "Spine-1:eth1 ↔ Leaf-1:eth1"}},
+                          time.time())
 
     async def scenario():
         srv = TestServer(server.create_app(ws, "tok"), host="127.0.0.1")
@@ -203,6 +209,18 @@ async def steps(page):
     await page.until("document.querySelector('#health-list').children.length > 0")
     await page.js("openDiff('spine_leaf.clab.yml', 'Leaf-1', 'running')")
     await page.until("[...document.querySelectorAll('.pane.activity-pane pre')].some(p => p.textContent.includes('No drift'))")
+    # Events: the recorded change, in the list and on the strip
+    await page.js("document.querySelector('.dock-tab[data-pane=\"events\"]').click()")
+    await page.until("document.querySelectorAll('#events-list .health-row').length === 1")
+    assert await page.js("document.querySelectorAll('#events-strip .ev-mark.error').length") == 1
+    # Export: both canvases build standalone SVG in both themes
+    for svg, vp in (("diagram", "viewport"), ("routing", "rt-viewport")):
+        await page.js(f"showView('{svg}')")
+        await page.until(f"!!document.querySelector('#{vp}')")
+        for theme in ("light", "dark"):
+            text = await page.js(f"window.Export.build(document.querySelector('#{svg}'), '{vp}', '{theme}').text")
+            assert text.startswith("<svg") and "--bg:" in text and "<symbol" in text, svg
+    await page.js("showView('diagram')")
     # Command palette: find a node and jump to it
     await page.js("window.Palette.open()")
     await page.js("const i = document.querySelector('#palette-input'); i.value = 'leaf-3'; "
@@ -227,7 +245,10 @@ async def steps(page):
     await page.until("document.querySelectorAll('#topo-list .lab-item').length === 1")
     await page.js("document.querySelector('#side-toggle').click()")
     await page.until("document.querySelector('#sidebar').classList.contains('collapsed')")
-    await page.js("document.querySelector('#side-toggle').click(); document.querySelector('#theme').click()")
+    await page.js("document.querySelector('#side-toggle').click()")
+    for _ in range(4):  # every theme, back to the first
+        await page.js("document.querySelector('#theme').click()")
+        await page.until("document.querySelectorAll('#diagram .node').length > 0")
     # A lab that is not deployed
     await page.js("selectTopology('evpn_fabric.clab.yml')")
     await page.until("document.querySelectorAll('#diagram .node').length === 10")

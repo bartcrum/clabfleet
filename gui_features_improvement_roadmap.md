@@ -169,6 +169,7 @@ visual language is shared.
 A short pulse when a node or session changes state, edges fading between
 colours, booting nodes breathing. All disabled under
 `prefers-reduced-motion`.
+**Done** (branch `gui-batch2`): a node, or a session/tunnel on Routing Live, pulses once when its state changes (continuing smoothly across redraws); nothing under reduced motion.
 
 ### D. States and feedback
 
@@ -229,6 +230,7 @@ already split into `:root` and a light override, so this is mostly a
 **F2. High-contrast theme — S**
 Thicker strokes, no tints, maximum-contrast status colours. Useful on
 projectors for training sessions.
+**Done** (branch `gui-batch2`): black, white lines, saturated status colours, thicker strokes, no tints; in the theme cycle and the palette.
 
 ### Suggested design order
 
@@ -259,6 +261,7 @@ projectors for training sessions.
 4. **Drift → diff in one click — S.** A drift warning links to the config
    diff tab for that node, with Save configs next to it.
    **Done** (branch `gui-batch1`): drift rows (Health, routing cards) get Config diff and Save configs; the diff tab gains "running config now vs its startup config" (EOS's own `show running-config diffs` on cEOS).
+   **Done** (branch `gui-batch2`): the server records changes of links (Diagram live state) and of sessions, adjacencies and tunnels (Routing Live / Health) between reads; an Events tab lists them and draws the last 30 minutes as a strip; a row jumps to its link or session.
 
 **Live state and traffic**
 
@@ -291,3 +294,4 @@ projectors for training sessions.
 12. **Diagram annotations — S–M.** Sticky notes and labelled boxes
     ("DC1", "tenant A") saved as labels in the topology file, like
     positions.
+    **Done** (branch `gui-batch2`): Export on the Diagram and Routing tabs, SVG or PNG (2x), light or dark, standalone (styles, colours and glyphs inlined).
