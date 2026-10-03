@@ -13,8 +13,8 @@ PATH). Without one the test is skipped, unless CLABFLEET_REQUIRE_BROWSER=1
 import asyncio
 import json
 import os
+import re
 import shutil
-import socket
 import subprocess
 import tempfile
 import time
@@ -45,12 +45,6 @@ def _browser():
             pytest.fail("No Chrome or Chromium found, and CLABFLEET_REQUIRE_BROWSER=1")
         pytest.skip("No Chrome or Chromium for the browser smoke test")
     return path
-
-
-def _free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _fake_lab(monkeypatch, ws):
@@ -134,27 +128,29 @@ def test_gui_pages_load_without_errors(tmp_path, monkeypatch):
     async def scenario():
         srv = TestServer(server.create_app(ws, "tok"), host="127.0.0.1")
         await srv.start_server()
-        port = _free_port()
         profile = tempfile.mkdtemp(prefix="clabfleet-browser-")
         log = open(os.path.join(profile, "browser.log"), "w+")
         proc = subprocess.Popen(
-            [browser, "--headless=new", f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
+            # Port 0: Chrome picks a free one and prints it ("DevTools listening on ws://...")
+            [browser, "--headless=new", "--remote-debugging-port=0", f"--user-data-dir={profile}",
              "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--no-sandbox",
              "--window-size=1440,900", "about:blank"],
             stdout=log, stderr=subprocess.STDOUT)
         try:
             async with aiohttp.ClientSession() as http:
-                for _ in range(200):
-                    if proc.poll() is not None:
-                        break
-                    try:
-                        async with http.get(f"http://127.0.0.1:{port}/json") as resp:
-                            tabs = await resp.json()
-                        break
-                    except aiohttp.ClientError:
+                tabs = None
+                deadline = time.monotonic() + 45  # a cold start on a busy CI runner is slow
+                while tabs is None and proc.poll() is None and time.monotonic() < deadline:
+                    log.seek(0)
+                    m = re.search(r"DevTools listening on ws://[^:/]+:(\d+)/", log.read())
+                    if m:
+                        try:
+                            async with http.get(f"http://127.0.0.1:{m[1]}/json") as resp:
+                                tabs = await resp.json()
+                        except aiohttp.ClientError:
+                            pass
+                    if tabs is None:
                         await asyncio.sleep(0.1)
-                else:
-                    tabs = None
                 if proc.poll() is not None or tabs is None:
                     log.seek(0)
                     raise AssertionError(f"{browser} did not start its DevTools "
