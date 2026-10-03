@@ -507,7 +507,7 @@ async function generate(ev) {
 
 // --- new lab ------------------------------------------------------------------------
 
-async function openNewLab() {
+async function openNewLab(template = "") {
   try { await builderInfo(); } catch (e) { toast(e.message); return; }
   if (!(await window.Builder.confirmLeave())) return;
   const dlg = $("#newlab-dlg");
@@ -518,6 +518,11 @@ async function openNewLab() {
   $("#newlab-file").value = "";
   $("#newlab-file").dataset.auto = "1";
   $("#newlab-error").hidden = true;
+  $("#newlab-template").value = B.info.templates[template] ? template : "";
+  if (template) {
+    $("#newlab-name").value = B.info.templates[template].default_name;
+    $("#newlab-name").dispatchEvent(new Event("input"));
+  }
   renderNewLabParams();
   dlg.showModal();
   $("#newlab-name").focus();
@@ -567,7 +572,7 @@ function builderSetup() {
   $("#gen-form").addEventListener("submit", generate);
   $("#gen-routing").addEventListener("change", () => { $("#gen-asn-row").hidden = $("#gen-routing").value !== "bgp"; });
   $("#builder-discard").addEventListener("click", async () => { if (await confirmLeave()) stopEditing(); });
-  $("#new-lab").addEventListener("click", openNewLab);
+  $("#new-lab").addEventListener("click", () => openNewLab());
   $("#newlab-form").addEventListener("submit", createLab);
   $("#newlab-template").addEventListener("change", renderNewLabParams);
   $("#newlab-kind").addEventListener("change", renderNewLabParams);
@@ -587,6 +592,9 @@ window.Builder = {
   decorateNode,
   // Another topology was selected (after confirmLeave)
   reset() { if (B.editing) stopEditing(); },
+  // The welcome screen's "Start a new lab" cards
+  newLab: openNewLab,
+  async templates() { return (await builderInfo()).templates; },
 };
 
 builderSetup();

@@ -8,7 +8,8 @@
 //
 // Uses app.js globals: S, $, h, s, api, toast, NODE_W, NODE_H, PSEUDO_W,
 // PSEUDO_H, graphModel, ensurePositions, savePositions, truncate, ifaceLabel,
-// nodeRuntime, nodeState, canOperate, openTerminal.
+// nodeRuntime, nodeState, canOperate, openTerminal, nodeFace, TEXT_X,
+// applyView, zoomAt, setupZoom.
 // ---------------------------------------------------------------------------
 
 const RT = {
@@ -473,9 +474,9 @@ function rtRender() {
       transform: `translate(${p[0]},${p[1]})`, "data-id": n.name, "data-f": n.name,
     },
       s("rect", { x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 9 }),
-      statusGlyph(stClass, -NODE_W / 2 + 13, -7),
-      s("text", { class: "name", x: -NODE_W / 2 + 24, y: -2 }, truncate(n.name, info.badge ? 11 : 14)),
-      s("text", { class: "kind", x: -NODE_W / 2 + 24, y: 13 }, truncate(info.sub, 17)),
+      nodeFace(n.name, n.kind, stClass),
+      s("text", { class: "name", x: TEXT_X, y: -2 }, truncate(n.name, info.badge ? 10 : 13)),
+      s("text", { class: "kind", x: TEXT_X, y: 13 }, truncate(info.sub, 16)),
       info.badge ? s("text", { class: "rt-badge", x: NODE_W / 2 - 8, y: -2, "text-anchor": "end" }, info.badge) : null,
       info.warn ? s("text", { class: "rt-warn", x: NODE_W / 2 - 4, y: -NODE_H / 2 - 4, "text-anchor": "end" }, "⚠") : null,
       s("title", {}, `${n.name} — ${info.sub}`)));
@@ -491,6 +492,7 @@ function rtRender() {
   }
   g.append(labels);
   svg.replaceChildren(g);
+  applyView(svg, "rt-viewport", RT.view);
   rtRefocus();
 
   rtRenderLegend(rtLiveData() ? [
@@ -884,7 +886,7 @@ function rtFit(P) {
   const minY = Math.min(...ys) - NODE_H * 2, maxY = Math.max(...ys) + NODE_H * 1.5;
   const k = Math.min(1.4, Math.min(w / (maxX - minX), hgt / (maxY - minY)));
   RT.view = { k, x: w / 2 - ((minX + maxX) / 2) * k, y: hgt / 2 - ((minY + maxY) / 2) * k };
-  $("#rt-viewport")?.setAttribute("transform", `translate(${RT.view.x},${RT.view.y}) scale(${RT.view.k})`);
+  applyView(svg, "rt-viewport", RT.view);
 }
 
 let rtLastClick = { id: null, t: 0 };
@@ -896,7 +898,7 @@ function rtSetup() {
   const svg = $("#routing");
   rtRefocus = setupFocus(svg, () => (RT.sel?.type === "node" ? RT.sel.id : null));
   let drag = null;
-  const applyView = () => $("#rt-viewport")?.setAttribute("transform", `translate(${RT.view.x},${RT.view.y}) scale(${RT.view.k})`);
+  const apply = () => applyView(svg, "rt-viewport", RT.view);
 
   svg.addEventListener("pointerdown", (ev) => {
     svg.setPointerCapture(ev.pointerId);
@@ -925,7 +927,7 @@ function rtSetup() {
     } else {
       RT.view.x = drag.start.x + dx;
       RT.view.y = drag.start.y + dy;
-      applyView();
+      apply();
     }
   });
   svg.addEventListener("pointerup", () => {
@@ -944,14 +946,11 @@ function rtSetup() {
     ev.preventDefault();
     const rect = svg.getBoundingClientRect();
     const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-    const k = Math.max(0.2, Math.min(3, RT.view.k * Math.exp(-ev.deltaY * 0.0015)));
-    RT.view.x = mx - ((mx - RT.view.x) / RT.view.k) * k;
-    RT.view.y = my - ((my - RT.view.y) / RT.view.k) * k;
-    RT.view.k = k;
-    applyView();
+    zoomAt(svg, RT.view, Math.exp(-ev.deltaY * 0.0015), mx, my);
+    apply();
   }, { passive: false });
 
-  $("#routing-fit").addEventListener("click", () => rtFit());
+  setupZoom(svg, () => RT.view, () => rtFit(), apply);
   $("#routing-reload").addEventListener("click", () => rtLoad());
   $("#routing-problems-btn").addEventListener("click", () => openHealth("routing"));
 }
