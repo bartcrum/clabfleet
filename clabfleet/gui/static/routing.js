@@ -31,7 +31,7 @@ const RT = {
   learned: null,        // EVPN routes read from a VTEP: {node, topo, routes|error|loading, at}
 };
 
-const RT_PROTO_LABEL = { ospf: "OSPF", bgp: "BGP", evpn: "EVPN" };
+const RT_PROTO_LABEL = { ospf: "OSPF", bgp: "BGP", evpn: "EVPN", mlag: "MLAG" };
 const RT_PALETTE = 8;   // --c0 .. --c7 in app.css
 const RT_VIEW_PREFS = "clab-routing";
 
@@ -322,6 +322,53 @@ function rtEvpnModel() {
   return { nodes, edges, groups: [], legend };
 }
 
+// MLAG: each pair a tinted region, its peer-link an edge (coloured by the
+// pair's live state), and the hosts on its dual-homed ports linked to both
+function rtMlagModel() {
+  const m = RT.data.mlag;
+  const warn = rtProblemNodes("mlag");
+  const nodes = {}, edges = [];
+  const inPair = {}, behind = {};
+  for (const p of m.pairs) {
+    for (const n of p.nodes) inPair[n] = p;
+    for (const port of p.ports) for (const host of port.hosts) behind[host] = [...(behind[host] || []), `mlag ${port.mlag}`];
+  }
+  for (const n of S.detail.nodes) {
+    const p = inPair[n.name];
+    if (p) nodes[n.name] = { sub: `MLAG ${p.domain || "?"}${p.vtep ? ` · VTEP ${p.vtep}` : ""}`, warn: warn.has(n.name) };
+    else if (behind[n.name]) nodes[n.name] = { sub: `dual-homed (${[...new Set(behind[n.name])].join(", ")})` };
+    else if (m.unpaired.includes(n.name)) nodes[n.name] = { sub: "MLAG without a peer", warn: true };
+    else nodes[n.name] = { sub: "no MLAG", off: true };
+  }
+  m.pairs.forEach((p, i) => {
+    const pl = `${p.a.peer_link || "?"} (${p.a.peer_link_members.join(", ") || "no members"})`;
+    edges.push({
+      id: p.id, a: p.a.node, b: p.b.node, ai: "", bi: "", label: p.a.peer_link,
+      cls: `rt-edge mlag-peer${warn.has(p.a.node) || warn.has(p.b.node) ? " warn" : ""}`,
+      title: `MLAG ${p.domain}: ${p.a.node} ${p.a.address} ↔ ${p.b.node} ${p.b.address}
+peer-link ${pl}`,
+    });
+    for (const port of p.ports) {
+      for (const host of port.hosts) {
+        for (const [side, po] of [[p.a, port.a], [p.b, port.b]]) {
+          if (!po) continue;
+          edges.push({
+            id: `mlagport-${i}-${port.mlag}-${host}-${side.node}`, a: side.node, b: host, ai: "", bi: "",
+            cls: "rt-edge mlag-port",
+            title: `mlag ${port.mlag}: ${side.node} ${po} → ${host}${port.vlan ? ` (VLAN ${port.vlan})` : " (trunk)"}`,
+          });
+        }
+      }
+    }
+  });
+  const groups = m.pairs.map((p, i) => ({ ids: p.nodes, color: i, label: `MLAG ${p.domain || "?"}` }));
+  const legend = [
+    { swatch: "line", cls: "mlag-peer", text: "MLAG peer-link" },
+    { swatch: "line", cls: "mlag-port", text: "dual-homed port (mlag id)" },
+  ];
+  return { nodes, edges, groups, legend };
+}
+
 // --- live layer --------------------------------------------------------------------
 
 const RT_LIVE_TEXT = { up: "up", down: "DOWN", partial: "partly up", unknown: "state not known", missing: "not configured" };
@@ -335,7 +382,7 @@ function rtUptime(sec) {
 function rtLiveEntry(edgeId) {
   const L = rtLiveData();
   if (!L) return null;
-  return L.ospf?.[edgeId] || L.bgp?.[edgeId] || L.vxlan?.[edgeId] || null;
+  return L.ospf?.[edgeId] || L.bgp?.[edgeId] || L.vxlan?.[edgeId] || L.mlag?.[edgeId] || null;
 }
 
 // The extra (unintended) neighbours shown in the current protocol view
@@ -404,7 +451,7 @@ function rtRender() {
   if (!RT.proto) {
     const unread = (d.unparsed || []).filter((u) => u.reason !== "no startup-config");
     return fail([
-      h("p", {}, "No OSPF, BGP or EVPN configuration was found in the nodes' startup configs."),
+      h("p", {}, "No OSPF, BGP, EVPN or MLAG configuration was found in the nodes' startup configs."),
       unread.length ? h("ul", {}, unread.map((u) => h("li", {}, `${u.node}: ${u.reason}`))) : null,
     ]);
   }
@@ -414,7 +461,7 @@ function rtRender() {
   const physical = graphModel();
   if (S.detail.nodes.some((n) => !S.positions[n.name])) ensurePositions(physical);
   const P = { ...S.positions };
-  const model = { ospf: rtOspfModel, bgp: rtBgpModel, evpn: rtEvpnModel }[RT.proto]();
+  const model = { ospf: rtOspfModel, bgp: rtBgpModel, evpn: rtEvpnModel, mlag: rtMlagModel }[RT.proto]();
   if (rtLiveData()) rtApplyLive(model);
   rtPlaceExternals(model, P);
   RT.edges = Object.fromEntries(model.edges.map((e) => [e.id, e]));
@@ -559,7 +606,7 @@ function rtRenderBar() {
     $("#routing").classList.remove("stale");
   }
   const protos = $("#routing-protos");
-  protos.replaceChildren(...["ospf", "bgp", "evpn"].map((p) => h("button", {
+  protos.replaceChildren(...["ospf", "bgp", "evpn", "mlag"].map((p) => h("button", {
     class: `seg-btn${RT.proto === p ? " active" : ""}`,
     disabled: !d?.protocols?.includes(p),
     title: d?.protocols?.includes(p) ? "" : `No ${RT_PROTO_LABEL[p]} in the startup configs`,
@@ -637,7 +684,9 @@ function rtHealth() {
   for (const a of d.ospf?.adjacencies || []) ends[a.id] = ["ospf", "OSPF", a.a.node, a.b.node];
   for (const x of d.bgp?.sessions || []) ends[x.id] = ["bgp", "BGP", x.a.node.replace(/^ext:/, ""), x.b.node.replace(/^ext:/, "")];
   for (const x of d.evpn?.tunnels || []) ends[x.id] = ["evpn", "VXLAN", x.a.node, x.b.node];
-  for (const [id, st] of [...Object.entries(L.ospf || {}), ...Object.entries(L.bgp || {}), ...Object.entries(L.vxlan || {})]) {
+  for (const x of d.mlag?.pairs || []) ends[x.id] = ["mlag", "MLAG", ...x.nodes];
+  for (const [id, st] of [...Object.entries(L.ospf || {}), ...Object.entries(L.bgp || {}), ...Object.entries(L.vxlan || {}),
+                          ...Object.entries(L.mlag || {})]) {
     const e = ends[id];
     if (!e) continue;
     const [proto, tag, a, b] = e;
@@ -752,6 +801,27 @@ function rtNodeCard(id) {
       ],
     };
   }
+  if (RT.proto === "mlag") {
+    const p = d.mlag.pairs.find((x) => x.nodes.includes(id));
+    const ports = d.mlag.pairs.flatMap((x) => x.ports.filter((port) => port.hosts.includes(id)).map((port) => [x, port]));
+    if (!p) {
+      return { title: id, parts: [ports.length
+        ? rtTable(["Pair", "mlag", "VLAN"], ports.map(([x, port]) => [`${x.domain} (${x.nodes.join(" + ")})`, port.mlag, port.vlan ?? "trunk"]))
+        : h("p", { class: "muted small" }, d.mlag.unpaired.includes(id) ? "MLAG configured, but no node is its peer." : "No MLAG on this node."),
+        rtCardProblems(nodeProblems)] };
+    }
+    const me = p.a.node === id ? p.a : p.b, peer = p.a.node === id ? p.b : p.a;
+    return {
+      title: id,
+      parts: [
+        rtDl([["Domain", me.domain], ["Peer", `${peer.node} (${me.peer_address})`], ["Local", `${me.local_interface} ${me.address}`],
+              ["Peer-link", `${me.peer_link} ${me.peer_link_members.join(" ")}`], ["Shared VTEP", p.vtep], ["Shut down", me.shutdown ? "yes" : ""]]),
+        rtTable(["mlag", "Port-channel", "VLAN", "Hosts"], p.ports.map((x) => [x.mlag, (p.a.node === id ? x.a : x.b) || "— (peer only)",
+          x.vlan ?? "trunk", x.hosts.join(", ")])),
+        rtCardProblems(nodeProblems),
+      ],
+    };
+  }
   const vt = d.evpn.vteps[id];
   if (!vt) {
     const n = d.evpn.sessions.filter((sid) => {
@@ -840,6 +910,13 @@ function rtNodeSummary(name) {
   } else if (d.evpn?.speakers?.includes(name)) {
     out.push({ label: "EVPN", go: go("evpn"), text: "route server" });
   }
+  const p = d.mlag?.pairs?.find((x) => x.nodes.includes(name));
+  if (p) {
+    const peer = p.nodes.find((n) => n !== name);
+    const st = L?.mlag?.[p.id]?.state;
+    out.push({ label: "MLAG", go: go("mlag"),
+               text: `${p.domain || "pair"} with ${peer} · ${p.ports.length} port${p.ports.length === 1 ? "" : "s"}${st ? ` · ${RT_LIVE_TEXT[st] || st}` : ""}` });
+  }
   return out;
 }
 
@@ -915,6 +992,33 @@ function rtEdgeCard(id) {
               ["Peer groups", x.peer_groups.join(", ")], ["Description", x.description],
               ["Configured", x.configured === "both" ? "" : "on one side only"], ["Shutdown", x.shutdown ? "yes" : ""]]),
         rtCardProblems(x.problems),
+      ],
+    };
+  }
+  if (id.startsWith("mlagport-")) {
+    const e = RT.edges[id];
+    const [, pi, mid] = id.split("-");
+    const p = d.mlag?.pairs[Number(pi)];
+    const port = p?.ports.find((x) => String(x.mlag) === mid);
+    if (!port || !e) return null;
+    return {
+      title: `Dual-homed port: mlag ${port.mlag}`,
+      parts: [rtTable(["", "Port-channel", "Members"], [[p.a.node, port.a || "—", ""], [p.b.node, port.b || "—", ""]]),
+              rtDl([["VLAN", port.vlan ?? "trunk"], ["Hosts", port.hosts.join(", ")], ["Pair", p.domain]])],
+    };
+  }
+  if (id.startsWith("mlag")) {
+    const p = d.mlag?.pairs.find((x) => x.id === id);
+    if (!p) return null;
+    return {
+      title: `MLAG pair ${p.domain || ""}`,
+      parts: [
+        rtTable(["", "Address", "Peer address", "Peer-link"], [p.a, p.b].map((s) => [
+          s.node, `${s.address} (${s.local_interface})`, s.peer_address, `${s.peer_link} ${s.peer_link_members.join(" ")}`])),
+        rtDl([["Shared VTEP", p.vtep], ["Cables", `${p.peer_links.length} in the peer-link`]]),
+        rtTable(["mlag", "Port-channel", "VLAN", "Hosts"], p.ports.map((x) => [x.mlag, x.a === x.b ? x.a : `${x.a || "—"} / ${x.b || "—"}`,
+          x.vlan ?? "trunk", x.hosts.join(", ")])),
+        rtCardProblems((d.problems || []).filter((x) => x.protocol === "mlag" && p.nodes.includes(x.node)).map((x) => x.message)),
       ],
     };
   }

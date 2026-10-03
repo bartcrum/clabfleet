@@ -16,7 +16,7 @@ VTEPS = {"10.255.2.1": "L1", "10.255.2.2": "L2"}
 
 def lab():
     view = {"links": [{"a": {"node": a, "iface": ai}, "b": {"node": b, "iface": bi}} for a, ai, b, bi in LINKS]}
-    return Lab(view, KINDS, VTEPS)
+    return Lab(view, KINDS, {ip: [n] for ip, n in VTEPS.items()})
 
 
 def route(vrf, prefix, kind, vias, connected=False):
@@ -228,3 +228,35 @@ def test_ios_routes():
                            "overlay": False, "vni": None, "flood": False}]
     ask = asker({("R1", "show ip route"): "% Network not in table\n"})
     assert trace(ios_lab, ask, "R1", "10.9.9.9")["hops"][0]["route"] == "no route to 10.9.9.9"
+
+
+def test_mlag_pair_and_bundles():
+    # H1 bonded to L1 + L2 (pair A, VTEP .12); H3 bonded to L3 + L4 (pair B, VTEP .34)
+    links = [("H1", "eth1", "L1", "eth5"), ("H1", "eth2", "L2", "eth5"),
+             ("H3", "eth1", "L3", "eth5"), ("H3", "eth2", "L4", "eth5")]
+    view = {"links": [{"a": {"node": a, "iface": ai}, "b": {"node": b, "iface": bi}} for a, ai, b, bi in links]}
+    kinds = {"H1": "linux", "H3": "linux", **{f"L{i}": "arista_ceos" for i in range(1, 5)}}
+    pcs = {n: {"Port-channel5": ["Ethernet5"]} for n in ("L1", "L2", "L3", "L4")}
+    mlag_lab = Lab(view, kinds, {"10.255.2.12": ["L1", "L2"], "10.255.2.34": ["L3", "L4"]}, pcs)
+    via_l3 = route("TENANT", "10.20.20.14/32", "eBGP", [{"vtepAddr": "10.255.2.34", "vni": 50001}])
+    arp = json.dumps({"ipV4Neighbors": [{"hwAddress": "aac1.ab00.0014", "interface": "Vlan20, Port-Channel5"}]})
+    here = route("TENANT", "10.20.20.0/24", "connected", [{"interface": "Vlan20"}], True)
+    ask = asker({
+        ("H1", "ip route get"): "10.20.20.14 via 10.10.10.1 dev bond0 src 10.10.10.11\n",
+        ("H1", "ip -o link show master bond0"): (
+            "198: eth1@if199: <BROADCAST,MULTICAST,SLAVE,UP> mtu 9500 master bond0 state UP\n"
+            "200: eth2@if201: <BROADCAST,MULTICAST,SLAVE,UP> mtu 9500 master bond0 state UP\n"),
+        ("L1", "show ip route"): via_l3, ("L2", "show ip route"): via_l3,
+        ("L3", "show ip route"): here, ("L4", "show ip route"): here,
+        ("L3", "show ip arp"): arp, ("L4", "show ip arp"): arp,
+    })
+    r = trace(mlag_lab, ask, "H1", "10.20.20.14", "H3")
+    assert r["reached"]
+    pairs = {(e["a"], e["b"], "vxlan" if e["overlay"] else e["a_iface"]) for e in r["edges"]}
+    # Both bond members, each leaf to both halves of the far VTEP, each half down its port-channel member
+    assert {("H1", "L1", "eth1"), ("H1", "L2", "eth2"), ("L1", "L3", "vxlan"), ("L1", "L4", "vxlan"),
+            ("L2", "L3", "vxlan"), ("L2", "L4", "vxlan"), ("L3", "H3", "eth5"), ("L4", "H3", "eth5")} <= pairs
+    notes = [n for h in r["hops"] for n in h.get("notes", [])]
+    assert "bond0 is a bundle of eth1, eth2" in notes
+    assert "VTEP 10.255.2.34 is the MLAG pair L3 + L4: either may take it" in notes
+    assert "Port-Channel5 is a bundle of Ethernet5" in notes

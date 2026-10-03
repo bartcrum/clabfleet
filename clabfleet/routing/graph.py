@@ -112,12 +112,32 @@ class _Lab:
         for name, cfg in self.configs.items():
             for iface, addr in cfg.owned_addresses():
                 self.owners.setdefault(str(addr.ip), []).append(_Addr(name, iface, addr))
+        # MLAG peers: node -> its peer (both point at each other)
+        self.mlag_peer: dict[str, str] = {}
+        for name, cfg in self.configs.items():
+            peer = self.owner(cfg.mlag.peer_address) if cfg.mlag and cfg.mlag.peer_address else None
+            other = self.configs.get(peer.node) if peer else None
+            if peer and peer.node != name and other and other.mlag:
+                back = self.owner(other.mlag.peer_address)
+                if back and back.node == name:
+                    self.mlag_peer[name] = peer.node
         for ip, owners in sorted(self.owners.items()):
             nodes = sorted({o.node for o in owners})
             if len(owners) > 1 and len({o.iface.vrf for o in owners}) == 1 \
-                    and not all(o.iface.anycast for o in owners):
+                    and not all(o.iface.anycast for o in owners) and not self.shared_vtep(owners):
                 where = ", ".join(f"{o.node} {o.iface.name}" for o in owners)
                 self.problem("ip", nodes[0], f"{ip} is configured on {where}")
+
+    def shared_vtep(self, owners: list) -> bool:
+        """Is this the VTEP source address an MLAG pair shares (as it must)?"""
+        nodes = {o.node for o in owners}
+        if len(owners) != 2 or len(nodes) != 2:
+            return False
+        a, b = sorted(nodes)
+        if self.mlag_peer.get(a) != b:
+            return False
+        return all((v := self.configs[o.node].vtep) and o.iface.name == canonical(v.source_interface)
+                   for o in owners)
 
     def problem(self, protocol: str, node: str, message: str, severity: str = "warning") -> None:
         self.problems.append({"protocol": protocol, "node": node, "severity": severity, "message": message})
@@ -437,6 +457,8 @@ def _evpn(lab: _Lab, bgp: Optional[dict]) -> Optional[dict]:
         vteps[name] = {
             "interface": v.interface, "source_interface": v.source_interface, "ip": src_ip,
             "udp_port": v.udp_port, "l2_vnis": l2, "l3_vnis": l3, "flood_list": v.flood_list,
+            # The MLAG peer it is one VTEP with (same source address)
+            "mlag_peer": lab.mlag_peer.get(name, ""),
         }
         if not v.source_interface:
             lab.problem("evpn", name, f"{name} {v.interface} has no source-interface")
@@ -468,6 +490,8 @@ def _evpn(lab: _Lab, bgp: Optional[dict]) -> Optional[dict]:
     # Data plane: a VXLAN tunnel between every pair of VTEPs sharing a VNI
     tunnels = []
     for a, b in itertools.combinations(sorted(vteps), 2):
+        if vteps[a]["ip"] and vteps[a]["ip"] == vteps[b]["ip"]:
+            continue  # one VTEP (an MLAG pair): no tunnel between its halves
         shared = sorted(vni for vni, e in vnis.items() if a in e["members"] and b in e["members"])
         if shared:
             tunnels.append({"a": {"node": a, "ip": vteps[a]["ip"]}, "b": {"node": b, "ip": vteps[b]["ip"]},
@@ -503,6 +527,111 @@ def _evpn(lab: _Lab, bgp: Optional[dict]) -> Optional[dict]:
     }
 
 
+def _mlag(lab: _Lab, evpn: Optional[dict]) -> Optional[dict]:
+    """MLAG pairs (EOS): who pairs with whom, over which peer-link, which
+    ports are dual-homed (``mlag <n>``), and whether both sides agree."""
+    nodes = {name: cfg for name, cfg in lab.configs.items() if cfg.mlag}
+    if not nodes:
+        return None
+    pairs, unpaired = [], []
+    for name, cfg in sorted(nodes.items()):
+        m = cfg.mlag
+        peer = lab.mlag_peer.get(name)
+        if peer:
+            continue  # checked as a pair below
+        unpaired.append(name)
+        if not m.peer_address:
+            lab.problem("mlag", name, f"{name} has an MLAG configuration without a peer-address")
+            continue
+        owner = lab.owner(m.peer_address)
+        if not owner:
+            lab.problem("mlag", name, f"{name} MLAG peer-address {m.peer_address} is not configured on any node")
+        elif owner.node == name:
+            lab.problem("mlag", name, f"{name} MLAG peer-address {m.peer_address} is its own address")
+        elif owner.node not in nodes:
+            lab.problem("mlag", name, f"{name} MLAG peer-address {m.peer_address} is {owner.node} "
+                                      f"{owner.iface.name}, which has no MLAG configuration")
+        else:
+            back = lab.owner(nodes[owner.node].mlag.peer_address)
+            lab.problem("mlag", name, f"{name} names {owner.node} as its MLAG peer, but {owner.node}'s "
+                                      f"peer-address ({nodes[owner.node].mlag.peer_address or 'none'}) is "
+                                      f"{back.node if back else 'not a lab address'}")
+
+    vteps = (evpn or {}).get("vteps") or {}
+    for a, b in sorted({tuple(sorted(p)) for p in lab.mlag_peer.items()}):
+        side = {}
+        for name in (a, b):
+            cfg = lab.configs[name]
+            m = cfg.mlag
+            local = cfg.interface(m.local_interface) if m.local_interface else None
+            members = cfg.port_channel_members(m.peer_link) if m.peer_link else []
+            side[name] = {
+                "node": name, "domain": m.domain_id, "local_interface": m.local_interface,
+                "address": str(local.primary.ip) if local and local.primary else "",
+                "peer_address": m.peer_address, "peer_link": m.peer_link, "peer_link_members": members,
+                "shutdown": m.shutdown,
+            }
+            if not m.local_interface:
+                lab.problem("mlag", name, f"{name} MLAG has no local-interface")
+            elif not (local and local.primary):
+                lab.problem("mlag", name, f"{name} MLAG local-interface {m.local_interface} has no IPv4 address")
+            if not m.peer_link:
+                lab.problem("mlag", name, f"{name} MLAG has no peer-link")
+            elif not members:
+                lab.problem("mlag", name, f"{name} MLAG peer-link {m.peer_link} has no member interfaces")
+            if m.shutdown:
+                lab.problem("mlag", name, f"{name} MLAG is shut down", "info")
+        # Peer-link: member links that reach the peer
+        peer_links = []
+        for name, other in ((a, b), (b, a)):
+            reach = [lab.link_of[(name, i)] for i in side[name]["peer_link_members"]
+                     if lab.far_end.get((name, i), ("", ""))[0] == other]
+            if side[name]["peer_link_members"] and not reach:
+                lab.problem("mlag", name, f"{name} peer-link {side[name]['peer_link']} has no link to {other}")
+            peer_links += [x for x in reach if x not in peer_links]
+        if side[a]["domain"] != side[b]["domain"]:
+            lab.problem("mlag", a, f"MLAG peers {a} and {b} have different domain-ids "
+                                   f"({side[a]['domain'] or 'none'}, {side[b]['domain'] or 'none'})", "error")
+        # Dual-homed ports: "mlag <n>" on both sides, same VLAN
+        ports_of = {}
+        for name in (a, b):
+            cfg = lab.configs[name]
+            ports_of[name] = {i.mlag_id: i for i in cfg.interfaces.values() if i.mlag_id is not None}
+        ports = []
+        for mid in sorted(set(ports_of[a]) | set(ports_of[b])):
+            pa, pb = ports_of[a].get(mid), ports_of[b].get(mid)
+            if not (pa and pb):
+                only = a if pa else b
+                lab.problem("mlag", only, f"mlag {mid} is configured on {only} only, not on "
+                                          f"{b if only == a else a}")
+            if pa and pb and pa.access_vlan != pb.access_vlan:
+                lab.problem("mlag", a, f"mlag {mid}: VLAN {pa.access_vlan or 'trunk'} on {a}, "
+                                       f"{pb.access_vlan or 'trunk'} on {b}")
+            behind = set()
+            for name, port in ((a, pa), (b, pb)):
+                if port:
+                    for member in lab.configs[name].port_channel_members(port.name):
+                        far = lab.far_end.get((name, member))
+                        if far:
+                            behind.add(far[0])
+            ports.append({"mlag": mid, "a": pa.name if pa else "", "b": pb.name if pb else "",
+                          "vlan": (pa or pb).access_vlan, "hosts": sorted(behind)})
+        # VXLAN: a pair is one VTEP, so both must source it from one address
+        va, vb = vteps.get(a), vteps.get(b)
+        vtep_ip = ""
+        if va and vb:
+            if va["ip"] != vb["ip"]:
+                lab.problem("mlag", a, f"MLAG peers {a} and {b} are VTEPs with different source addresses "
+                                       f"({va['ip'] or 'none'}, {vb['ip'] or 'none'}); they should share one")
+            else:
+                vtep_ip = va["ip"]
+        elif va or vb:
+            lab.problem("mlag", a, f"Only {a if va else b} of the MLAG pair {a} / {b} is a VTEP")
+        pairs.append({"domain": side[a]["domain"] or side[b]["domain"], "nodes": [a, b],
+                      "a": side[a], "b": side[b], "peer_links": peer_links, "ports": ports, "vtep": vtep_ip})
+    return {"pairs": _number(pairs, "mlag"), "unpaired": unpaired}
+
+
 def _number(items: list[dict], prefix: str) -> list[dict]:
     for i, item in enumerate(items):
         item["id"] = f"{prefix}{i}"
@@ -517,13 +646,19 @@ def routing_view(topo: Topology) -> dict:
     ospf = _ospf(lab)
     bgp = _bgp(lab)
     evpn = _evpn(lab, bgp)
-    protocols = [name for name, view in (("ospf", ospf), ("bgp", bgp), ("evpn", evpn)) if view]
+    mlag = _mlag(lab, evpn)
+    protocols = [name for name, view in (("ospf", ospf), ("bgp", bgp), ("evpn", evpn), ("mlag", mlag)) if view]
     return {
         "name": topo.name,
         "protocols": protocols,
         "ospf": ospf,
         "bgp": bgp,
         "evpn": evpn,
+        "mlag": mlag,
+        # Port-channel members per node: traffic out of a bundle leaves on them
+        "port_channels": {name: pcs for name, cfg in sorted(lab.configs.items())
+                          if (pcs := {i.name: cfg.port_channel_members(i.name) for i in cfg.interfaces.values()
+                                      if i.name.lower().startswith("port-channel")})},
         "unparsed": lab.unparsed,
         "problems": lab.problems,
         # Which node owns each address (anycast gateways left out): resolves

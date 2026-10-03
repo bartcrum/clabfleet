@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-PROTOCOLS = ("ospf", "bgp", "evpn")
+PROTOCOLS = ("ospf", "bgp", "evpn", "mlag")
 
 
 def _end(e: dict) -> str:
@@ -37,7 +37,7 @@ def format_report(view: dict, protocols=PROTOCOLS, live: Optional[dict] = None) 
     w = out.append
     shown = [p for p in protocols if view.get(p)]
     if not shown:
-        w("No OSPF, BGP or EVPN configuration found.")
+        w("No OSPF, BGP, EVPN or MLAG configuration found.")
 
     if "ospf" in shown:
         ospf = view["ospf"]
@@ -97,6 +97,24 @@ def format_report(view: dict, protocols=PROTOCOLS, live: Optional[dict] = None) 
                   f"VNI {', '.join(map(str, t['vnis']))}{_live(lv.get('vxlan', {}).get(t['id']))}")
         w("")
 
+    if "mlag" in shown:
+        w("MLAG")
+        for p in view["mlag"]["pairs"]:
+            a, b = p["a"], p["b"]
+            links = len(p["peer_links"])
+            vtep = f", VTEP {p['vtep']}" if p["vtep"] else ""
+            w(f"  {p['domain'] or '(no domain-id)'}: {a['node']} ({a['address'] or '?'}) <-> "
+              f"{b['node']} ({b['address'] or '?'})  peer-link {a['peer_link'] or '?'} "
+              f"({links} link{'' if links == 1 else 's'}){vtep}"
+              f"{_live(lv.get('mlag', {}).get(p['id'])) if live else ''}")
+            for port in p["ports"]:
+                hosts = f" -> {', '.join(port['hosts'])}" if port["hosts"] else ""
+                vlan = f"VLAN {port['vlan']}" if port["vlan"] else "trunk"
+                w(f"    mlag {port['mlag']:<4} {port['a'] or '-'} / {port['b'] or '-'}  {vlan}{hosts}")
+        for name in view["mlag"]["unpaired"]:
+            w(f"  {name}: no MLAG peer")
+        w("")
+
     if live:
         _live_extras(w, lv, shown)
 
@@ -117,7 +135,8 @@ def format_report(view: dict, protocols=PROTOCOLS, live: Optional[dict] = None) 
 def _live_extras(w, lv: dict, shown: list[str]) -> None:
     """Live summary, nodes that could not be asked, and what runs unintended."""
     counts = []
-    for key, label in (("ospf", "OSPF adjacencies"), ("bgp", "BGP sessions"), ("vxlan", "VXLAN tunnels")):
+    for key, label in (("ospf", "OSPF adjacencies"), ("bgp", "BGP sessions"), ("vxlan", "VXLAN tunnels"),
+                       ("mlag", "MLAG pairs")):
         c = (lv.get("summary") or {}).get(key) or {}
         if c and (key in shown or (key == "vxlan" and "evpn" in shown)):
             counts.append(f"{label}: " + ", ".join(f"{n} {s}" for s, n in sorted(c.items())))

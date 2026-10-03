@@ -11,7 +11,7 @@ uses, the cheapest way its kind allows:
 
 :func:`overlay` then matches what the nodes report to the intended view
 (:func:`clabfleet.routing.routing_view`): a state for every OSPF adjacency,
-BGP session and VXLAN tunnel, plus the sessions and neighbours that run but
+BGP session, VXLAN tunnel and MLAG pair, plus the sessions and neighbours that run but
 were not in the startup configs (``extra``), usually changes made on the
 CLI since the deploy.
 
@@ -34,7 +34,7 @@ from ..topology import KIND_ALIASES
 
 logger = logging.getLogger(__name__)
 
-TOPICS = ("ospf", "bgp", "evpn", "vxlan", "vrf_vteps")
+TOPICS = ("ospf", "bgp", "evpn", "vxlan", "vrf_vteps", "mlag")
 COLLECT_TIMEOUT = 20  # seconds per node
 
 EOS_KINDS = {"arista_ceos", "ceos"}
@@ -48,6 +48,7 @@ EOS_COMMANDS = {
     # EOS lists only VTEPs it shares an L2 VNI with; peers reached only over
     # an L3 VNI show up as next hops ("via VTEP ...") of the VRFs' routes
     "vrf_vteps": "show ip route vrf all",
+    "mlag": "show mlag",
 }
 IOS_COMMANDS = {
     "ospf": "show ip ospf neighbor",
@@ -88,6 +89,8 @@ def wanted_topics(view: dict, node: str) -> list[str]:
         topics.append("vxlan")
         if vtep.get("l3_vnis"):
             topics.append("vrf_vteps")  # EOS only; IOS's NVE peers include them
+    if any(node in p["nodes"] for p in (view.get("mlag") or {}).get("pairs") or []):
+        topics.append("mlag")  # EOS only
     return topics
 
 
@@ -125,6 +128,7 @@ class NodeState:
     evpn: dict[str, dict] = field(default_factory=dict)
     vxlan: dict[str, bool] = field(default_factory=dict)   # remote VTEP -> up
     vrf_vteps: dict[str, bool] = field(default_factory=dict)  # VTEPs next hop of VRF routes
+    mlag: dict = field(default_factory=dict)               # show mlag: state, peer, ports
 
     def view(self) -> dict:
         return {"family": self.family, "collected": self.collected, "errors": self.errors}
@@ -323,8 +327,27 @@ def _eos_vrf_vteps(text: str, now: float) -> dict[str, bool]:
     return found
 
 
+def _eos_mlag(text: str, now: float) -> dict:
+    """``show mlag``: whether the pair formed (``state`` active, ``negStatus``
+    connected), the peer-link, config sanity, and its ports' states
+    (Active-full: both halves up; Active-partial: one half only)."""
+    data = _json(text)
+    ports = data.get("mlagPorts") or {}
+    return {
+        "state": str(data.get("state", "")),
+        "negotiation": str(data.get("negStatus", "")),
+        "peer_link": str(data.get("peerLinkStatus", "")),
+        "local_interface": str(data.get("localIntfStatus", "")),
+        "sanity": str(data.get("configSanity", "")),
+        "domain": str(data.get("domainId", "")),
+        "ports_full": int(ports.get("Active-full") or 0),
+        "ports_partial": int(ports.get("Active-partial") or 0),
+        "ports_down": int(ports.get("Inactive") or 0) + int(ports.get("Disabled") or 0),
+    }
+
+
 EOS_PARSERS = {"ospf": _eos_ospf, "bgp": _eos_bgp, "evpn": _eos_bgp, "vxlan": _eos_vxlan,
-               "vrf_vteps": _eos_vrf_vteps}
+               "vrf_vteps": _eos_vrf_vteps, "mlag": _eos_mlag}
 
 
 # --- Parsing: Cisco IOS (text) ------------------------------------------------------
@@ -453,7 +476,7 @@ def overlay(view: dict, states: dict[str, NodeState], running: dict[str, bool],
     """Live state per intended adjacency / session / tunnel, plus what runs
     but was not intended."""
     now = now or time.time()
-    out: dict = {"updated": now, "nodes": {}, "ospf": {}, "bgp": {}, "vxlan": {},
+    out: dict = {"updated": now, "nodes": {}, "ospf": {}, "bgp": {}, "vxlan": {}, "mlag": {},
                  "extra": {"ospf": [], "bgp": [], "evpn": []}, "summary": {}}
     for node, st in states.items():
         out["nodes"][node] = st.view()
@@ -556,12 +579,41 @@ def overlay(view: dict, states: dict[str, NodeState], running: dict[str, bool],
         state, detail = _combine(sides)
         out["vxlan"][t["id"]] = {"state": state, "detail": detail, "a": sides[0], "b": sides[1]}
 
-    for key in ("ospf", "bgp", "vxlan"):
+    # MLAG pairs: each half active and connected, peer-link up, ports dual-homed
+    for p in ((view.get("mlag") or {}).get("pairs") or []):
+        sides = [_mlag_side(states, running, n) for n in p["nodes"]]
+        state, detail = _combine(sides)
+        if state == "up":
+            partial = max(s.get("ports_partial", 0) for s in sides)
+            if partial:
+                state = "partial"
+                detail = f"{partial} dual-homed port{'s' if partial > 1 else ''} up on one side only"
+        out["mlag"][p["id"]] = {"state": state, "detail": detail, "a": sides[0], "b": sides[1]}
+
+    for key in ("ospf", "bgp", "vxlan", "mlag"):
         counts: dict[str, int] = {}
         for v in out[key].values():
             counts[v["state"]] = counts.get(v["state"], 0) + 1
         out["summary"][key] = counts
     return out
+
+
+def _mlag_side(states, running, node: str) -> dict:
+    st, why = _side(states, node, "mlag", running)
+    if st is None:
+        return {"state": "unknown", "detail": why}
+    m = st.mlag
+    bad = []
+    if m.get("state") != "active":
+        bad.append(f"state {m.get('state') or 'unknown'}")
+    if m.get("negotiation") and m["negotiation"] != "connected":
+        bad.append(f"peer {m['negotiation']}")
+    if m.get("peer_link") and m["peer_link"] != "up":
+        bad.append(f"peer-link {m['peer_link']}")
+    if m.get("sanity") and m["sanity"] != "consistent":
+        bad.append(f"config {m['sanity']}")
+    return {"state": "down" if bad else "up", "detail": ", ".join(bad),
+            "ports_full": m.get("ports_full", 0), "ports_partial": m.get("ports_partial", 0)}
 
 
 def _same_iface(a: str, b: str) -> bool:
