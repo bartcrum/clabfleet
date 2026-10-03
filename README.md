@@ -404,7 +404,14 @@ an operator.
   shape as well as colour: a hollow ring is not deployed, a filled disc
   (with a check on the diagram) running, a half ring booting, a diamond
   not running, a square an error. Hover or select a node to fade
-  everything but it, its links and its neighbours. Destroy and Redeploy
+  everything but it, its links and its neighbours. Each node shows a
+  device glyph (router, switch, host, firewall) chosen from its name, then
+  its kind, with its status on the glyph's corner. Zoom with the wheel, the
+  −, 100 %, + and Fit buttons at the bottom right, or `+`, `-`, `0` (fit),
+  `1` (actual size) and the arrow keys once the canvas has focus; below
+  60 % interface names and labels hide so the shape stays readable. With
+  no lab selected, the start page lists the topologies and ways to start a
+  new lab. Destroy and Redeploy
   ask in a dialog that says what will be removed; labs of 10 or more
   nodes ask you to type the lab name.
 - **Sidebar:** every `*.clab.yml` under the current directory (or each

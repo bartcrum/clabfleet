@@ -693,3 +693,56 @@ body.building #view-diagram .diagram-tools { top: 56px; }
 #preview-summary.bad { color: var(--danger); }
 .gen-warn { color: var(--warn); }
 .gen-warn[hidden], .newlab label[hidden] { display: none; }
+
+/* ---------- icons (A4) and device glyphs (A1) ---------- */
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+/* Line style goes on each use of an icon (it inherits into the copy); set on
+   the sprite's symbols it does not reach the copies */
+.ico, .diagram .dev {
+  fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.ico { width: 14px; height: 14px; flex: none; vertical-align: -2px; margin-right: 5px; }
+.btn.small .ico { width: 13px; height: 13px; margin-right: 4px; }
+.btn[data-zoom] .ico { margin-right: 0; }
+.btn[data-zoom="fit"] .ico { margin-right: 4px; }
+.icon-btn .ico { margin: 0; width: 13px; height: 13px; vertical-align: -2px; }
+.tab { display: inline-flex; align-items: center; }
+.diagram .dev { color: var(--text); opacity: .85; }
+.diagram .dev-host { color: var(--muted); opacity: 1; }
+.diagram .node.selected .dev { color: var(--select); opacity: 1; }
+.diagram .status .badge-bg { fill: var(--node); stroke: none; }
+
+/* ---------- zoom controls (C1) and level of detail (C3) ---------- */
+.zoom-tools {
+  position: absolute; right: 12px; bottom: 12px; display: flex; gap: 2px; z-index: 2;
+  padding: 3px; background: color-mix(in srgb, var(--panel) 90%, transparent);
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.zoom-tools .btn { border-color: transparent; padding: 3px 7px; }
+.zoom-tools .btn:hover:not(:disabled) { border-color: var(--line); }
+.zoom-tools .zoom-level { min-width: 48px; font-variant-numeric: tabular-nums; }
+.diagram:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.diagram.lod-far .iface, .diagram.lod-far .rt-label, .diagram.lod-far .node .kind,
+.diagram.lod-far .node .hostbadge { display: none; }
+
+/* ---------- welcome (D1) ---------- */
+.welcome { flex: 1; overflow: auto; padding: 32px 36px; max-width: 980px; }
+.welcome[hidden] { display: none; }
+.welcome h1 { margin: 0 0 14px; font-size: 22px; }
+.welcome h2 {
+  margin: 26px 0 10px; font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted);
+}
+.welcome .steps { margin: 0; padding-left: 20px; display: grid; gap: 6px; color: var(--muted); }
+.welcome .steps b { color: var(--text); font-weight: 600; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+.card {
+  display: grid; gap: 4px; text-align: left; padding: 12px 14px; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); min-width: 0;
+}
+.card:hover { border-color: var(--muted); }
+.card:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.card > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .card-head { display: flex; align-items: center; gap: 8px; }
+.card.new { border-style: dashed; background: transparent; }
+.card .ico { margin: 0; }

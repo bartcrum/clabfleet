@@ -172,7 +172,7 @@ function nodeState(rt) {
 // Status glyph for a node box on the canvas: same shapes as the .dot spans
 // (ring, disc with a check, half ring, diamond) so state never relies on
 // colour alone. ``state`` is a nodeState() value or "other".
-function statusGlyph(state, cx, cy) {
+function statusGlyph(state, cx, cy, badge = false) {
   const r = 5;
   const cls = state === "partial" ? "other" : state;
   let shape;
@@ -187,7 +187,54 @@ function statusGlyph(state, cx, cy) {
   } else {
     shape = [s("circle", { class: "ring", cx, cy, r: r - 0.5 })];
   }
-  return s("g", { class: `status ${cls}` }, ...shape);
+  // A badge sits on the device glyph: a ring of the node's colour keeps it apart
+  return s("g", { class: `status ${cls}` },
+    badge ? s("circle", { class: "badge-bg", cx, cy, r: r + 2.5 }) : null, ...shape);
+}
+
+// What a node is, for its device glyph (A1): from its name first (the
+// layout's role words), then its kind
+const ROLE_BY_NAME = [
+  [/(host|server|client|srv|^pc|^h\d)/i, "host"],
+  [/(firewall|^fw)/i, "firewall"],
+  [/(spine|leaf|tor|access|^sw|switch|agg|dist)/i, "switch"],
+  [/(core|border|wan|edge|router|rtr|^pe\d|^p\d|^r\d)/i, "router"],
+];
+const ROLE_BY_KIND = {
+  linux: "host", bridge: "switch", "ovs-bridge": "switch",
+  arista_ceos: "switch", ceos: "switch", nokia_srlinux: "switch", srl: "switch", cisco_n9kv: "switch",
+  cisco_iol: "router", cisco_csr1000v: "router", cisco_c8000v: "router", cisco_xrd: "router",
+  juniper_crpd: "router", juniper_vmx: "router", juniper_vjunosrouter: "router",
+  fortinet_fortigate: "firewall", paloalto_panos: "firewall", checkpoint_cloudguard: "firewall",
+};
+const KIND_NAMES = {
+  arista_ceos: "Arista cEOS", ceos: "Arista cEOS", cisco_iol: "Cisco IOL", linux: "Linux",
+  nokia_srlinux: "Nokia SR Linux", srl: "Nokia SR Linux", juniper_crpd: "Juniper cRPD",
+  cisco_xrd: "Cisco XRd", cisco_csr1000v: "Cisco CSR1000v", cisco_c8000v: "Cisco C8000v",
+  bridge: "Linux bridge", "ovs-bridge": "OVS bridge",
+};
+
+function nodeRole(name, kind) {
+  for (const [re, role] of ROLE_BY_NAME) if (re.test(name)) return role;
+  return ROLE_BY_KIND[kind] || "generic";
+}
+
+function kindName(kind) {
+  return KIND_NAMES[kind] || kind || "";
+}
+
+// Node box sizes on both canvases
+const NODE_W = 148, NODE_H = 48, PSEUDO_W = 112, PSEUDO_H = 30;
+
+// The left part of a node box: its device glyph with the status shape on
+// its corner, like a presence badge (left free: the right edge carries the
+// Routing badges and the builder's link handle)
+const FACE_X = -NODE_W / 2 + 8, TEXT_X = -NODE_W / 2 + 38;
+function nodeFace(name, kind, state) {
+  return s("g", { class: "face" },
+    s("use", { class: `dev dev-${nodeRole(name, kind)}`, href: `#d-${nodeRole(name, kind)}`,
+               x: FACE_X, y: -12, width: 22, height: 22 }),
+    statusGlyph(state, FACE_X + 21, 8, true));
 }
 
 function nodeStateText(rt) {
@@ -359,6 +406,7 @@ function renderSidebar() {
         st.deployed ? h("span", { class: "count" }, `${st.running}/${t.nodes}`) : null));
   }));
 
+  renderWelcome();
   const others = [...new Set(allContainers().map((c) => c.lab))].filter((l) => !topoNames.has(l));
   $("#others-section").hidden = !others.length;
   $("#other-list").replaceChildren(...others.map((lab) => {
@@ -373,6 +421,38 @@ function renderSidebar() {
           h("span", { class: "sub" }, hostsUsed)),
         h("span", { class: "count" }, `${st.running}/${st.total}`)));
   }));
+}
+
+// First run and nothing selected (D1): the topologies as cards, and ways
+// to start a new lab
+let welcomeTemplates = null;
+
+async function renderWelcome() {
+  if (S.selected || !S.state) return;
+  const topos = S.state.topologies;
+  $("#welcome-labs").replaceChildren(...(topos.length ? topos.map((t) => {
+    const st = labStatus(t.name, t.nodes);
+    return h("button", { class: "card", onclick: () => selectTopology(t.id), title: t.error || t.path },
+      h("span", { class: "card-head" },
+        h("span", { class: `dot ${t.error ? "error" : st.state}` }),
+        h("b", {}, t.name)),
+      h("span", { class: "muted mono small" }, t.id),
+      h("span", { class: "muted small" }, t.error ? "cannot be loaded"
+        : `${t.nodes} node${t.nodes === 1 ? "" : "s"} · ${st.deployed ? `${st.running}/${t.nodes} running` : "not deployed"}`));
+  }) : [h("p", { class: "muted" }, "No *.clab.yml files in the workspace yet.")]));
+  if (!canOperate() || !window.Builder) return;
+  if (!welcomeTemplates) {
+    try { welcomeTemplates = await window.Builder.templates(); } catch { return; }
+  }
+  $("#welcome-new").replaceChildren(
+    h("button", { class: "card new", onclick: () => window.Builder.newLab() },
+      h("span", { class: "card-head" },
+        s("svg", { class: "ico", "aria-hidden": "true" }, s("use", { href: "#i-plus" })), h("b", {}, "Blank canvas")),
+      h("span", { class: "muted small" }, "Draw nodes and links, then generate configs")),
+    ...Object.entries(welcomeTemplates).map(([name, t]) =>
+      h("button", { class: "card new", onclick: () => window.Builder.newLab(name) },
+        h("span", { class: "card-head" }, h("b", {}, name)),
+        h("span", { class: "muted small" }, t.description))));
 }
 
 // ---------------------------------------------------------------------------
@@ -971,7 +1051,6 @@ function renderNodesTable() {
 // Diagram
 // ---------------------------------------------------------------------------
 
-const NODE_W = 136, NODE_H = 48, PSEUDO_W = 112, PSEUDO_H = 30;
 
 function loadPositions(id) {
   try { return JSON.parse(localStorage.getItem(`clab-pos:${id}`)) || {}; } catch { return {}; }
@@ -1290,9 +1369,9 @@ function renderDiagram(fit) {
       transform: `translate(${x},${y})`, "data-id": nd.id, "data-f": nd.id,
     },
       s("rect", { x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 9 }),
-      statusGlyph(stClass, -NODE_W / 2 + 13, -7),
-      s("text", { class: "name", x: -NODE_W / 2 + 24, y: -2 }, truncate(nd.id, 14)),
-      s("text", { class: "kind", x: -NODE_W / 2 + 24, y: 13 }, truncate(nd.node.kind, 16)),
+      nodeFace(nd.id, nd.node.kind, stClass),
+      s("text", { class: "name", x: TEXT_X, y: -2 }, truncate(nd.id, 13)),
+      s("text", { class: "kind", x: TEXT_X, y: 13 }, truncate(kindName(nd.node.kind), 16)),
       multi && (nodeHost(lab, nd.id) || nd.node.host_pin)
         ? s("text", { class: "hostbadge", x: NODE_W / 2 - 6, y: NODE_H / 2 + 13, "text-anchor": "end" }, `@${nodeHost(lab, nd.id) || nd.node.host_pin}`)
         : null,
@@ -1310,6 +1389,7 @@ function renderDiagram(fit) {
 
   g.append(labels);
   svg.replaceChildren(g);
+  applyView(svg, "viewport", S.view);
   refocusDiagram();
   if (fit) fitDiagram();
 }
@@ -1317,6 +1397,57 @@ function renderDiagram(fit) {
 function truncate(str, n) {
   str = String(str ?? "");
   return str.length > n ? str.slice(0, n - 1) + "…" : str;
+}
+
+// Zoom and pan helpers for both canvases. ``view`` is {x, y, k}; apply()
+// writes it to the canvas.
+const ZOOM_MIN = 0.2, ZOOM_MAX = 3, LOD_FAR = 0.6;
+
+// Below LOD_FAR, interface names, kinds and edge labels hide (C3): names
+// and status stay readable instead of piling up
+function applyView(svg, viewportId, view) {
+  svg.querySelector(`#${viewportId}`)?.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
+  svg.classList.toggle("lod-far", view.k < LOD_FAR);
+  const level = svg.parentElement.querySelector(".zoom-level");
+  if (level) level.textContent = `${Math.round(view.k * 100)}%`;
+}
+
+// Zoom by ``factor`` around a point of the canvas (its centre by default)
+function zoomAt(svg, view, factor, mx, my) {
+  if (mx == null) { mx = svg.clientWidth / 2; my = svg.clientHeight / 2; }
+  const k = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, view.k * factor));
+  view.x = mx - ((mx - view.x) / view.k) * k;
+  view.y = my - ((my - view.y) / view.k) * k;
+  view.k = k;
+}
+
+// Zoom buttons and keys (+ - 0 1, arrows) for one canvas. ``fit()`` fits
+// the lab, ``apply()`` redraws the transform; returns nothing.
+function setupZoom(svg, view, fit, apply) {
+  const tools = svg.parentElement.querySelector(".zoom-tools");
+  const act = (what) => {
+    if (what === "fit") return fit();
+    if (what === "in") zoomAt(svg, view(), 1.25);
+    else if (what === "out") zoomAt(svg, view(), 0.8);
+    else if (what === "reset") zoomAt(svg, view(), 1 / view().k);
+    apply();
+  };
+  tools?.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-zoom]");
+    if (btn) act(btn.dataset.zoom);
+  });
+  svg.addEventListener("keydown", (ev) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const keys = { "+": "in", "=": "in", "-": "out", "_": "out", 0: "fit", 1: "reset" };
+    const pan = { ArrowLeft: [40, 0], ArrowRight: [-40, 0], ArrowUp: [0, 40], ArrowDown: [0, -40] };
+    if (keys[ev.key]) { ev.preventDefault(); act(keys[ev.key]); }
+    else if (pan[ev.key] && !ev.defaultPrevented) {
+      ev.preventDefault();
+      view().x += pan[ev.key][0];
+      view().y += pan[ev.key][1];
+      apply();
+    }
+  });
 }
 
 function fitDiagram() {
@@ -1329,8 +1460,7 @@ function fitDiagram() {
   const minY = Math.min(...ys) - NODE_H * 1.5, maxY = Math.max(...ys) + NODE_H * 1.5;
   const k = Math.min(1.4, Math.min(w / (maxX - minX), hgt / (maxY - minY)));
   S.view = { k, x: w / 2 - ((minX + maxX) / 2) * k, y: hgt / 2 - ((minY + maxY) / 2) * k };
-  const vp = $("#viewport");
-  if (vp) vp.setAttribute("transform", `translate(${S.view.x},${S.view.y}) scale(${S.view.k})`);
+  applyView(svg, "viewport", S.view);
 }
 
 function setupDiagramInteraction() {
@@ -1362,7 +1492,7 @@ function setupDiagramInteraction() {
     } else {
       S.view.x = drag.start.x + dx;
       S.view.y = drag.start.y + dy;
-      $("#viewport")?.setAttribute("transform", `translate(${S.view.x},${S.view.y}) scale(${S.view.k})`);
+      applyView(svg, "viewport", S.view);
     }
   });
   svg.addEventListener("pointerup", () => {
@@ -1381,14 +1511,11 @@ function setupDiagramInteraction() {
     ev.preventDefault();
     const rect = svg.getBoundingClientRect();
     const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-    const k = Math.max(0.2, Math.min(3, S.view.k * Math.exp(-ev.deltaY * 0.0015)));
-    S.view.x = mx - ((mx - S.view.x) / S.view.k) * k;
-    S.view.y = my - ((my - S.view.y) / S.view.k) * k;
-    S.view.k = k;
-    $("#viewport")?.setAttribute("transform", `translate(${S.view.x},${S.view.y}) scale(${S.view.k})`);
+    zoomAt(svg, S.view, Math.exp(-ev.deltaY * 0.0015), mx, my);
+    applyView(svg, "viewport", S.view);
   }, { passive: false });
 
-  $("#fit").addEventListener("click", fitDiagram);
+  setupZoom(svg, () => S.view, fitDiagram, () => applyView(svg, "viewport", S.view));
   $("#relayout").addEventListener("click", () => {
     S.positions = {};
     savePositions();

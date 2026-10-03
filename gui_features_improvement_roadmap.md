@@ -42,6 +42,7 @@ than a designed product:
 ### A. Visual language
 
 **A1. Device icons on nodes — S**
+**Done** (branch `gui-polish`): router, switch, host, firewall and generic glyphs from the name, then the kind; the kind's readable name on the second line. No vendor badge yet.
 Today: every node is the same rounded box with a name and a kind string.
 Proposal: a small glyph per role (router, L3 switch, L2 switch, host,
 firewall, route server) on the left of the box, chosen from the kind and
@@ -73,6 +74,7 @@ styles already exist for some states, so extend them to all. Make the
 status dot larger (8 px) with an outline.
 
 **A4. Icons on buttons and tabs — S**
+**Done** (branch `gui-polish`).
 Small icons next to the labels of Deploy (play), Destroy (trash), Save
 configs (download), Snapshot (camera), Diagram / Nodes / Routing / YAML
 tabs, Fit, Reload. Labels stay; icons speed up scanning. One SVG sprite.
@@ -137,6 +139,7 @@ emits. The raw log stays one click away. Finished jobs raise a toast with
 ### C. Canvas
 
 **C1. Zoom controls and a minimap — S**
+**Done, without the minimap** (branch `gui-polish`): −, 100 %, + and Fit bottom-right on both canvases; `+` `-` `0` `1` and arrow keys when the canvas has focus.
 Today: wheel to zoom, Fit button.
 Proposal: +, −, 100 % and Fit buttons grouped bottom-right, plus an
 optional minimap for labs with more than ~15 nodes. Keyboard: `+`/`-`,
@@ -149,6 +152,7 @@ everything else to ~30 %. Selecting an edge highlights both ends. Makes
 dense spine-leaf and EVPN views readable without filtering.
 
 **C3. Level of detail — S**
+**Done** (branch `gui-polish`): below 60 % interface names, kinds, host badges and edge labels hide.
 Zoomed out: hide interface labels and secondary text, keep names and
 status. Zoomed in: show interface labels, IPs, costs. Avoids the label
 pile-up seen today on the BGP view of the spine-leaf fabric.
@@ -168,6 +172,7 @@ colours, booting nodes breathing. All disabled under
 ### D. States and feedback
 
 **D1. First-run and empty states — S**
+**Done** (branch `gui-polish`): steps, topology cards, and new-lab cards (blank or a template). No mini diagrams on the cards.
 Today: "Select a topology on the left."
 Proposal: a welcome screen with three steps (pick or generate a lab,
 deploy, open a terminal), the example topologies as cards with a mini
