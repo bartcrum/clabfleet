@@ -136,6 +136,7 @@ class FakeChannel:
 
     def __init__(self):
         self.closed = False
+        self.delay = 0.05  # seconds each sendall takes
         self.sent = b""
         self.sizes = []
         self.reads = 0
@@ -159,7 +160,7 @@ class FakeChannel:
         return False
 
     def sendall(self, data):
-        time.sleep(0.05)  # a slow link: never on the event loop
+        time.sleep(self.delay)  # a slow link: never on the event loop
         self.sent += data
 
     def resize_pty(self, width, height):
@@ -199,12 +200,15 @@ def test_ssh_terminal_reader_blocks_on_a_full_queue_and_writes_off_loop():
             await asyncio.wait_for(out.__anext__(), 5)
         assert chan.reads > reads
 
-        # Input and resizes go through a thread: a slow sendall does not block us
+        # Input and resizes go through a thread: a slow sendall does not block
+        # us. Blocking would take 5 x 0.3 s; returning at once leaves a wide
+        # margin for a busy machine.
+        chan.delay = 0.3
         started = time.monotonic()
         for _ in range(5):
             assert session.write(b"ls\r")
         session.resize(100, 30)
-        assert time.monotonic() - started < 0.1
+        assert time.monotonic() - started < 1.0
         assert not session.write(b"x" * (MAX_INPUT + 1))  # too much pending
         await _until(lambda: chan.sent == b"ls\r" * 5 and chan.sizes == [(100, 30)])
 
@@ -657,5 +661,50 @@ def test_a_browser_that_never_reads_is_dropped(tmp_path, monkeypatch):
                 await _until(lambda: len(app[server.SESSIONS]) == 0, timeout=10)
             finally:
                 sock.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_cancelled_terminal_handler_still_records_the_close(tmp_path):
+    # aiohttp cancels the handler when the browser closes the connection; if
+    # that happens while the process is still being reaped, the close must
+    # still be audited, with the exit code, once the reap ends
+    from aiohttp.test_utils import make_mocked_request
+    from clabfleet.gui.auth import AuditLog
+
+    class SlowSession:
+        exit_code = None
+
+        def __init__(self):
+            self.reaped = asyncio.Event()
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            await self.reaped.wait()
+            self.exit_code = 0
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), "tok", audit=AuditLog(tmp_path / "a.jsonl"))
+        request = make_mocked_request("GET", "/ws/terminal", app=app)
+        session = SlowSession()
+
+        async def handler():
+            try:
+                await asyncio.sleep(0)
+            finally:
+                await asyncio.shield(server._close_terminal(request, session, {"node": "a"}, 0.0))
+
+        task = asyncio.create_task(handler())
+        await asyncio.sleep(0.05)  # in the finally, waiting for the reap
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not (tmp_path / "a.jsonl").exists()
+        session.reaped.set()
+        await _until(lambda: (tmp_path / "a.jsonl").exists())
+        event = json.loads((tmp_path / "a.jsonl").read_text())
+        assert event["event"] == "terminal_closed" and event["details"]["exit_code"] == 0
 
     asyncio.run(scenario())
