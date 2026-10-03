@@ -196,16 +196,19 @@ silently keeping the last colours.
 ### E. Accessibility and responsiveness
 
 **E1. Keyboard-navigable canvas — M**
+**Done** (branch `gui-a11y`): focus lands on a node; arrows move to the nearest node that way (connected ones first), Enter selects, `t` opens a terminal, Escape leaves the nodes (arrows pan; `n` returns). Nodes carry role and label text.
 Tab into the canvas, arrow keys move between connected nodes, Enter opens
 the inspector, `t` opens the node's terminal. Nodes and edges get
 `role` and `aria-label` text ("Leaf-1, arista_ceos, running, 2 BGP
 sessions up").
 
 **E2. Screen-reader announcements — S**
+**Done** (branch `gui-a11y`): job results, problems appearing and clearing in the open lab (from the Health list), and the keyboard's node.
 An `aria-live` region announcing job results and state changes ("BGP
 session Spine-1 to Leaf-2 down").
 
 **E3. Contrast pass — S**
+**Done** (branch `gui-a11y`): every text and status token measured against every background in both themes; all now pass 4.5:1 (the light theme's amber, green and red, the dark theme's red and four light categorical colours were short; muted text was fine).
 Check every text and status token against WCAG AA in both themes; muted
 10 px text on the dark panel is the likely failure today.
 

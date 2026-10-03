@@ -9,7 +9,7 @@
 // Uses app.js globals: S, $, h, s, api, toast, NODE_W, NODE_H, PSEUDO_W,
 // PSEUDO_H, graphModel, ensurePositions, savePositions, truncate, ifaceLabel,
 // nodeRuntime, nodeState, canOperate, openTerminal, nodeFace, TEXT_X,
-// applyView, zoomAt, setupZoom.
+// applyView, zoomAt, setupZoom, setupNodeKeys, markKb, announce.
 // ---------------------------------------------------------------------------
 
 const RT = {
@@ -472,6 +472,7 @@ function rtRender() {
     g.append(s("g", {
       class: `node${info.off ? " off" : ""}${selected ? " selected" : ""}`,
       transform: `translate(${p[0]},${p[1]})`, "data-id": n.name, "data-f": n.name,
+      role: "img", "aria-label": rtNodeLabel(n.name, info, model),
     },
       s("rect", { x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 9 }),
       nodeFace(n.name, n.kind, stClass),
@@ -493,6 +494,7 @@ function rtRender() {
   g.append(labels);
   svg.replaceChildren(g);
   applyView(svg, "rt-viewport", RT.view);
+  markKb(svg);
   rtRefocus();
 
   rtRenderLegend(rtLiveData() ? [
@@ -504,6 +506,15 @@ function rtRender() {
   ] : model.legend);
   rtRenderCard();
   if (!RT.fitted) { rtFit(P); RT.fitted = true; }
+}
+
+// What a screen reader hears for a node of the Routing tab
+function rtNodeLabel(name, info, model) {
+  const edges = (model?.edges || []).filter((e) => e.a === name || e.b === name);
+  const down = edges.filter((e) => /live-(down|missing)/.test(e.cls)).length;
+  return `${name}, ${info.sub}${info.badge ? `, ${info.badge}` : ""}, ` +
+    `${edges.length} ${RT_PROTO_LABEL[RT.proto] || ""} edge${edges.length === 1 ? "" : "s"}` +
+    (down ? `, ${down} down` : "") + (info.warn ? ", has problems" : "");
 }
 
 // Peers outside the lab go below the router that peers with them
@@ -950,6 +961,15 @@ function rtSetup() {
     apply();
   }, { passive: false });
 
+  setupNodeKeys(svg, {
+    nodes: () => (S.detail?.nodes || []).filter((n) => S.positions[n.name]).map((n) => ({ id: n.name, pos: S.positions[n.name] })),
+    links: () => Object.values(RT.edges).map((e) => [e.a, e.b]),
+    label: (id) => svg.querySelector(`.node[data-id="${CSS.escape(id)}"]`)?.getAttribute("aria-label") || id,
+    selected: () => (RT.sel?.type === "node" ? RT.sel.id : null),
+    select: (id) => { RT.sel = { type: "node", id }; rtRender(); },
+    view: () => RT.view,
+    apply,
+  });
   setupZoom(svg, () => RT.view, () => rtFit(), apply);
   $("#routing-reload").addEventListener("click", () => rtLoad());
   $("#routing-problems-btn").addEventListener("click", () => openHealth("routing"));

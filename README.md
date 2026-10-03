@@ -409,7 +409,13 @@ an operator.
   its kind, with its status on the glyph's corner. Zoom with the wheel, the
   −, 100 %, + and Fit buttons at the bottom right, or `+`, `-`, `0` (fit),
   `1` (actual size) and the arrow keys once the canvas has focus; below
-  60 % interface names and labels hide so the shape stays readable. With
+  60 % interface names and labels hide so the shape stays readable. From
+  the keyboard, Tab into a canvas lands on a node: the arrow keys move to
+  the nearest node that way (connected ones first), Enter selects it, `t`
+  opens its terminal, Escape leaves the nodes so the arrows pan (`n` goes
+  back). Screen readers hear the node they are on, job results, and
+  problems as they appear and clear. Text and status colours meet WCAG AA
+  contrast in both themes. With
   no lab selected, the start page lists the topologies and ways to start a
   new lab. Destroy and Redeploy
   ask in a dialog that says what will be removed; labs of 10 or more

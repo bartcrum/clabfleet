@@ -101,6 +101,16 @@ function confirmDialog({ title, body, ok = "OK", danger = false, typeToConfirm =
   });
 }
 
+// Screen readers (E2): a polite live region. Each message is its own node,
+// removed after a while, so repeated messages are still read.
+function announce(msg) {
+  const box = $("#announcer");
+  if (!box || !msg) return;
+  const line = h("div", {}, msg);
+  box.append(line);
+  setTimeout(() => line.remove(), 8000);
+}
+
 let toastTimer;
 function toast(msg) {
   const el = $("#toast");
@@ -298,6 +308,7 @@ async function refreshState() {
   for (const j of S.state.jobs) {
     if (before.get(j.id) === "running" && j.status !== "running" && j.id !== S.viewJob) {
       if (j.status !== "ok") toast(`${j.action} ${j.lab} failed — see Activity`);
+      announce(`${j.action} ${j.lab} ${j.status === "ok" ? "finished" : "failed"}`);
       if (S.selected?.type === "topo" && S.selected.id === j.topology) reloadDetail();
     }
   }
@@ -949,8 +960,27 @@ function openHealth(source = "all") {
   renderHealth();
 }
 
+// Problems that appear or clear in the open lab are announced (E2); the
+// first look at a lab only sets the baseline
+let healthSeen = { lab: null, keys: new Set() };
+function announceHealth(items) {
+  const lab = currentLabName();
+  const keys = new Map(items.filter((i) => i.sev !== "info").map((i) => [`${i.tag}|${i.msg}`, i]));
+  if (lab !== healthSeen.lab) { healthSeen = { lab, keys: new Set(keys.keys()) }; return; }
+  const added = [...keys.keys()].filter((k) => !healthSeen.keys.has(k));
+  const cleared = [...healthSeen.keys].filter((k) => !keys.has(k));
+  healthSeen.keys = new Set(keys.keys());
+  const say = (list, what, text) => {
+    if (list.length > 3) announce(`${list.length} ${what} in ${lab}`);
+    else for (const k of list) announce(text(k));
+  };
+  say(added, "new problems", (k) => `Problem: ${keys.get(k).msg}`);
+  say(cleared, "problems cleared", (k) => `Cleared: ${k.split("|").slice(1).join("|")}`);
+}
+
 // The Health tab, and the problem count for the header
 function renderHealth(items = healthItems()) {
+  announceHealth(items);
   const c = healthCounts(items);
   $("#health-dot").className = `dot ${!currentLabName() ? "" : c.error ? "error" : c.warn ? "partial" : "running"}`;
   $("#health-count").textContent = c.error + c.warn ? String(c.error + c.warn) : "";
@@ -1367,6 +1397,7 @@ function renderDiagram(fit) {
     const el = s("g", {
       class: `node${S.selectedNode === nd.id ? " selected" : ""}`,
       transform: `translate(${x},${y})`, "data-id": nd.id, "data-f": nd.id,
+      role: "img", "aria-label": nodeLabel(nd.id),
     },
       s("rect", { x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 9 }),
       nodeFace(nd.id, nd.node.kind, stClass),
@@ -1390,6 +1421,7 @@ function renderDiagram(fit) {
   g.append(labels);
   svg.replaceChildren(g);
   applyView(svg, "viewport", S.view);
+  markKb(svg);
   refocusDiagram();
   if (fit) fitDiagram();
 }
@@ -1448,6 +1480,103 @@ function setupZoom(svg, view, fit, apply) {
       apply();
     }
   });
+}
+
+// Keyboard navigation between nodes on a canvas (E1). Focus via the
+// keyboard lands on a node; arrows move to the nearest node that way,
+// connected ones first; Enter selects; Escape leaves the nodes, and arrows
+// pan again (Shift+arrows always pan). ``o``: {nodes() -> [{id, pos}],
+// links() -> [[a, b]], label(id), select(id), open(id)?, view(), apply()}.
+function setupNodeKeys(svg, o) {
+  const DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  const set = (id) => {
+    svg.dataset.kb = id || "";
+    markKb(svg);
+    if (!id) return;
+    const n = o.nodes().find((x) => x.id === id);
+    if (n) { panToShow(svg, o.view(), n.pos); o.apply(); }
+    announce(o.label(id));
+  };
+  const step = (from, [dx, dy]) => {
+    const nodes = o.nodes(), here = nodes.find((n) => n.id === from);
+    if (!here) return nodes[0]?.id;
+    const linked = new Set(o.links().flatMap(([a, b]) => (a === from ? [b] : b === from ? [a] : [])));
+    let best = null;
+    for (const pool of [nodes.filter((n) => linked.has(n.id)), nodes]) {
+      for (const n of pool) {
+        if (n.id === from) continue;
+        const vx = n.pos[0] - here.pos[0], vy = n.pos[1] - here.pos[1];
+        const dist = Math.hypot(vx, vy) || 1, cos = (vx * dx + vy * dy) / dist;
+        if (cos < 0.35) continue;  // not that way
+        const score = dist * (2 - cos);
+        if (!best || score < best.score) best = { id: n.id, score };
+      }
+      if (best) break;
+    }
+    return best?.id;
+  };
+  svg.addEventListener("focus", () => {
+    if (svg.dataset.kb || !svg.matches(":focus-visible")) return;
+    const nodes = [...o.nodes()].sort((a, b) => a.pos[1] - b.pos[1] || a.pos[0] - b.pos[0]);
+    set(o.selected?.() || nodes[0]?.id);
+  });
+  svg.addEventListener("keydown", (ev) => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const kb = svg.dataset.kb;
+    if (DIRS[ev.key] && !ev.shiftKey && kb) {
+      ev.preventDefault();  // not a pan
+      const next = step(kb, DIRS[ev.key]);
+      if (next) set(next); else announce(`Nothing that way from ${kb}`);
+    } else if (ev.key === "Escape" && kb) {
+      ev.preventDefault();
+      set(null);
+      announce("Left the nodes: arrow keys pan");
+    } else if ((ev.key === "Enter" || ev.key === " ") && kb) {
+      ev.preventDefault();
+      o.select(kb);
+    } else if (ev.key.toLowerCase() === "t" && kb && o.open) {
+      ev.preventDefault();
+      o.open(kb);
+    } else if (ev.key.toLowerCase() === "n" && !kb) {
+      ev.preventDefault();  // back onto the nodes
+      set(o.selected?.() || o.nodes()[0]?.id);
+    }
+  });
+}
+
+// Mark the keyboard's node after a redraw, and point assistive tech at it
+function markKb(svg) {
+  for (const el of svg.querySelectorAll(".node.kb")) el.classList.remove("kb");
+  const id = svg.dataset.kb;
+  const el = id && [...svg.querySelectorAll(".node")].find((n) => n.dataset.id === id);
+  if (el) {
+    el.classList.add("kb");
+    el.id = `${svg.id}-kb`;
+    svg.setAttribute("aria-activedescendant", el.id);
+  } else {
+    svg.removeAttribute("aria-activedescendant");
+  }
+}
+
+// Pan so a point of the drawing is well inside the canvas
+function panToShow(svg, view, [x, y]) {
+  const w = svg.clientWidth, hgt = svg.clientHeight, m = 90;
+  const sx = x * view.k + view.x, sy = y * view.k + view.y;
+  if (sx < m) view.x += m - sx; else if (sx > w - m) view.x -= sx - (w - m);
+  if (sy < m) view.y += m - sy; else if (sy > hgt - m) view.y -= sy - (hgt - m);
+}
+
+// What a screen reader hears for a node of the Diagram
+function nodeLabel(id) {
+  const D = diagramDetail();
+  const node = D?.nodes?.find((n) => n.name === id);
+  if (!node) return id;
+  const rt = nodeRuntime(D.name, id);
+  const links = (D.links || []).filter((l) => l.a.node === id || l.b.node === id).length;
+  const down = Object.values(liveData()?.links || {}).flatMap((ls) => [ls.a, ls.b])
+    .filter((e) => e?.node === id && e.state === "down").length;
+  return `${id}, ${kindName(node.kind)}, ${nodeStateText(rt)}, ${links} link${links === 1 ? "" : "s"}` +
+    (down ? `, ${down} down` : "");
 }
 
 function fitDiagram() {
@@ -1515,6 +1644,22 @@ function setupDiagramInteraction() {
     applyView(svg, "viewport", S.view);
   }, { passive: false });
 
+  // Node keys first: they claim the arrows while on a node, zoom pans otherwise
+  setupNodeKeys(svg, {
+    nodes: () => (diagramModel?.nodes || []).filter((n) => !n.pseudo).map((n) => ({ id: n.id, pos: S.positions[n.id] })),
+    links: () => (diagramModel?.links || []).map((l) => [l.a.id, l.b.id]),
+    label: nodeLabel,
+    selected: () => S.selectedNode,
+    select: (id) => selectNode(id),
+    open: (id) => {
+      const node = S.detail?.nodes?.find((n) => n.name === id);
+      const rt = node && nodeRuntime(S.detail.name, id);
+      if (rt?.state === "running" && node.modes.length && canOperate()) openTerminal(S.detail.name, id, node.modes[0]);
+      else announce(`${id} has no terminal to open`);
+    },
+    view: () => S.view,
+    apply: () => applyView(svg, "viewport", S.view),
+  });
   setupZoom(svg, () => S.view, fitDiagram, () => applyView(svg, "viewport", S.view));
   $("#relayout").addEventListener("click", () => {
     S.positions = {};
@@ -1909,6 +2054,7 @@ function trackJob(id, fromStart) {
     S.jobPolling = null;
     if (!sawRunning) return;  // a finished job opened from history
     if (job.status !== "ok") toast(`${job.action} failed — see Activity`);
+    announce(`${job.action} ${job.lab || job.topology} ${job.status === "ok" ? "finished" : "failed"}`);
     await refreshState();
     await reloadDetail();
     refreshHosts();
