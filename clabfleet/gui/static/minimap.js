@@ -4,7 +4,7 @@
 // Minimap (C1): for labs with many nodes, the whole diagram small in a
 // corner, with the part in view outlined. Click or drag in it to move there.
 //
-// Uses app.js globals: S, $, s, diagramModel, applyView.
+// Uses app.js globals: S, $, s, diagramModel; and from canvas.js: applyView.
 // ---------------------------------------------------------------------------
 
 (() => {

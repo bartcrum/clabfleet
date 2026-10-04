@@ -14,9 +14,10 @@
 // never dragged: Save layout and Auto layout belong to the logical view.
 //
 // Uses app.js globals: S, $, s, announce, renderDiagram, nodeRuntime,
-// nodeState, nodeHost, statusGlyph, kindName, nodeRole, tierOf, naturalCmp,
-// crossLinkVnis, liveData, selectedLink, linkLive, BUSY_BPS, fmtCpu,
-// fmtBytes, fmtMem, nodeLabel, truncate.
+// nodeState, nodeHost, statusGlyph, kindName, nodeRole, naturalCmp,
+// crossLinkVnis, liveData, linkLive, BUSY_BPS, fmtCpu, fmtBytes, fmtMem,
+// nodeLabel, truncate; and from canvas.js: tierOf; from capture.js:
+// selectedLink.
 // ---------------------------------------------------------------------------
 
 (() => {

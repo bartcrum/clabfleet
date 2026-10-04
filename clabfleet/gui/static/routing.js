@@ -7,12 +7,13 @@
 // both tabs share one layout; dragging a node here moves it there too.
 //
 // Uses app.js globals: S, $, h, s, api, toast, NODE_W, NODE_H, PSEUDO_W,
-// PSEUDO_H, graphModel, ensurePositions, savePositions, truncate, ifaceLabel,
-// nodeRuntime, nodeState, labStatus, openDefaultTerminal, nodeFace, TEXT_X,
-// applyView, fitBounds, nodeBounds, setupCanvasPointer, doubleClicks,
-// setupZoom, setupNodeKeys, setupFocus, markKb, freshness, noteState,
-// topoPath, showView, openHealth, driftActions, renderLabHead,
-// renderNodeCard, syncInspector.
+// PSEUDO_H, graphModel, savePositions, truncate, nodeRuntime, nodeState,
+// labStatus, nodeFace, TEXT_X, freshness, noteState, topoPath, showView,
+// renderLabHead, renderNodeCard, syncInspector; and from canvas.js:
+// ensurePositions, ifaceLabel, applyView, fitBounds, nodeBounds,
+// setupCanvasPointer, doubleClicks, setupZoom, setupNodeKeys, setupFocus,
+// markKb; from health.js: openHealth, driftActions; from dock.js:
+// openDefaultTerminal.
 // ---------------------------------------------------------------------------
 
 (() => {  // own scope: only window.Routing is shared

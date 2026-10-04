@@ -8,7 +8,7 @@
 // and Delete to remove the selected one.
 //
 // Uses app.js globals: S, $, h, s, api, toast, topoPath, canOperate,
-// renderDiagram, announce, doubleClicks.
+// renderDiagram, announce; and from canvas.js: doubleClicks.
 // ---------------------------------------------------------------------------
 
 (() => {

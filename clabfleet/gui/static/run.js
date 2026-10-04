@@ -5,7 +5,8 @@
 // A dock tab with node globs, a mode and a command; the outputs as a list,
 // side by side, or as diffs against the first node's.
 //
-// Uses app.js globals: S, $, h, api, toast, topoPath, announce, activatePane.
+// Uses app.js globals: S, $, h, api, toast, topoPath, announce; and from
+// dock.js: activatePane.
 // ---------------------------------------------------------------------------
 
 (() => {
