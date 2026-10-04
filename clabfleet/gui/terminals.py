@@ -25,11 +25,10 @@ import subprocess
 import termios
 import threading
 from concurrent.futures import Executor
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-OnData = Callable[[bytes], Awaitable[None]]
 
 QUEUE_CHUNKS = 16          # output chunks buffered per session (each at most READ_SIZE)
 READ_SIZE = 65536

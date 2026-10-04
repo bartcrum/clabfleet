@@ -41,7 +41,6 @@ import os
 import re
 import secrets
 import stat
-import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,6 +48,8 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+
+from .editing import replace_file
 
 logger = logging.getLogger(__name__)
 
@@ -398,16 +399,7 @@ def check_private(path: Path, what: str) -> None:
 def write_private(path: Path, text: str) -> None:
     """Replace ``path`` with ``text`` as a new 0600 file."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # mkstemp: a fresh 0600 file, so nothing planted in the directory
-    # can redirect or pre-open the write
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    replace_file(path, text)
 
 
 class SessionFile:

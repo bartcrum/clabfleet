@@ -614,15 +614,27 @@ def _user_store(request) -> UserStore:
     return auth.users
 
 
-async def _in_thread(fn, *args, **kwargs):
-    """Run a users-file change off the event loop (password hashing is slow)."""
+async def _call(fn, *args, bad=(ValueError,), gateway: Optional[str] = None, **kwargs):
+    """Run a blocking call off the event loop, with its errors as HTTP ones:
+    something unknown (``KeyError``) is 404, text that is not a loadable
+    topology 400 with its validation report, a file changed on disk 409 and
+    any of ``bad`` 400. With ``gateway`` every other error is 502, "<gateway>:
+    <error>" (the lab or a node could not be asked)."""
     try:
-        return await asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(fn, *args, **kwargs))
+        return await asyncio.to_thread(fn, *args, **kwargs)
     except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "No such user")
-    except ValueError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Not found")
+    except UnloadableTopology as exc:
+        raise web.HTTPBadRequest(text=json.dumps({"error": str(exc), "validation": exc.report}),
+                                 content_type="application/json")
+    except EditConflict as exc:
+        raise web.HTTPConflict(text=str(exc))
+    except bad as exc:
         raise web.HTTPBadRequest(text=str(exc))
+    except Exception as exc:  # noqa: BLE001 - docker, SSH or the node refused
+        if gateway is None:
+            raise
+        raise web.HTTPBadGateway(text=f"{gateway}: {exc}" if gateway else str(exc))
 
 
 def _new_login(request, store: UserStore, name: str, login: str, fn) -> dict:
@@ -659,7 +671,7 @@ async def _add_user(request):
             return store.add(name, role, password, must_change=True)
         return store.add(name, role)
 
-    secret = await _in_thread(_new_login, request, store, name, login, add)
+    secret = await _call(_new_login, request, store, name, login, add)
     audit(request, "user_added", name=name, role=role, login=login)
     return web.json_response({"user": _user_view(store.get(name)), **secret})
 
@@ -670,7 +682,7 @@ async def _update_user(request):
     if name == current_user(request).name:
         raise web.HTTPBadRequest(text="You cannot change your own role")
     role = (await _json_body(request)).get("role")
-    await _in_thread(store.set_role, name, role)
+    await _call(store.set_role, name, role)
     audit(request, "user_role_changed", name=name, role=role)
     return web.json_response({"user": _user_view(store.get(name))})
 
@@ -691,7 +703,7 @@ async def _reset_user(request):
         return (store.set_password(name, password, must_change=True) if password
                 else store.rotate(name))
 
-    secret = await _in_thread(_new_login, request, store, name, login, reset)
+    secret = await _call(_new_login, request, store, name, login, reset)
     audit(request, "user_login_reset", name=name, login=login)
     return web.json_response({"user": _user_view(store.get(name)), **secret})
 
@@ -700,7 +712,7 @@ async def _remove_user(request):
     store, name = _user_store(request), request.match_info["name"]
     if name == current_user(request).name:
         raise web.HTTPBadRequest(text="You cannot remove yourself")
-    await _in_thread(store.remove, name, keep_operator=True)
+    await _call(store.remove, name, keep_operator=True)
     audit(request, "user_removed", name=name)
     return web.json_response({"removed": name})
 
@@ -791,43 +803,27 @@ async def _hosts(request):
 
 async def _topology(request):
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        detail = await asyncio.to_thread(ws.topology_detail, request.match_info["id"])
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    return web.json_response(detail)
+    return web.json_response(await _call(ws.topology_detail, request.match_info["id"]))
 
 
 async def _live(request):
     """Link states and node CPU/memory of a topology's running lab (cached;
     asking refreshes it in the background)."""
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        live = await asyncio.to_thread(ws.live_state, request.match_info["id"])
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    return web.json_response(live)
+    return web.json_response(await _call(ws.live_state, request.match_info["id"]))
 
 
 async def _routing(request):
     """Intended OSPF / BGP / EVPN views, read from the topology's configs."""
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        view = await asyncio.to_thread(ws.routing, request.match_info["id"])
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    return web.json_response(view)
+    return web.json_response(await _call(ws.routing, request.match_info["id"]))
 
 
 async def _routing_live(request):
     """Live OSPF / BGP / EVPN state of a topology's running lab (cached;
     asking refreshes it in the background)."""
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        live = await asyncio.to_thread(ws.routing_live, request.match_info["id"])
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    return web.json_response(live)
+    return web.json_response(await _call(ws.routing_live, request.match_info["id"]))
 
 
 async def _json_body(request) -> dict:
@@ -851,12 +847,8 @@ def _refuse_while_busy(request, topo_id: str) -> None:
 async def _validate(request):
     body = await _json_body(request)
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        report = await asyncio.to_thread(ws.validate_yaml, request.match_info["id"],
-                                         str(body.get("yaml", "")))
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    return web.json_response(report)
+    return web.json_response(await _call(ws.validate_yaml, request.match_info["id"],
+                                         str(body.get("yaml", "")), bad=()))
 
 
 async def _save_topology(request):
@@ -864,15 +856,8 @@ async def _save_topology(request):
     body = await _json_body(request)
     _refuse_while_busy(request, topo_id)
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        result = await asyncio.to_thread(ws.save_yaml, topo_id, str(body.get("yaml", "")),
-                                         str(body.get("base_hash", "")))
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    except UnloadableTopology as exc:
-        return web.json_response({"error": str(exc), "validation": exc.report}, status=400)
-    except EditConflict as exc:
-        raise web.HTTPConflict(text=str(exc))
+    result = await _call(ws.save_yaml, topo_id, str(body.get("yaml", "")),
+                         str(body.get("base_hash", "")), bad=())
     audit(request, "topology_saved", topology=topo_id, hash=result["detail"].get("hash"))
     return web.json_response(result)
 
@@ -889,16 +874,10 @@ async def _save_graph(request):
         _refuse_while_busy(request, topo_id)
     ws: Workspace = request.app[WORKSPACE]
     try:
-        result = await asyncio.to_thread(ws.apply_graph, topo_id, graph,
-                                         str(body.get("base_hash", "")), dry_run)
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
+        result = await _call(ws.apply_graph, topo_id, graph,
+                             str(body.get("base_hash", "")), dry_run, bad=())
     except (ValueError, TypeError) as exc:
         raise web.HTTPBadRequest(text=f"Cannot apply the drawing: {exc}")
-    except UnloadableTopology as exc:
-        return web.json_response({"error": str(exc), "validation": exc.report}, status=400)
-    except EditConflict as exc:
-        raise web.HTTPConflict(text=str(exc))
     if not dry_run:
         audit(request, "topology_saved", topology=topo_id, hash=result["detail"].get("hash"),
               via="builder")
@@ -1026,14 +1005,7 @@ async def _whatif(request):
         raise web.HTTPBadRequest(text="Expected action, node and iface")
     _refuse_while_busy(request, topo_id)
     audit(request, "whatif", topology=topo_id, action=action, node=node, iface=iface)
-    try:
-        done = await asyncio.to_thread(ws.whatif, topo_id, action, node, iface)
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
-    except ValueError as exc:
-        raise web.HTTPBadRequest(text=str(exc))
-    except Exception as exc:  # noqa: BLE001 - docker or the node refused
-        raise web.HTTPBadGateway(text=str(exc))
+    done = await _call(ws.whatif, topo_id, action, node, iface, gateway="")
     return web.json_response({"done": done})
 
 
@@ -1046,29 +1018,15 @@ async def _trace(request):
     src, dst = body.get("src"), body.get("dst")
     if not isinstance(src, str) or not isinstance(dst, str) or not dst.strip():
         raise web.HTTPBadRequest(text="Expected src and dst")
-    try:
-        result = await asyncio.to_thread(ws.trace, request.match_info["id"], src, dst.strip())
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
-    except ValueError as exc:
-        raise web.HTTPBadRequest(text=str(exc))
-    except Exception as exc:  # noqa: BLE001 - a node could not be asked
-        raise web.HTTPBadGateway(text=f"Trace failed: {exc}")
-    return web.json_response(result)
+    return web.json_response(await _call(ws.trace, request.match_info["id"], src, dst.strip(),
+                                         gateway="Trace failed"))
 
 
 async def _evpn_routes(request):
     """?node=X: a cEOS VTEP's EVPN routes (hosts and prefixes per VNI)."""
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        routes = await asyncio.to_thread(ws.evpn_routes, request.match_info["id"],
-                                         request.query.get("node", ""))
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Unknown topology")
-    except ValueError as exc:
-        raise web.HTTPBadRequest(text=str(exc))
-    except Exception as exc:  # noqa: BLE001 - the node could not be asked
-        raise web.HTTPBadGateway(text=f"Could not read the EVPN routes: {exc}")
+    routes = await _call(ws.evpn_routes, request.match_info["id"], request.query.get("node", ""),
+                         gateway="Could not read the EVPN routes")
     return web.json_response({"routes": routes})
 
 
@@ -1078,14 +1036,8 @@ async def _save_positions(request):
     _refuse_while_busy(request, topo_id)
     ws: Workspace = request.app[WORKSPACE]
     try:
-        detail = await asyncio.to_thread(ws.save_positions, topo_id, body.get("positions"),
-                                         str(body.get("base_hash", "")))
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    except EditConflict as exc:
-        raise web.HTTPConflict(text=str(exc))
-    except ValueError as exc:
-        raise web.HTTPBadRequest(text=str(exc))
+        detail = await _call(ws.save_positions, topo_id, body.get("positions"),
+                             str(body.get("base_hash", "")))
     except RuntimeError as exc:  # ruamel.yaml missing
         raise web.HTTPNotImplemented(text=str(exc))
     audit(request, "positions_saved", topology=topo_id,
@@ -1098,12 +1050,7 @@ async def _save_annotations(request):
     topo_id = request.match_info["id"]
     body = await _json_body(request)
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        saved = await asyncio.to_thread(ws.save_annotations, topo_id, body)
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    except ValueError as exc:
-        raise web.HTTPBadRequest(text=str(exc))
+    saved = await _call(ws.save_annotations, topo_id, body)
     audit(request, "annotations_saved", topology=topo_id,
           notes=len(saved["notes"]), boxes=len(saved["boxes"]))
     return web.json_response(saved)
@@ -1115,16 +1062,11 @@ async def _node_diff(request):
     against the one before or its startup-config, or its running config
     (read now) against its startup-config."""
     ws: Workspace = request.app[WORKSPACE]
-    try:
-        result = await asyncio.to_thread(
-            ws.node_diff, request.match_info["id"], request.query.get("node", ""),
-            request.query.get("against", "startup"))
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
-    except (SnapshotError, ValueError) as exc:  # no snapshots yet, unknown node
-        raise web.HTTPBadRequest(text=str(exc))
-    except Exception as exc:  # noqa: BLE001 - reading the node failed (SSH, docker)
-        raise web.HTTPBadGateway(text=f"Could not read the running config: {exc}")
+    result = await _call(
+        ws.node_diff, request.match_info["id"], request.query.get("node", ""),
+        request.query.get("against", "startup"),
+        bad=(SnapshotError, ValueError),  # no snapshots yet, unknown node
+        gateway="Could not read the running config")
     return web.json_response(result)
 
 
@@ -1135,7 +1077,7 @@ async def _start_job(request):
         job = request.app[JOBS].start(body.get("action", ""), body.get("topology", ""), options,
                                       user=current_user(request).name)
     except KeyError as exc:
-        raise web.HTTPNotFound(text=str(exc))
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Not found")
     except ValueError as exc:
         raise web.HTTPBadRequest(text=str(exc))
     except RuntimeError as exc:

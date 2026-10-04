@@ -8,9 +8,9 @@ belongs to no node. The file travels with the topology (copy both).
 
 import json
 import math
-import os
-import tempfile
 from pathlib import Path
+
+from .editing import replace_file
 
 MAX_ITEMS = 200       # notes and boxes, each
 MAX_TEXT = 500        # characters in a note or a box label
@@ -105,13 +105,5 @@ def save(topology: Path, data) -> dict:
     if not cleaned["notes"] and not cleaned["boxes"]:
         target.unlink(missing_ok=True)
         return cleaned
-    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(cleaned, f, indent=1)
-            f.write("\n")
-        os.replace(tmp, target)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    replace_file(target, json.dumps(cleaned, indent=1) + "\n")
     return cleaned

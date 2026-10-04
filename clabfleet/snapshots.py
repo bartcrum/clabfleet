@@ -32,7 +32,7 @@ from .deployer import LabDeployer, clab_dir, read_placement_record
 from .execute import select_nodes
 from .nodes import NO_SHELL_KINDS
 from .runner import OutputCallback, Runner
-from .topology import KIND_ALIASES, Topology, load_topology
+from .topology import Topology, canonical_kind, load_topology
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +66,6 @@ FILE_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 class SnapshotError(Exception):
     """A snapshot or diff cannot be made at all (bad arguments, nothing found)."""
-
-
-def canonical_kind(kind: str) -> str:
-    return KIND_ALIASES.get(kind, kind)
 
 
 def snapshot_root(topo: Topology, directory: Optional[str | Path] = None) -> Path:

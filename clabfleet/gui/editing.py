@@ -72,6 +72,24 @@ def set_positions(text: str, positions: dict[str, tuple[float, float]]) -> str:
     return out.getvalue()
 
 
+def replace_file(path: Path, text: str, mode: Optional[int] = None) -> None:
+    """Atomically replace ``path`` with ``text``: readers see the old file or
+    the new one, never half of it. The new file is 0600 unless ``mode`` says
+    otherwise."""
+    # mkstemp: a fresh 0600 file, so nothing planted in the directory
+    # can redirect or pre-open the write
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def write_if_unchanged(path: Path, text: str, base_hash: str) -> None:
     """Atomically replace ``path`` with ``text`` unless it changed since ``base_hash``."""
     current = path.read_text()
@@ -79,16 +97,7 @@ def write_if_unchanged(path: Path, text: str, base_hash: str) -> None:
         raise EditConflict(
             f"{path.name} changed on disk since it was opened; revert to load the new version"
         )
-    mode = path.stat().st_mode & 0o777
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    replace_file(path, text, mode=path.stat().st_mode & 0o777)
 
 
 # --- The topology builder: a drawn graph back into the file ---

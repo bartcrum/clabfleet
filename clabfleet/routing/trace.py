@@ -30,10 +30,9 @@ from collections import deque
 from typing import Callable, Optional
 
 from ..livestate import linux_iface_names
+from .live import family
 
 MAX_HOPS = 16
-EOS = {"arista_ceos", "ceos"}
-IOS = {"cisco_iol", "cisco_csr1000v", "cisco_c8000v"}
 LINUX = {"linux"}
 
 
@@ -259,6 +258,7 @@ def trace(lab: Lab, ask: Callable[[str, str], str], src: str, dst: str,
             continue
         seen.add((node, vrf))
         kind = lab.kinds.get(node, "")
+        eos, ios = family(kind) == "eos", family(kind) == "ios"
         hop = {"node": node, "vrf": vrf}
         hops.append(hop)
         if node == dst_node:
@@ -266,14 +266,14 @@ def trace(lab: Lab, ask: Callable[[str, str], str], src: str, dst: str,
             reached = True
             continue
         try:
-            if bridge and kind in EOS:
+            if bridge and eos:
                 status, nexts, hop["route"] = "next", _eos_bridge(ask, node, bridge), "bridged (VXLAN)"
-            elif kind in EOS:
+            elif eos:
                 status, nexts, hop["route"], vrf = _eos_lookup(ask, node, dst, vrf, known_mac)
                 hop["vrf"] = vrf
             elif kind in LINUX:
                 status, nexts, hop["route"] = _linux_lookup(ask, node, dst)
-            elif kind in IOS:
+            elif ios:
                 status, nexts, hop["route"] = _ios_lookup(ask, node, dst)
             else:
                 hop["error"] = f"cannot look up routes on kind '{kind}'"
@@ -287,7 +287,7 @@ def trace(lab: Lab, ask: Callable[[str, str], str], src: str, dst: str,
         if status == "reached":
             reached = True
             continue
-        if dst_node and kind in EOS and all(n.get("flood") for n in nexts):
+        if dst_node and eos and all(n.get("flood") for n in nexts):
             # The address is in no table (its MAC aged out): if the destination
             # hangs off this node, that is where the frame goes
             direct = lab.link_to(node, dst_node)

@@ -91,7 +91,7 @@ from .templates import (
     generate,
     render,
 )
-from .snapshots import SnapshotError, Snapshotter, diff_lab, list_snapshots
+from .snapshots import Snapshotter, diff_lab, list_snapshots
 from .topology import dump_yaml, load_topology
 from .validate import validate_topology
 
