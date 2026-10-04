@@ -53,11 +53,12 @@ from .auth import (
 )
 from .captures import open_capture, pcap_filename, spec_from_query
 from .editing import EditConflict
+from .jobs import Job, JobManager
 from .sessions import (
     CAPTURE, MAX_SESSIONS, MAX_USER_SESSIONS, TERMINAL, OpenSession, SessionLimitError,
     SessionRegistry,
 )
-from .state import Job, JobManager, UnloadableTopology, Workspace
+from .state import UnloadableTopology, Workspace
 from .terminals import CaptureSession, LocalTerminal, SSHTerminal
 
 logger = logging.getLogger(__name__)

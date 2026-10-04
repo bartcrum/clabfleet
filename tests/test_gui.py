@@ -15,8 +15,8 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 from clabfleet.cluster import ClusterConfig, HostInfo  # noqa: E402
 from clabfleet.deployer import LabDeployer  # noqa: E402
 from clabfleet.gui import server, state  # noqa: E402
+from clabfleet.gui.jobs import Job, JobHistory, JobManager  # noqa: E402
 from clabfleet.gui.state import (  # noqa: E402
-    JobManager,
     Workspace,
     find_topologies,
     topology_view,
@@ -190,7 +190,7 @@ def test_job_manager_runs_labs_in_parallel_and_keeps_history(tmp_path, monkeypat
         def destroy(self, path, cleanup=True):
             return {"hosts": {"localhost": {"error": "boom"}}}
 
-    monkeypatch.setattr(state, "LabDeployer", FakeDeployer)
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", FakeDeployer)
     ws = _workspace(tmp_path)
     (tmp_path / "u.clab.yml").write_text(TOPO.replace("name: t", "name: u"))
     (tmp_path / "t-copy.clab.yml").write_text(TOPO)  # same lab name "t"
@@ -233,7 +233,7 @@ def test_job_manager_runs_labs_in_parallel_and_keeps_history(tmp_path, monkeypat
 
     # History survives a restart; a job that was running is marked interrupted
     history_dir = tmp_path / ".clabfleet" / "jobs"
-    stuck = state.Job("stuck", "deploy", "u.clab.yml", lab="u", started=1.0)
+    stuck = Job("stuck", "deploy", "u.clab.yml", lab="u", started=1.0)
     (history_dir / "stuck.json").write_text(json.dumps(stuck.to_dict()))
     (history_dir / "junk.json").write_text("{not json")
     reloaded = JobManager(ws)
@@ -245,13 +245,13 @@ def test_job_manager_runs_labs_in_parallel_and_keeps_history(tmp_path, monkeypat
 
 
 def test_job_history_keeps_newest(tmp_path):
-    history = state.JobHistory(tmp_path / "jobs", keep=3)
+    history = JobHistory(tmp_path / "jobs", keep=3)
     for i in range(5):
-        job = state.Job(f"j{i}", "save", "t", started=float(i), status="ok")
+        job = Job(f"j{i}", "save", "t", started=float(i), status="ok")
         history.save(job)
         os.utime(tmp_path / "jobs" / f"j{i}.json", (i, i))
     assert [j.id for j in history.load()] == ["j2", "j3", "j4"]
-    assert state.JobHistory(None).load() == []
+    assert JobHistory(None).load() == []
 
 
 def test_job_history_is_private_and_not_redirected(tmp_path):
@@ -262,8 +262,8 @@ def test_job_history_is_private_and_not_redirected(tmp_path):
     target.write_text("untouched")
     (jobs / ".j1.tmp").symlink_to(target)  # the old fixed temporary name
     (jobs / "planted.json").symlink_to(target)
-    history = state.JobHistory(jobs)
-    history.save(state.Job("j1", "save", "t", status="ok", lines=["x"]))
+    history = JobHistory(jobs)
+    history.save(Job("j1", "save", "t", status="ok", lines=["x"]))
     assert target.read_text() == "untouched"
     assert stat.S_IMODE(jobs.stat().st_mode) == 0o700
     assert stat.S_IMODE((jobs / "j1.json").stat().st_mode) == 0o600
@@ -316,7 +316,7 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
 
 
 def test_job_outcome_lines():
-    job = state.Job("j", "deploy", "t")
+    job = Job("j", "deploy", "t")
     job.add_outcome({"status": "partial", "hosts": {"h1": {"status": "deployed"}, "h2": {"error": "x"}}})
     job.add_outcome({"status": "rolled-back", "hosts": {}, "rollback": {"h1": "ok", "h2": "ok"}})
     job.add_outcome({"status": "rollback-failed", "hosts": {}, "rollback": {"h1": "ok", "h2": "error: y"}})
@@ -398,7 +398,7 @@ def test_stop_saves_first_and_keeps_the_lab_directory(tmp_path, monkeypatch):
 
         stop = LabDeployer.stop  # the real one, over the fake save and destroy
 
-    monkeypatch.setattr(state, "LabDeployer", FakeDeployer)
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", FakeDeployer)
     ws = _workspace(tmp_path)
     ws.topologies()
     jobs = JobManager(ws)

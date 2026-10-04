@@ -184,6 +184,28 @@ def inspect_all(runner) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def lab_containers(hosts, lab: str, runner_for) -> tuple[dict[str, dict], dict[str, str]]:
+    """node name → container info for a lab on ``hosts``, plus per-host errors.
+
+    ``runner_for`` maps a host to its runner (e.g. ``RunnerPool.get``).
+    """
+    found: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    for host in hosts:
+        try:
+            data = inspect_all(runner_for(host))
+        except InspectError as exc:
+            errors[host.name] = str(exc)
+            continue
+        except Exception as exc:  # noqa: BLE001
+            errors[host.name] = f"unreachable: {exc}"
+            continue
+        for c in parse_inspect(data, host.name):
+            if c["lab"] == lab:
+                found[c["node"]] = c
+    return found, errors
+
+
 def running_usage(data: dict, exclude_lab: str | None = None) -> dict[str, dict]:
     """Estimated resources of running lab containers, per lab.
 

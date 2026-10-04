@@ -5,10 +5,11 @@
 // node's terminal or config diff, run lab actions, switch theme, ...
 // Commands are built fresh each time it opens, from what can be done now.
 //
-// Uses app.js globals: S, $, h, showView, selectTopology, selectOtherLab,
-// selectNode, openTerminal, openDiff, runAction, openHealth, activatePane,
-// applyTheme, THEMES, canOperate, runningJob, labStatus, currentLabName,
-// nodeRuntime, kindName, MODE_LABEL, refreshState, refreshHosts, logout.
+// Uses app.js globals: S, $, h, showView, selectTopology, selectNode,
+// runAction, applyTheme, THEMES, canOperate, runningJob, labStatus,
+// currentLabName, nodeRuntime, kindName, MODE_LABEL, refreshState,
+// refreshHosts; and from health.js: openHealth; from dock.js: openTerminal,
+// openDiff, activatePane; from account.js: logout.
 // ---------------------------------------------------------------------------
 
 (() => {

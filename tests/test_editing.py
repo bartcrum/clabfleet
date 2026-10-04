@@ -20,6 +20,7 @@ from clabfleet.gui.editing import (  # noqa: E402
     text_hash,
     write_if_unchanged,
 )
+from clabfleet.gui.jobs import Job  # noqa: E402
 from clabfleet.gui.state import UnloadableTopology, Workspace  # noqa: E402
 
 TOPOLOGIES = Path(__file__).parent.parent / "topologies"
@@ -138,7 +139,7 @@ def test_edit_endpoints(tmp_path, monkeypatch):
             assert (await resp.json())["nodes"][0]["pos"] == [5.0, 6.0]
 
             # Refused while a job runs for the lab
-            app[server.JOBS].jobs["j"] = state.Job("j", "deploy", "t.clab.yml", lab="t")
+            app[server.JOBS].jobs["j"] = Job("j", "deploy", "t.clab.yml", lab="t")
             resp = await client.put("/api/topologies/t.clab.yml", json={"yaml": TOPO, "base_hash": ""})
             assert resp.status == 409 and "job is running" in await resp.text()
             resp = await client.put("/api/positions/t.clab.yml", json={"positions": {}})

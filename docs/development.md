@@ -36,7 +36,8 @@ clabfleet/
   gui/
     server.py      # aiohttp app: API, auth middleware, terminal websockets
     auth.py        # Users file, roles, audit log
-    state.py       # Topology discovery, running labs, deploy/destroy jobs
+    state.py       # Topology discovery, running labs
+    jobs.py        # Deploy/destroy/save/snapshot jobs and their history
     terminals.py   # Local pty, SSH-channel and live capture sessions
     sessions.py    # Open terminal/capture sessions: limits, revocation
     captures.py    # GUI packet captures: limits, pcap downloads
