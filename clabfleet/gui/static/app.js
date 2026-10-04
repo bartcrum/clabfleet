@@ -1731,6 +1731,82 @@ function setupZoom(svg, view, fit, apply) {
   });
 }
 
+// Pointer handling for one canvas: a press that moves drags a node or pans,
+// one that does not is a click; the wheel zooms at the pointer. ``o``:
+// {view(), apply(), press(ev) -> {type: "node", id, start: [x, y]} or
+// {type: "pan"}, with whatever else click() needs, move(drag, pos) for a
+// node being dragged, drop(drag) when it is let go, click(drag)}.
+function setupCanvasPointer(svg, o) {
+  let drag = null;
+
+  svg.addEventListener("pointerdown", (ev) => {
+    svg.setPointerCapture(ev.pointerId);
+    drag = { ...o.press(ev), sx: ev.clientX, sy: ev.clientY, moved: false };
+    if (drag.type === "pan") {
+      drag.start = { ...o.view() };
+      svg.classList.add("panning");
+    }
+  });
+  svg.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const dx = ev.clientX - drag.sx, dy = ev.clientY - drag.sy;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    const view = o.view();
+    if (drag.type === "node") {
+      o.move(drag, [drag.start[0] + dx / view.k, drag.start[1] + dy / view.k]);
+    } else {
+      view.x = drag.start.x + dx;
+      view.y = drag.start.y + dy;
+      o.apply();
+    }
+  });
+  svg.addEventListener("pointerup", () => {
+    svg.classList.remove("panning");
+    if (!drag) return;
+    if (!drag.moved) o.click(drag);
+    else if (drag.type === "node") o.drop(drag);
+    drag = null;
+  });
+  svg.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    const rect = svg.getBoundingClientRect();
+    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+    zoomAt(svg, o.view(), Math.exp(-ev.deltaY * 0.0015), mx, my);
+    o.apply();
+  }, { passive: false });
+}
+
+// Clicks re-render the canvas, so double clicks are detected here rather
+// than with the browser's dblclick event (its target may already be gone).
+// Returns a function for one canvas: is this click on ``id`` the second of two?
+function doubleClicks() {
+  let last = { id: null, t: 0 };
+  return (id) => {
+    const now = Date.now();
+    const isDouble = last.id === id && now - last.t < 400;
+    last = { id, t: isDouble ? 0 : now };
+    return isDouble;
+  };
+}
+
+// The box around node positions, with room for the boxes and their labels
+function nodeBounds(pts, above = 1.5) {
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  return {
+    x0: Math.min(...xs) - NODE_W, x1: Math.max(...xs) + NODE_W,
+    y0: Math.min(...ys) - NODE_H * above, y1: Math.max(...ys) + NODE_H * 1.5,
+  };
+}
+
+// The view that centres a box of the drawing ({x0, y0, x1, y1}) in the
+// canvas, as large as fits (140% at most)
+function fitBounds(svg, box) {
+  const w = svg.clientWidth || 800, hgt = svg.clientHeight || 500;
+  const k = Math.min(1.4, Math.min(w / (box.x1 - box.x0), hgt / (box.y1 - box.y0)));
+  return { k, x: w / 2 - ((box.x0 + box.x1) / 2) * k, y: hgt / 2 - ((box.y0 + box.y1) / 2) * k };
+}
+
 // Keyboard navigation between nodes on a canvas (E1). Focus via the
 // keyboard lands on a node; arrows move to the nearest node that way,
 // connected ones first; Enter selects; Escape leaves the nodes, and arrows
@@ -1833,71 +1909,41 @@ function fitDiagram() {
   const pts = Object.values(S.positions);
   const racks = window.Racks?.active() ? window.Racks.bounds() : null;
   if (!pts.length && !racks) return;
-  const w = svg.clientWidth || 800, hgt = svg.clientHeight || 500;
-  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
-  const minX = racks ? racks.x0 : Math.min(...xs) - NODE_W, maxX = racks ? racks.x1 : Math.max(...xs) + NODE_W;
-  const minY = racks ? racks.y0 : Math.min(...ys) - NODE_H * 1.5, maxY = racks ? racks.y1 : Math.max(...ys) + NODE_H * 1.5;
-  const k = Math.min(1.4, Math.min(w / (maxX - minX), hgt / (maxY - minY)));
-  S.view = { k, x: w / 2 - ((minX + maxX) / 2) * k, y: hgt / 2 - ((minY + maxY) / 2) * k };
+  S.view = fitBounds(svg, racks || nodeBounds(pts));
   applyView(svg, "viewport", S.view);
 }
 
 function setupDiagramInteraction() {
   const svg = $("#diagram");
   refocusDiagram = setupFocus(svg, () => S.selectedNode);
-  let drag = null;
+  const apply = () => applyView(svg, "viewport", S.view);
 
-  svg.addEventListener("pointerdown", (ev) => {
-    const nodeEl = ev.target.closest(".node");
-    svg.setPointerCapture(ev.pointerId);
-    if (nodeEl && window.Racks?.active()) {
+  setupCanvasPointer(svg, {
+    view: () => S.view,
+    apply,
+    press: (ev) => {
+      const nodeEl = ev.target.closest(".node");
       // Rack slots are computed: a press on a device is a click, a drag pans
-      drag = { type: "pan", node: nodeEl.dataset.id, sx: ev.clientX, sy: ev.clientY, start: { ...S.view }, moved: false };
-      svg.classList.add("panning");
-    } else if (nodeEl) {
-      const id = nodeEl.dataset.id;
-      drag = { type: "node", id, sx: ev.clientX, sy: ev.clientY, start: [...S.positions[id]], moved: false };
-    } else {
+      if (nodeEl && window.Racks?.active()) return { type: "pan", node: nodeEl.dataset.id };
+      if (nodeEl) {
+        const id = nodeEl.dataset.id;
+        return { type: "node", id, start: [...S.positions[id]] };
+      }
       // A press on a link that does not move is a click on the link
-      const link = ev.target.closest(".link-hit")?.dataset.link || null;
-      drag = { type: "pan", link, sx: ev.clientX, sy: ev.clientY, start: { ...S.view }, moved: false };
-      svg.classList.add("panning");
-    }
-  });
-  svg.addEventListener("pointermove", (ev) => {
-    if (!drag) return;
-    const dx = ev.clientX - drag.sx, dy = ev.clientY - drag.sy;
-    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-    if (!drag.moved) return;
-    if (drag.type === "node") {
-      S.positions[drag.id] = [drag.start[0] + dx / S.view.k, drag.start[1] + dy / S.view.k];
+      return { type: "pan", link: ev.target.closest(".link-hit")?.dataset.link || null };
+    },
+    move: (drag, pos) => {
+      S.positions[drag.id] = pos;
       renderDiagram(false);
-    } else {
-      S.view.x = drag.start.x + dx;
-      S.view.y = drag.start.y + dy;
-      applyView(svg, "viewport", S.view);
-    }
-  });
-  svg.addEventListener("pointerup", () => {
-    svg.classList.remove("panning");
-    if (!drag) return;
-    if (drag.type === "node") {
-      if (drag.moved) savePositions();
-      else nodeClicked(drag.id);
-    } else if (!drag.moved) {
-      if (drag.node) nodeClicked(drag.node);
+    },
+    drop: () => savePositions(),
+    click: (drag) => {
+      if (drag.type === "node") nodeClicked(drag.id);
+      else if (drag.node) nodeClicked(drag.node);
       else if (drag.link) selectLink(drag.link);
       else selectNode(null);
-    }
-    drag = null;
+    },
   });
-  svg.addEventListener("wheel", (ev) => {
-    ev.preventDefault();
-    const rect = svg.getBoundingClientRect();
-    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-    zoomAt(svg, S.view, Math.exp(-ev.deltaY * 0.0015), mx, my);
-    applyView(svg, "viewport", S.view);
-  }, { passive: false });
 
   // Node keys first: they claim the arrows while on a node, zoom pans otherwise
   setupNodeKeys(svg, {
@@ -1906,16 +1952,11 @@ function setupDiagramInteraction() {
     label: nodeLabel,
     selected: () => S.selectedNode,
     select: (id) => selectNode(id),
-    open: (id) => {
-      const node = S.detail?.nodes?.find((n) => n.name === id);
-      const rt = node && nodeRuntime(S.detail.name, id);
-      if (rt?.state === "running" && node.modes.length && canOperate()) openTerminal(S.detail.name, id, node.modes[0]);
-      else announce(`${id} has no terminal to open`);
-    },
+    open: (id) => { if (!openDefaultTerminal(id)) announce(`${id} has no terminal to open`); },
     view: () => S.view,
-    apply: () => applyView(svg, "viewport", S.view),
+    apply,
   });
-  setupZoom(svg, () => S.view, fitDiagram, () => applyView(svg, "viewport", S.view));
+  setupZoom(svg, () => S.view, fitDiagram, apply);
   $("#relayout").addEventListener("click", () => {
     window.Lanes?.reset();
     S.positions = {};
@@ -1925,18 +1966,12 @@ function setupDiagramInteraction() {
   });
 }
 
-// Clicks re-render the diagram, so double clicks are detected here rather
-// than with the browser's dblclick event (its target may already be gone).
-let lastClick = { id: null, t: 0 };
+// Double click opens the node's CLI
+const nodeDoubleClick = doubleClicks();
 function nodeClicked(id) {
-  const now = Date.now();
-  const isDouble = lastClick.id === id && now - lastClick.t < 400;
-  lastClick = { id, t: isDouble ? 0 : now };
+  const isDouble = nodeDoubleClick(id);
   selectNode(id);
-  if (!isDouble || window.Builder?.editing) return;
-  const node = S.detail.nodes.find((n) => n.name === id);
-  const rt = nodeRuntime(S.detail.name, id);
-  if (rt?.state === "running" && node?.modes.length && canOperate()) openTerminal(S.detail.name, id, node.modes[0]);
+  if (isDouble && !window.Builder?.editing) openDefaultTerminal(id);
 }
 
 function selectNode(id) {
@@ -2532,6 +2567,16 @@ function openTerminal(lab, node, mode) {
   const logs = mode === "logs";
   openTermTab(`${node} · ${MODE_LABEL[mode]}`, "/ws/terminal", { lab, node, mode },
     { closeTitle: logs ? "Close log" : "Close terminal", blink: !logs, readOnly: logs });
+}
+
+// Open the first terminal a node offers, if it runs and the user may;
+// says whether it did
+function openDefaultTerminal(id) {
+  const node = S.detail?.nodes?.find((n) => n.name === id);
+  const rt = node && nodeRuntime(S.detail.name, id);
+  if (rt?.state !== "running" || !node.modes.length || !canOperate()) return false;
+  openTerminal(S.detail.name, id, node.modes[0]);
+  return true;
 }
 
 // A dock tab with an xterm attached to a session websocket (terminal,

@@ -8,10 +8,11 @@
 //
 // Uses app.js globals: S, $, h, s, api, toast, NODE_W, NODE_H, PSEUDO_W,
 // PSEUDO_H, graphModel, ensurePositions, savePositions, truncate, ifaceLabel,
-// nodeRuntime, nodeState, labStatus, canOperate, openTerminal, nodeFace,
-// TEXT_X, applyView, zoomAt, setupZoom, setupNodeKeys, setupFocus, markKb,
-// freshness, noteState, topoPath, showView, openHealth, driftActions,
-// renderLabHead, renderNodeCard, syncInspector.
+// nodeRuntime, nodeState, labStatus, openDefaultTerminal, nodeFace, TEXT_X,
+// applyView, fitBounds, nodeBounds, setupCanvasPointer, doubleClicks,
+// setupZoom, setupNodeKeys, setupFocus, markKb, freshness, noteState,
+// topoPath, showView, openHealth, driftActions, renderLabHead,
+// renderNodeCard, syncInspector.
 // ---------------------------------------------------------------------------
 
 (() => {  // own scope: only window.Routing is shared
@@ -1045,16 +1046,11 @@ function rtFit(P) {
   const svg = $("#routing");
   const pts = Object.values(P || S.positions);
   if (!pts.length) return;
-  const w = svg.clientWidth || 800, hgt = svg.clientHeight || 500;
-  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
-  const minX = Math.min(...xs) - NODE_W, maxX = Math.max(...xs) + NODE_W;
-  const minY = Math.min(...ys) - NODE_H * 2, maxY = Math.max(...ys) + NODE_H * 1.5;
-  const k = Math.min(1.4, Math.min(w / (maxX - minX), hgt / (maxY - minY)));
-  RT.view = { k, x: w / 2 - ((minX + maxX) / 2) * k, y: hgt / 2 - ((minY + maxY) / 2) * k };
+  RT.view = fitBounds(svg, nodeBounds(pts, 2));
   applyView(svg, "rt-viewport", RT.view);
 }
 
-let rtLastClick = { id: null, t: 0 };
+const rtIsDoubleClick = doubleClicks();
 
 let rtRefocus = () => {};
 
@@ -1062,58 +1058,33 @@ function rtSetup() {
   rtPrefsLoad();
   const svg = $("#routing");
   rtRefocus = setupFocus(svg, () => (RT.sel?.type === "node" ? RT.sel.id : null));
-  let drag = null;
   const apply = () => applyView(svg, "rt-viewport", RT.view);
 
-  svg.addEventListener("pointerdown", (ev) => {
-    svg.setPointerCapture(ev.pointerId);
-    const nodeEl = ev.target.closest(".node, .rt-ext");
-    if (nodeEl) {
-      const id = nodeEl.dataset.id;
-      const ext = id.startsWith("ext:");
-      const start = ext ? RT.extPos[id] : S.positions[id];
-      drag = { type: "node", id, ext, sx: ev.clientX, sy: ev.clientY, start: [...start], moved: false };
-    } else {
-      const edge = ev.target.closest(".link-hit")?.dataset.edge || null;
-      drag = { type: "pan", edge, sx: ev.clientX, sy: ev.clientY, start: { ...RT.view }, moved: false };
-      svg.classList.add("panning");
-    }
-  });
-  svg.addEventListener("pointermove", (ev) => {
-    if (!drag) return;
-    const dx = ev.clientX - drag.sx, dy = ev.clientY - drag.sy;
-    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-    if (!drag.moved) return;
-    if (drag.type === "node") {
-      const pos = [drag.start[0] + dx / RT.view.k, drag.start[1] + dy / RT.view.k];
+  setupCanvasPointer(svg, {
+    view: () => RT.view,
+    apply,
+    press: (ev) => {
+      const nodeEl = ev.target.closest(".node, .rt-ext");
+      if (nodeEl) {
+        const id = nodeEl.dataset.id;
+        const ext = id.startsWith("ext:");
+        const start = ext ? RT.extPos[id] : S.positions[id];
+        return { type: "node", id, ext, start: [...start] };
+      }
+      return { type: "pan", edge: ev.target.closest(".link-hit")?.dataset.edge || null };
+    },
+    move: (drag, pos) => {
       if (drag.ext) RT.extPos[drag.id] = pos;
       else S.positions[drag.id] = pos;
       rtRender();
-    } else {
-      RT.view.x = drag.start.x + dx;
-      RT.view.y = drag.start.y + dy;
-      apply();
-    }
-  });
-  svg.addEventListener("pointerup", () => {
-    svg.classList.remove("panning");
-    if (!drag) return;
-    if (drag.type === "node") {
-      if (drag.moved) { if (!drag.ext) savePositions(); }
-      else rtNodeClicked(drag.id);
-    } else if (!drag.moved) {
+    },
+    drop: (drag) => { if (!drag.ext) savePositions(); },
+    click: (drag) => {
+      if (drag.type === "node") { rtNodeClicked(drag.id); return; }
       RT.sel = drag.edge ? { type: "edge", id: drag.edge } : null;
       rtRender();
-    }
-    drag = null;
+    },
   });
-  svg.addEventListener("wheel", (ev) => {
-    ev.preventDefault();
-    const rect = svg.getBoundingClientRect();
-    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-    zoomAt(svg, RT.view, Math.exp(-ev.deltaY * 0.0015), mx, my);
-    apply();
-  }, { passive: false });
 
   setupNodeKeys(svg, {
     nodes: () => (S.detail?.nodes || []).filter((n) => S.positions[n.name]).map((n) => ({ id: n.name, pos: S.positions[n.name] })),
@@ -1131,15 +1102,10 @@ function rtSetup() {
 
 // Double click opens the node's CLI, as in the Diagram tab
 function rtNodeClicked(id) {
-  const now = Date.now();
-  const isDouble = rtLastClick.id === id && now - rtLastClick.t < 400;
-  rtLastClick = { id, t: isDouble ? 0 : now };
+  const isDouble = rtIsDoubleClick(id);
   RT.sel = { type: "node", id };
   rtRender();
-  if (!isDouble || id.startsWith("ext:")) return;
-  const node = S.detail.nodes.find((n) => n.name === id);
-  const rt = nodeRuntime(S.detail.name, id);
-  if (rt?.state === "running" && node?.modes.length && canOperate()) openTerminal(S.detail.name, id, node.modes[0]);
+  if (isDouble && !id.startsWith("ext:")) openDefaultTerminal(id);
 }
 
 // --- hooks called by app.js ---------------------------------------------------------

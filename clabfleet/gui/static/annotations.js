@@ -8,7 +8,7 @@
 // and Delete to remove the selected one.
 //
 // Uses app.js globals: S, $, h, s, api, toast, topoPath, canOperate,
-// renderDiagram, announce.
+// renderDiagram, announce, doubleClicks.
 // ---------------------------------------------------------------------------
 
 (() => {
@@ -18,7 +18,7 @@ const PALETTE = 8;
 let sel = null;          // id of the selected annotation
 let drag = null;
 let saveTimer = null;
-let lastClick = { id: null, t: 0 };
+const isDoubleClick = doubleClicks();
 
 function data() {
   if (!S.detail || S.detail.error) return null;
@@ -195,9 +195,7 @@ function setupPointer() {
     const { item, moved } = drag;
     drag = null;
     if (moved) { save(); return; }
-    const now = Date.now();
-    const double = lastClick.id === item.id && now - lastClick.t < 400;
-    lastClick = { id: item.id, t: double ? 0 : now };
+    const double = isDoubleClick(item.id);
     sel = item.id;
     renderDiagram(false);
     if (double && (await edit(item)) !== null) {
