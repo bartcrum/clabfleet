@@ -7,7 +7,7 @@
 // highlighted (every ECMP branch), VXLAN hops as arcs between the VTEPs.
 //
 // Uses app.js globals: S, $, h, s, api, toast, topoPath, announce,
-// activatePane, showView, renderDiagram, labStatus.
+// activatePane, renderDiagram.
 // ---------------------------------------------------------------------------
 
 (() => {

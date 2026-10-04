@@ -8,9 +8,13 @@
 //
 // Uses app.js globals: S, $, h, s, api, toast, NODE_W, NODE_H, PSEUDO_W,
 // PSEUDO_H, graphModel, ensurePositions, savePositions, truncate, ifaceLabel,
-// nodeRuntime, nodeState, canOperate, openTerminal, nodeFace, TEXT_X,
-// applyView, zoomAt, setupZoom, setupNodeKeys, markKb, announce, freshness, noteState.
+// nodeRuntime, nodeState, labStatus, canOperate, openTerminal, nodeFace,
+// TEXT_X, applyView, zoomAt, setupZoom, setupNodeKeys, setupFocus, markKb,
+// freshness, noteState, topoPath, showView, openHealth, driftActions,
+// renderLabHead, renderNodeCard, syncInspector.
 // ---------------------------------------------------------------------------
+
+(() => {  // own scope: only window.Routing is shared
 
 const RT = {
   topo: null,           // topology id the data belongs to
@@ -1190,3 +1194,5 @@ window.Routing = {
 };
 
 rtSetup();
+
+})();

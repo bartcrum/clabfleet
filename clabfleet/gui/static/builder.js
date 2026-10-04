@@ -7,9 +7,9 @@
 // what differs in the file (/api/graph/<id>), keeping comments and configs.
 //
 // Uses app.js globals: S, $, h, s, api, toast, confirmDialog, NODE_W, NODE_H,
-// renderDiagram, renderNodeCard, renderLabHead, syncInspector, selectNode,
-// selectLink, selectTopology, savePositions, loadEditor, topoPath, canOperate,
-// runningJob, yamlDirty, showView, naturalCmp.
+// renderDiagram, renderNodeCard, renderLabHead, selectNode, selectLink,
+// selectTopology, savePositions, loadEditor, topoPath, runningJob, yamlDirty,
+// showView, refreshState, naturalCmp.
 // ---------------------------------------------------------------------------
 
 (() => {  // own scope: only window.Builder is shared

@@ -5,7 +5,7 @@
 // (feature 11). The file stands alone: the drawing's CSS rules with the
 // theme's colours resolved, the device glyphs it uses, a background.
 //
-// Uses app.js globals: S, $, h, s, currentLabName.
+// Uses app.js globals: $, h, s, toast, currentLabName.
 // ---------------------------------------------------------------------------
 
 (() => {
