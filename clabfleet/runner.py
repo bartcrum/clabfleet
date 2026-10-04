@@ -34,6 +34,14 @@ class CommandError(Exception):
         self.stderr = stderr
 
 
+class PrivilegeError(Exception):
+    """containerlab needs root on a host and was not told to use sudo."""
+
+
+# How containerlab refuses a command that needs root
+NEEDS_ROOT = "requires root privileges"
+
+
 @dataclass
 class CommandResult:
     exit_code: int
@@ -82,9 +90,21 @@ class Runner:
         check: bool = True,
         on_output: Optional[OutputCallback] = None,
     ) -> CommandResult:
-        """Run a containerlab subcommand (with sudo if the host needs it)."""
-        return self.run(["containerlab", *args], cwd=cwd, check=check,
-                        sudo=self.sudo, on_output=on_output)
+        """Run a containerlab subcommand (with sudo if the host needs it).
+
+        Without sudo set, a command containerlab refuses for lack of root
+        raises ``PrivilegeError``, which says what to do, in place of
+        containerlab's own error. sudo is never used unless asked for."""
+        cmd = ["containerlab", *args]
+        result = self.run(cmd, cwd=cwd, check=False, sudo=self.sudo, on_output=on_output)
+        if not self.sudo and result.exit_code != 0 and NEEDS_ROOT in result.stdout + result.stderr:
+            raise PrivilegeError(
+                f"containerlab needs root on {self.name or 'this host'}. Run clabfleet with --sudo "
+                "(or CLAB_SUDO=1; in a cluster file: sudo: true for the host), "
+                "or as a user containerlab accepts")
+        if check and result.exit_code != 0:
+            raise CommandError(shlex.join(cmd), result.exit_code, result.stderr)
+        return result
 
     def makedirs(self, path: str) -> None:
         raise NotImplementedError
