@@ -78,6 +78,12 @@ clabfleet --sudo save topologies/three_router_triangle.clab.yml
 clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 ```
 
+These print a short summary; add `--json` for the full result, for scripts.
+
+containerlab needs root. `--sudo` (or `CLAB_SUDO=1`) runs it through `sudo`;
+clabfleet never uses sudo unless asked. Without it, a command containerlab
+refuses for lack of root ends with a line saying so.
+
 ## Documentation
 
 | Guide | What it covers |

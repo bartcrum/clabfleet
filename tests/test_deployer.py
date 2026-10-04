@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -110,7 +111,10 @@ def test_cli_cluster_dry_run_writes_host_files(tmp_path, monkeypatch, capsys):
     ])
     assert rc == 0
     out = capsys.readouterr().out
-    assert '"dry_run": true' in out
+    assert out.startswith("campus-network: dry run, nothing deployed\n")
+    assert "  clab-1 (2 nodes): Core-1, Core-2\n" in out
+    assert "8 links between hosts, VNI 1001-1008:" in out  # 1000 is taken by the other lab
+    assert "Core-1:Ethernet0/2 - Dist-1:Ethernet0/1" in out and "clab-1 - clab-2  VNI 1001" in out
 
     files = sorted(p.name for p in tmp_path.iterdir())
     assert files == [
@@ -136,7 +140,37 @@ def test_cli_cluster_dry_run_writes_host_files(tmp_path, monkeypatch, capsys):
 def test_cli_single_host_dry_run(capsys):
     rc = cli.main(["deploy", str(TOPOLOGIES / "three_router_triangle.clab.yml"), "--dry-run"])
     assert rc == 0
-    assert '"localhost": [' in capsys.readouterr().out
+    assert capsys.readouterr().out == ("three-router-triangle: dry run, nothing deployed\n"
+                                       "  localhost (3 nodes): R1, R2, R3\n")
+    # --json: the full result, for scripts
+    assert cli.main(["deploy", str(TOPOLOGIES / "three_router_triangle.clab.yml"), "--dry-run", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "lab": "three-router-triangle", "hosts": {}, "placement": {"localhost": ["R1", "R2", "R3"]},
+        "cross_host_links": [], "dry_run": True}
+
+
+def test_cli_summaries_for_people():
+    text = cli._summary_text
+    assert text("deploy", {
+        "lab": "lab", "status": "partial", "placement": {"a": ["r1", "r2"], "b": ["r3"]},
+        "hosts": {"a": {"status": "deployed", "nodes": ["r1", "r2"], "seconds": 12.5},
+                  "b": {"error": "12:00:01 INFO Parsing\n   ERROR  \n  image x:1 not found", "seconds": 0.4}},
+        "readiness": {"ready": False, "seconds": 900, "pending": {"r1": "CLI not answering"}},
+    }) == ("lab: PARTLY deployed\n"
+           "  a  2 nodes  deployed                     12.5s\n"
+           "  b  1 node   FAILED: image x:1 not found  0.4s\n"
+           "  NOT ready after 900s: r1 (CLI not answering)")
+    assert text("destroy", {"lab": "lab", "hosts": {"a": {"status": "ok", "seconds": 1.3},
+                                                    "b": {"status": "not-deployed", "seconds": 0.1}}}) == (
+        "lab: destroyed\n  a  ok            1.3s\n  b  not deployed  0.1s")
+    assert text("save", {"lab": "lab", "hosts": {"a": {"error": "no route to host"}}}) == (
+        "lab: save FAILED\n  a  FAILED: no route to host")
+    assert text("inspect", {"hosts": {
+        "a": {"status": "ok", "data": {"lab": [{"name": "clab-lab-r1", "kind": "linux", "state": "running",
+                                                "ipv4_address": "172.20.20.2/24"}]}},
+        "b": {"status": "error", "error": "ERROR\n could not get container: containers not found."},
+        "c": {"status": "ok", "data": {}},
+    }}) == "lab on a: 1 node\n  r1  linux  running  172.20.20.2\nb: not deployed\nc: no labs running"
 
 
 def test_split_uses_given_vni_base():
