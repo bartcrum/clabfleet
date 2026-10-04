@@ -165,6 +165,56 @@ def test_parse_eos_evpn_routes():
     assert parse_eos_evpn_routes("", "  ", {}) == []
 
 
+def test_an_address_is_traced_to_the_host_that_has_it(tmp_path, monkeypatch):
+    """With the owner known, the trace can go on past a switch that has no
+    MAC entry for the host, as it does for a destination given by name."""
+    from clabfleet.cluster import ClusterConfig, HostInfo
+    from clabfleet.gui.state import Workspace
+    from clabfleet.routing import trace as trace_mod
+
+    (tmp_path / "t.clab.yml").write_text(
+        "name: t\ntopology:\n  nodes:\n"
+        "    L1: {kind: arista_ceos, image: a}\n"
+        "    H1: {kind: linux, image: a}\n"
+        "    H2: {kind: linux, image: a}\n"
+        "    H3: {kind: linux, image: a}\n"
+        "  links:\n    - endpoints: ['H1:eth1', 'L1:eth1']\n")
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    asked = []
+
+    def node_command(self, lab, node, command, shell=True):
+        asked.append(node)
+        if node == "H3":
+            raise ValueError("H3 is not running")
+        address = {"H1": "10.10.10.11", "H2": "10.10.10.12"}[node]
+        return ("1: lo    inet 127.0.0.1/8 scope host lo\n"
+                "2: eth0    inet 172.20.20.5/24 brd 172.20.20.255 scope global eth0\n"
+                f"3: eth1    inet {address}/24 scope global eth1\n")
+
+    seen = {}
+
+    def fake_trace(lab, ask, src, dst, dst_node=None):
+        seen.update(dst=dst, dst_node=dst_node)
+        return {"reached": True, "hops": [], "edges": [], "truncated": False}
+
+    monkeypatch.setattr(Workspace, "node_command", node_command)
+    monkeypatch.setattr(trace_mod, "trace", fake_trace)
+
+    assert ws.trace("t.clab.yml", "H1", "10.10.10.12")["dst_node"] == "H2"
+    assert seen == {"dst": "10.10.10.12", "dst_node": "H2"} and "L1" not in asked  # hosts only
+
+    # Nobody's address (a host that is not running is skipped), a management
+    # address, and something that is no address: traced as given
+    for dst in ("10.10.10.99", "172.20.20.5", "nonsense"):
+        assert ws.trace("t.clab.yml", "H1", dst)["dst_node"] is None
+        assert seen == {"dst": dst, "dst_node": None}
+
+    # By name, as before: the host's own address, and nobody else is asked
+    asked.clear()
+    assert ws.trace("t.clab.yml", "H1", "H2")["dst"] == "10.10.10.12"
+    assert seen == {"dst": "10.10.10.12", "dst_node": "H2"} and asked == ["H2"]
+
+
 def test_trace_and_evpn_endpoints(tmp_path, monkeypatch):
     import asyncio
 

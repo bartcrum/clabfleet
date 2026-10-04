@@ -4,6 +4,7 @@ Everything here is synchronous; the web server calls it from worker threads.
 """
 
 import copy
+import ipaddress
 import json
 import logging
 import math
@@ -378,7 +379,8 @@ class Workspace:
     def trace(self, topo_id: str, src: str, dst: str) -> dict:
         """Path trace from node ``src`` to a node or an address
         (``routing.trace``). A node destination is its router-id, or for a
-        host its first address outside the management network."""
+        host its first address outside the management network; an address
+        that is a host's is traced to that host."""
         from ..routing.trace import Lab, TraceError, trace
 
         topo = load_topology(self.topology_path(topo_id))
@@ -388,6 +390,8 @@ class Workspace:
         if dst_node:
             dst = self._node_address(topo, dst_node)
         kinds = {n: topo.effective_node(n)["kind"] or "" for n in topo.nodes}
+        if not dst_node:
+            dst_node = self._address_owner(topo, kinds, dst)
         view = routing_view(topo)
         lab = Lab(topology_view(topo), kinds, self._vteps(topo), view.get("port_channels"))
         try:
@@ -402,12 +406,34 @@ class Workspace:
             rid = ((view.get(proto) or {}).get("nodes") or {}).get(node, {}).get("router_id")
             if rid:
                 return rid
-        text = self.node_command(topo.name, node, "ip -o -4 addr show")
-        for line in text.splitlines():
-            parts = line.split()
-            if len(parts) > 3 and parts[1] not in ("lo", "eth0") and parts[2] == "inet":
-                return parts[3].split("/")[0]
+        addresses = self._host_addresses(topo, node)
+        if addresses:
+            return addresses[0]
         raise ValueError(f"{node} has no address to trace to; give an IP address")
+
+    def _host_addresses(self, topo, node: str) -> list[str]:
+        """A running host's IPv4 addresses outside loopback and management."""
+        text = self.node_command(topo.name, node, "ip -o -4 addr show")
+        return [parts[3].split("/")[0] for parts in map(str.split, text.splitlines())
+                if len(parts) > 3 and parts[1] not in ("lo", "eth0") and parts[2] == "inet"]
+
+    def _address_owner(self, topo, kinds: dict, address: str) -> Optional[str]:
+        """The Linux host that has ``address``, if one does. Knowing it, a
+        trace can go on to the host from a switch that has no MAC entry for
+        it (aged out), as it does for a destination given by name."""
+        try:
+            address = str(ipaddress.ip_address(address))
+        except ValueError:
+            return None  # trace() says what is wrong with it
+        for node, kind in kinds.items():
+            if kind != "linux":
+                continue
+            try:
+                if address in self._host_addresses(topo, node):
+                    return node
+            except Exception:  # noqa: BLE001 - not running, or it did not answer
+                continue
+        return None
 
     WHATIF = {"link-down", "link-up", "freeze", "resume"}
 
