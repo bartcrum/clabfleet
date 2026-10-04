@@ -33,7 +33,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator, Optional
 
-from .topology import KIND_ALIASES
+from .topology import canonical_kind
 
 # Abbreviations IOS / IOS-XE / NX-OS / EOS print or accept → canonical prefix
 ABBREVIATIONS = {
@@ -355,7 +355,7 @@ _DEFAULT_NAMING = _EthNaming()
 
 
 def naming_for(kind: str) -> _EthNaming:
-    return KIND_NAMING.get(KIND_ALIASES.get(kind, kind), _DEFAULT_NAMING)
+    return KIND_NAMING.get(canonical_kind(kind), _DEFAULT_NAMING)
 
 
 # --- Mapping ------------------------------------------------------------------

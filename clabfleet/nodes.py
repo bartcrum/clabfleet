@@ -12,6 +12,7 @@ from .topology import (
     LABEL_CPU,
     LABEL_RAM,
     kind_estimate,
+    with_aliases,
 )
 
 INSPECT_ARGS = ["inspect", "--all", "--details", "--format", "json"]
@@ -33,23 +34,17 @@ def run_docker(runner, argv: list[str], host_sudo: bool):
     return res
 
 # Command that gives a node's native CLI via `docker exec` (interactive)
-KIND_CLI = {
+KIND_CLI = with_aliases({
     "arista_ceos": ["Cli"],
-    "ceos": ["Cli"],
     "nokia_srlinux": ["sr_cli"],
-    "srl": ["sr_cli"],
     "juniper_crpd": ["cli"],
-    "crpd": ["cli"],
-}
+})
 # Same CLIs run non-interactively: the command string is appended as one argument
-KIND_CLI_EXEC = {
+KIND_CLI_EXEC = with_aliases({
     "arista_ceos": ["Cli", "-p", "15", "-c"],
-    "ceos": ["Cli", "-p", "15", "-c"],
     "nokia_srlinux": ["sr_cli"],
-    "srl": ["sr_cli"],
     "juniper_crpd": ["cli", "-c"],
-    "crpd": ["cli", "-c"],
-}
+})
 # Kinds whose CLI is only reachable over SSH (VM-based / vrnetlab images)
 SSH_CLI_KINDS = {
     "cisco_iol", "cisco_xrv9k", "cisco_csr1000v", "cisco_c8000v", "cisco_n9kv",
@@ -60,7 +55,7 @@ SSH_CLI_KINDS = {
 # Kinds with no shell worth opening
 NO_SHELL_KINDS = {"bridge", "ovs-bridge", "host", "ext-container"}
 # Default SSH usernames containerlab sets up per kind
-KIND_SSH_USER = {"juniper_crpd": "root", "crpd": "root", "linux": "root"}
+KIND_SSH_USER = with_aliases({"juniper_crpd": "root", "linux": "root"})
 # containerlab's default login on most network kinds
 DEFAULT_SSH_PASSWORD = "admin"
 

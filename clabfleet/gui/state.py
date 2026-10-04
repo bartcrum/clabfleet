@@ -9,7 +9,6 @@ import logging
 import math
 import os
 import re
-import tempfile
 import threading
 import time
 import uuid
@@ -30,7 +29,7 @@ from ..routing.live import collect as collect_protocols, family as cli_family, o
 from ..snapshots import Snapshotter, diff_lab, startup_config, unified_diff
 from ..validate import validate_text
 from . import annotations
-from .editing import EditConflict, apply_graph, set_positions, text_hash, write_if_unchanged
+from .editing import EditConflict, apply_graph, replace_file, set_positions, text_hash, write_if_unchanged
 from .events import EventLog, link_items, protocol_items
 from ..runner import Runner
 from ..topology import (
@@ -968,15 +967,7 @@ class JobHistory:
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             if self.directory.stat().st_mode & 0o077:
                 self.directory.chmod(0o700)
-            # A fresh name each time, so nothing in the directory can redirect the write
-            fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=f".{job.id}.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w") as fh:
-                    fh.write(json.dumps(job.to_dict()))
-                os.replace(tmp, self.directory / f"{job.id}.json")
-            except BaseException:
-                Path(tmp).unlink(missing_ok=True)
-                raise
+            replace_file(self.directory / f"{job.id}.json", json.dumps(job.to_dict()))
             self._prune()
         except OSError as exc:
             logger.warning("Could not save job history in %s: %s", self.directory, exc)

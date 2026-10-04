@@ -83,6 +83,16 @@ KIND_ALIASES = {
 }
 DEFAULT_RESOURCES = (1.0, 512)
 
+
+def canonical_kind(kind: str) -> str:
+    """A kind's full name: ``ceos`` -> ``arista_ceos``."""
+    return KIND_ALIASES.get(kind, kind)
+
+
+def with_aliases(table: dict) -> dict:
+    """A per-kind table that also answers for each kind's short alias."""
+    return {**table, **{alias: table[kind] for alias, kind in KIND_ALIASES.items() if kind in table}}
+
 # Node properties that may reference files relative to the topology file
 FILE_PROPERTIES = ("startup-config", "license")
 LIST_FILE_PROPERTIES = ("env-files",)
@@ -267,13 +277,10 @@ class Topology:
         base = self.base_dir.resolve()
         return not (base / rel).resolve().is_relative_to(base)
 
-    def to_yaml(self) -> str:
-        return dump_yaml(self.data)
-
 
 def kind_estimate(kind: str) -> tuple[float, int]:
     """Rough (vCPU, RAM MB) a node of this kind needs."""
-    return KIND_RESOURCE_ESTIMATES.get(KIND_ALIASES.get(kind, kind), DEFAULT_RESOURCES)
+    return KIND_RESOURCE_ESTIMATES.get(canonical_kind(kind), DEFAULT_RESOURCES)
 
 
 def _relative_file(value, node_name: str) -> Optional[PurePosixPath]:

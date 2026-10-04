@@ -30,14 +30,13 @@ from typing import Callable, Optional
 
 from ..ifmap import canonical
 from ..nodes import run_docker
-from ..topology import KIND_ALIASES
+from ..topology import canonical_kind
 
 logger = logging.getLogger(__name__)
 
-TOPICS = ("ospf", "bgp", "evpn", "vxlan", "vrf_vteps", "mlag")
 COLLECT_TIMEOUT = 20  # seconds per node
 
-EOS_KINDS = {"arista_ceos", "ceos"}
+EOS_KINDS = {"arista_ceos"}
 IOS_KINDS = {"cisco_iol", "cisco_csr1000v", "cisco_c8000v"}
 
 EOS_COMMANDS = {
@@ -63,7 +62,7 @@ UP_OSPF = {"full", "2way", "2-way"}
 
 def family(kind: str) -> Optional[str]:
     """``eos`` / ``ios`` for kinds whose protocol state can be read, else None."""
-    kind = KIND_ALIASES.get(kind, kind)
+    kind = canonical_kind(kind)
     if kind in EOS_KINDS:
         return "eos"
     if kind in IOS_KINDS:

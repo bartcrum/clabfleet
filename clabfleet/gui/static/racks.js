@@ -15,7 +15,7 @@
 //
 // Uses app.js globals: S, $, s, announce, renderDiagram, nodeRuntime,
 // nodeState, nodeHost, statusGlyph, kindName, nodeRole, tierOf, naturalCmp,
-// crossLinkVnis, liveData, selectedLink, downEnds, fmtRate, fmtCpu,
+// crossLinkVnis, liveData, selectedLink, linkLive, BUSY_BPS, fmtCpu,
 // fmtBytes, fmtMem, nodeLabel, truncate.
 // ---------------------------------------------------------------------------
 
@@ -216,10 +216,9 @@ function draw(g, model) {
   for (const l of model.links) {
     const A = port[`${l.a.id}:${l.a.iface}`], B = port[`${l.b.id}:${l.b.iface}`];
     if (!A || !B) continue;
-    const ls = live?.links?.[l.id];
-    const down = ls?.state === "down";
+    const { ls, down, vni, title, bps } = linkLive(l, live, vnis, (v) =>
+      (A.rack !== B.rack ? `\nbetween hosts${v !== undefined ? `, VNI ${v}` : ""}` : ""));
     const kind = cableKind(l, model, pairs);
-    const vni = vnis[`${l.a.id}:${l.a.iface}|${l.b.id}:${l.b.iface}`];
     let d, label = null;
     if (A.rack !== B.rack) {
       // Up the manager beside one rack, along the tray, down beside the other
@@ -240,18 +239,12 @@ function draw(g, model) {
       d = `M${A.x},${A.y} C${A.x + 5},${A.y + sag} ${ex - 10},${A.y + 2} ${ex},${A.y + 2} Q${mx},${A.y + 2} ${mx},${(A.y + B.y) / 2} ` +
           `Q${mx},${B.y + 2} ${ex},${B.y + 2} C${ex - 10},${B.y + 2} ${B.x + 5},${B.y + sag} ${B.x},${B.y}`;
     }
-    const where = A.rack !== B.rack ? `\nbetween hosts${vni !== undefined ? `, VNI ${vni}` : ""}` : "";
-    const rate = ls?.rate;
-    const title = `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${where}` +
-      (down ? `\nDOWN: ${downEnds(ls).join(", ")}` : ls?.state === "up" ? "\nup" : "") +
-      (rate ? `\n${l.a.id} → ${l.b.id} ${fmtRate(rate.ab)}, ${l.b.id} → ${l.a.id} ${fmtRate(rate.ba)}` : "");
     const ends = `${l.a.id}|${l.b.id}`;
     cables.append(s("path", {
       class: `link cable ${kind}${down ? " down" : ""}${selectedLink()?.id === l.id ? " selected" : ""}`, d, "data-ends": ends,
     }, s("title", {}, title)));
-    const bps = rate && !down ? Math.max(rate.ab || 0, rate.ba || 0) : 0;
-    if (bps >= 10e3) {
-      const dur = Math.max(0.6, 3 - 0.5 * Math.log10(bps / 10e3)).toFixed(2);
+    if (bps >= BUSY_BPS) {
+      const dur = Math.max(0.6, 3 - 0.5 * Math.log10(bps / BUSY_BPS)).toFixed(2);
       cables.append(s("path", { class: "flow", d, "data-ends": ends, style: `--flow-dur: ${dur}s` }));
     }
     if (label) cables.append(label);

@@ -87,6 +87,7 @@ function confirmDialog({ title, body, ok = "OK", danger = false, typeToConfirm =
   okBtn.className = `btn ${danger ? "danger-solid" : "primary"}`;
   const typeRow = $("#confirm-type"), input = $("#confirm-input");
   typeRow.hidden = !typeToConfirm;
+  $("#confirm-name").textContent = typeToConfirm || "";
   input.value = "";
   okBtn.disabled = !!typeToConfirm;
   input.oninput = () => { okBtn.disabled = input.value !== typeToConfirm; };
@@ -473,9 +474,24 @@ function fmtRate(bps) {
 }
 
 // Thicker by orders of magnitude from 10 kb/s (1.6 px idle, up to 7 px)
+const BUSY_BPS = 10e3;  // a link carrying less is drawn as idle
+
 function linkWidth(bps) {
-  if (!bps || bps < 10e3) return null;
-  return Math.min(7, 1.6 + 1.1 * Math.log10(bps / 10e3) + 0.6).toFixed(1);
+  if (!bps || bps < BUSY_BPS) return null;
+  return Math.min(7, 1.6 + 1.1 * Math.log10(bps / BUSY_BPS) + 0.6).toFixed(1);
+}
+
+// A diagram link's live state and tooltip, the same for the logical and the
+// rack drawing; ``where(vni)`` is how the drawing words a link between hosts
+function linkLive(l, live, vnis, where) {
+  const ls = live?.links?.[l.id];
+  const down = ls?.state === "down";
+  const rate = ls?.rate;
+  const vni = vnis[`${l.a.id}:${l.a.iface}|${l.b.id}:${l.b.iface}`];
+  const title = `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${where(vni)}` +
+    (down ? `\nDOWN: ${downEnds(ls).join(", ")}` : ls?.state === "up" ? "\nup" : "") +
+    (rate ? `\n${l.a.id} → ${l.b.id} ${fmtRate(rate.ab)}, ${l.b.id} → ${l.a.id} ${fmtRate(rate.ba)}` : "");
+  return { ls, down, vni, title, bps: rate && !down ? Math.max(rate.ab || 0, rate.ba || 0) : 0 };
 }
 
 function fmtCpu(pct) {
@@ -585,10 +601,6 @@ async function renderWelcome() {
         h("span", { class: "card-head" }, h("b", {}, name)),
         h("span", { class: "muted small" }, t.description))));
 }
-
-// ---------------------------------------------------------------------------
-// Lab selection & header
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // YAML editor
@@ -1581,23 +1593,18 @@ function renderDiagram(fit) {
     const c = [(p0[0] + p1[0]) / 2 - (dy / len) * off, (p0[1] + p1[1]) / 2 + (dx / len) * off];
     const ha = nodeHost(lab, l.a.id), hb = nodeHost(lab, l.b.id);
     const cross = multi && ha && hb && ha !== hb;
-    const vni = vnis[`${l.a.id}:${l.a.iface}|${l.b.id}:${l.b.iface}`];
-    const vxlan = cross ? `  (VXLAN ${ha} ↔ ${hb}${vni !== undefined ? `, VNI ${vni}` : ""})` : "";
-    const ls = live?.links?.[l.id];
-    const down = ls?.state === "down";
-    const rate = ls?.rate;
-    const stateText = (down ? `\nDOWN: ${downEnds(ls).join(", ")}` : ls?.state === "up" ? "\nup" : "") +
-      (rate ? `\n${l.a.id} → ${l.b.id} ${fmtRate(rate.ab)}, ${l.b.id} → ${l.a.id} ${fmtRate(rate.ba)}` : "");
+    const { ls, down, title, bps } = linkLive(l, live, vnis, (vni) =>
+      (cross ? `  (VXLAN ${ha} ↔ ${hb}${vni !== undefined ? `, VNI ${vni}` : ""})` : ""));
     const d = `M${p0[0]},${p0[1]} Q${c[0]},${c[1]} ${p1[0]},${p1[1]}`;
     const ends = `${l.a.id}|${l.b.id}`;
-    const width = rate && !down ? linkWidth(Math.max(rate.ab, rate.ba)) : null;
+    const width = linkWidth(bps);
     g.append(s("path", {
       class: `link${l.special ? " special" : ""}${cross ? " cross" : ""}${down ? " down" : ""}${selectedLink()?.id === l.id ? " selected" : ""}${width ? " busy" : ""}`,
       d, "data-ends": ends, style: width ? `stroke-width: ${width}` : null,
-    }, s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}${stateText}`)));
+    }, s("title", {}, title)));
     // Wide invisible stroke so links are easy to click (packet capture)
     g.append(s("path", { class: "link-hit", d, "data-link": l.id },
-      s("title", {}, `${l.a.id}:${l.a.iface} ↔ ${l.b.id}:${l.b.iface}${vxlan}${stateText}\nClick to capture packets`)));
+      s("title", {}, `${title}\nClick to capture packets`)));
     for (const [end, from, alt, side] of [[l.a, p0, false, "a"], [l.b, p1, true, "b"]]) {
       if (!end.iface) continue;
       const pseudo = end.id.startsWith("~");

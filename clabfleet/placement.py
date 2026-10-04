@@ -48,9 +48,6 @@ class PlacementPlan:
                 return p.host_name
         return None
 
-    def nodes_on_host(self, host_name: str) -> list[str]:
-        return [p.node_name for p in self.placements if p.host_name == host_name]
-
     def summary(self) -> dict:
         by_host: dict[str, list[str]] = defaultdict(list)
         for p in self.placements:
