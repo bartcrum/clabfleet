@@ -18,8 +18,9 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request  # no
 
 from clabfleet import cli  # noqa: E402
 from clabfleet.cluster import ClusterConfig, HostInfo  # noqa: E402
-from clabfleet.gui import auth, server, state  # noqa: E402
+from clabfleet.gui import auth, server  # noqa: E402
 from clabfleet.gui.auth import AuditLog, UserStore, allow_viewer, operator_only  # noqa: E402
+from clabfleet.gui.jobs import JobManager  # noqa: E402
 from clabfleet.gui.state import Workspace  # noqa: E402
 
 TOPO = """\
@@ -219,7 +220,7 @@ def _events(path):
 def test_roles_sessions_and_audit(tmp_path, monkeypatch):
     ws = _workspace(tmp_path)
     monkeypatch.setattr(Workspace, "runtime", lambda self: [])
-    monkeypatch.setattr(state, "LabDeployer", FakeDeployer)
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", FakeDeployer)
     _fake_docker(tmp_path, monkeypatch)
     users = UserStore(tmp_path / "users.yaml")
     op_token = users.add("alice", "operator")
@@ -350,7 +351,7 @@ def test_roles_sessions_and_audit(tmp_path, monkeypatch):
     assert all(e["details"]["exit_code"] == 0 and e["details"]["seconds"] >= 0 for e in closed)
 
     # The job history remembers who ran the job
-    history = state.JobManager(ws).jobs
+    history = JobManager(ws).jobs
     assert history[started["details"]["job"]].user == "alice"
 
 

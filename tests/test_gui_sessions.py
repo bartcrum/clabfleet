@@ -18,8 +18,9 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 from clabfleet import cli  # noqa: E402
 from clabfleet.cluster import ClusterConfig, HostInfo  # noqa: E402
-from clabfleet.gui import server, state, terminals  # noqa: E402
+from clabfleet.gui import server, terminals  # noqa: E402
 from clabfleet.gui.auth import User, UserStore  # noqa: E402
+from clabfleet.gui.jobs import Job, JobHistory, JobManager  # noqa: E402
 from clabfleet.gui.sessions import (  # noqa: E402
     CAPTURE, TERMINAL, SessionLimitError, SessionRegistry,
 )
@@ -526,7 +527,7 @@ def test_job_offset_is_validated(tmp_path, monkeypatch):
 
     async def scenario():
         app = server.create_app(ws, "tok")
-        app[server.JOBS].jobs["j1"] = state.Job("j1", "save", "t.clab.yml", lines=["a", "b"])
+        app[server.JOBS].jobs["j1"] = Job("j1", "save", "t.clab.yml", lines=["a", "b"])
         async with TestClient(TestServer(app)) as client:
             await _login(client, "tok")
             assert (await client.get("/api/jobs/j1?offset=abc")).status == 400
@@ -627,8 +628,8 @@ def test_finished_jobs_invalidate_the_runtime_cache(tmp_path, monkeypatch):
         def save(self, path):
             return {"hosts": {}}
 
-    monkeypatch.setattr(state, "LabDeployer", Deployer)
-    jobs = state.JobManager(ws, state.JobHistory(None))
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", Deployer)
+    jobs = JobManager(ws, JobHistory(None))
     jobs.start("save", "t.clab.yml")
     assert invalidated.wait(5)
 

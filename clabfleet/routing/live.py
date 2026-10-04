@@ -621,39 +621,22 @@ def _same_iface(a: str, b: str) -> bool:
 
 def collect_lab(cluster, topo, view: dict, timeout: float = 15) -> dict:
     """Live overlay for the CLI: inspect the lab's hosts, then ask its nodes."""
-    from ..cluster import create_runner
+    from ..cluster import RunnerPool, create_runner
     from ..deployer import hosts_for_lab
     from ..execute import ssh_exec
-    from ..nodes import InspectError, inspect_all, parse_inspect
+    from ..nodes import lab_containers
 
-    runners = {}
-    containers: dict[str, dict] = {}
-    errors: dict[str, str] = {}
-    try:
-        for host in hosts_for_lab(cluster, topo):
-            try:
-                runners[host.name] = create_runner(host)
-                data = inspect_all(runners[host.name])
-            except InspectError as exc:
-                errors[host.name] = str(exc)
-                continue
-            except Exception as exc:  # noqa: BLE001
-                errors[host.name] = f"unreachable: {exc}"
-                continue
-            for c in parse_inspect(data, host.name):
-                if c["lab"] == topo.name:
-                    containers[c["node"]] = c
+    hosts = {h.name: h for h in hosts_for_lab(cluster, topo)}
+    with RunnerPool(create_runner) as runners:
+        containers, errors = lab_containers(hosts.values(), topo.name, runners.get)
         sudo = {h.name: h.sudo for h in cluster.hosts}
 
         def node_io(c):
-            runner = runners[c["host"]]
+            runner = runners.get(hosts[c["host"]])
             return runner, sudo.get(c["host"], False), lambda cmd: ssh_exec(
                 runner, c["kind"], c["ipv4"], cmd, timeout=timeout)
 
         states = collect(view, containers, node_io)
-    finally:
-        for runner in runners.values():
-            runner.close()
     result = overlay(view, states, {n: c["state"] == "running" for n, c in containers.items()})
     result["errors"] = errors
     return result

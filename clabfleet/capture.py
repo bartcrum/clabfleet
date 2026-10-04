@@ -38,10 +38,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .cluster import ClusterConfig, HostInfo, create_runner
+from .cluster import ClusterConfig, HostInfo, RunnerPool, create_runner
 from .deployer import hosts_for_lab
 from .livestate import linux_iface_names
-from .nodes import DOCKER_DENIED, InspectError, inspect_all, parse_inspect, run_docker
+from .nodes import DOCKER_DENIED, lab_containers, run_docker
 from .runner import Runner, SSHRunner
 from .topology import Topology
 
@@ -258,21 +258,16 @@ def sudo_prefix(runner: Runner) -> list[str]:
 def find_container(cluster: ClusterConfig, topo: Topology, node: str) -> tuple[HostInfo, dict]:
     """The host and running container of a lab node."""
     errors = []
+    # One host at a time: stop at the first host that has the node
     for host in hosts_for_lab(cluster, topo):
-        try:
-            with create_runner(host) as runner:
-                data = inspect_all(runner)
-        except InspectError as exc:
-            errors.append(f"{host.name}: {exc}")
-            continue
-        except Exception as exc:
-            errors.append(f"{host.name}: unreachable: {exc}")
-            continue
-        for c in parse_inspect(data, host.name):
-            if c["lab"] == topo.name and c["node"] == node:
-                if c["state"] != "running":
-                    raise CaptureError(f"Node '{node}' is not running ({c['state']})")
-                return host, c
+        with RunnerPool(create_runner) as runners:
+            found, failed = lab_containers([host], topo.name, runners.get)
+        errors += [f"{name}: {err}" for name, err in failed.items()]
+        c = found.get(node)
+        if c:
+            if c["state"] != "running":
+                raise CaptureError(f"Node '{node}' is not running ({c['state']})")
+            return host, c
     detail = f" ({'; '.join(errors)})" if errors else ""
     raise CaptureError(f"Node '{node}' of lab '{topo.name}' is not running{detail}")
 

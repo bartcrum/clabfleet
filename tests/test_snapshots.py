@@ -438,7 +438,8 @@ def test_gui_snapshot_job_and_node_diff(tmp_path, topo_file, monkeypatch):
     from aiohttp.test_utils import TestClient, TestServer
 
     from clabfleet.gui import server
-    from clabfleet.gui.state import JobManager, Workspace
+    from clabfleet.gui.jobs import JobManager
+    from clabfleet.gui.state import Workspace
 
     _patch_hosts(monkeypatch, {"localhost": FakeHost(_local_files(tmp_path))})
     ws = Workspace(_local(), [tmp_path])
