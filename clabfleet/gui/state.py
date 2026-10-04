@@ -18,14 +18,14 @@ from typing import Optional
 
 from ..capture import sweep_helpers
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
-from ..deployer import read_placement_record
+from ..deployer import clab_dir, read_placement_record, runs_in_place
 from ..livestate import LiveCache, link_rates, link_states, linux_iface_names, probe_ifaces, probe_stats
 from ..nodes import InspectError, access_modes, inspect_all, parse_inspect, run_docker
 from ..readiness import ReadinessCache, check_ready
 from ..execute import ssh_exec
 from ..routing import routing_view
 from ..routing.live import collect as collect_protocols, family as cli_family, overlay as protocol_overlay
-from ..snapshots import diff_lab, startup_config, unified_diff
+from ..snapshots import SAVED_CONFIG, diff_lab, startup_config, unified_diff
 from ..validate import validate_text
 from . import annotations
 from .editing import EditConflict, apply_graph, set_positions, text_hash, write_if_unchanged
@@ -36,6 +36,7 @@ from ..topology import (
     LABEL_HOST_TAGS,
     SPECIAL_ENDPOINT_NODES,
     Topology,
+    canonical_kind,
     dump_yaml,
     load_topology,
     topology_from_dict,
@@ -228,11 +229,32 @@ class Workspace:
             entry = {"id": topo_id, "path": str(path)}
             try:
                 topo = load_topology(path)
-                entry.update(name=topo.name, nodes=len(topo.nodes))
+                entry.update(name=topo.name, nodes=len(topo.nodes), saved_at=self._saved_at(topo))
             except Exception as exc:
                 entry.update(name=path.name, error=str(exc))
             result.append(entry)
         return result
+
+    def _saved_at(self, topo) -> Optional[float]:
+        """When the lab's kept directory last had a config saved (Stop, or a
+        destroy that keeps the lab directory): the next deploy starts from
+        those configs. None without such a directory. Known for a lab that
+        runs in place on this machine; the directory is also there while the
+        lab runs, so this only says something about a lab that does not."""
+        host = self.cluster.hosts[0]
+        if not runs_in_place(self.cluster, host, topo):
+            return None
+        kept = Path(clab_dir(self.cluster, host, topo))
+        times = []
+        for node in topo.nodes:
+            # The node's saved config where its kind has one, and its directory
+            saved = SAVED_CONFIG.get(canonical_kind(topo.effective_node(node)["kind"] or ""))
+            for path in [kept / node] + ([kept / node / saved[0]] if saved else []):
+                try:
+                    times.append(path.stat().st_mtime)
+                except OSError:
+                    continue
+        return max(times, default=None)
 
     def topology_path(self, topo_id: str) -> Path:
         if topo_id not in self._topologies:

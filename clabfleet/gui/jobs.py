@@ -206,20 +206,6 @@ class JobManager:
         threading.Thread(target=self._run, args=(job, path), daemon=True).start()
         return job
 
-    @staticmethod
-    def _stop(deployer, job: Job, path: Path) -> dict:
-        """Save the running configs, then remove the containers and keep the
-        lab directory. A failed save on any host stops nothing: its unsaved
-        changes would be lost."""
-        saved = deployer.save(path)
-        failed = {h: r["error"] for h, r in saved.get("hosts", {}).items() if "error" in r}
-        if failed:
-            job.add("✗ not stopped: Save configs failed on " + ", ".join(failed)
-                    + "; nothing was removed")
-            return saved
-        job.add("» configs saved; removing the containers, keeping the lab directory")
-        return deployer.destroy(path, cleanup=False)
-
     def _run(self, job: Job, path: Path) -> None:
         handler = _JobLogHandler(job, threading.get_ident())
         pkg_logger = logging.getLogger("clabfleet")
@@ -238,7 +224,7 @@ class JobManager:
                 result = deployer.deploy(path, reconfigure=job.action == "redeploy",
                                          rollback=job.options.get("rollback", False))
             elif job.action == "stop":
-                result = self._stop(deployer, job, path)
+                result = deployer.stop(path)
             elif job.action == "destroy":
                 result = deployer.destroy(path)
             elif job.action == "snapshot":

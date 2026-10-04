@@ -299,6 +299,20 @@ class LabDeployer:
             remove_placement_record(topo)
         return summary
 
+    def stop(self, topology_file: str | Path) -> dict:
+        """Save the running configs, then remove the containers and keep the
+        lab directory, so the next deploy starts from the saved configs. A
+        failed save on any host stops nothing: its unsaved changes would be
+        lost. The summary's ``stopped`` says whether the lab was removed."""
+        saved = self.save(topology_file)
+        failed = [h for h, r in saved.get("hosts", {}).items() if "error" in r]
+        if failed:
+            logger.error("not stopped: saving the configs failed on %s; nothing was removed",
+                         ", ".join(failed))
+            return {**saved, "stopped": False}
+        logger.info("Configs saved; removing the containers, keeping the lab directory")
+        return {**self.destroy(topology_file, cleanup=False), "stopped": True}
+
     def save(self, topology_file: str | Path) -> dict:
         """Save running configs of all nodes (``containerlab save``) on every host."""
         topo = load_topology(topology_file)

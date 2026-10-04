@@ -1,6 +1,6 @@
 import pytest
 
-from clabfleet.runner import CommandError, SSHRunner
+from clabfleet.runner import CommandError, CommandResult, PrivilegeError, Runner, SSHRunner
 
 
 class FakeChannel:
@@ -121,3 +121,45 @@ def test_strict_rejects_unknown_host_keys(tmp_path, monkeypatch):
     assert not known.exists()
     with pytest.raises(ValueError, match="host_key_policy"):
         SSHRunner("10.0.0.1", host_key_policy="trust-all")
+
+
+class _RootedHost(Runner):
+    """A host where containerlab refuses what needs root, unless run through sudo."""
+
+    name = "lab-a"
+
+    def __init__(self, sudo: bool = False):
+        super().__init__(sudo=sudo)
+        self.calls = []
+
+    def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
+        self.calls.append((list(args), bool(sudo)))
+        if not sudo and args[1] != "inspect":
+            return CommandResult(1, "", "ERROR\n  This containerlab command requires root privileges "
+                                        "or root via SUID to run, effective UID: 1000 SUID: 1000.")
+        if args[1] == "broken":
+            return CommandResult(1, "", "no such command")
+        return CommandResult(0, "ok", "")
+
+
+def test_containerlab_says_what_to_do_when_it_needs_root():
+    host = _RootedHost()
+    for check in (True, False):
+        with pytest.raises(PrivilegeError) as exc:
+            host.containerlab(["destroy", "-t", "x.clab.yml"], check=check)
+        assert "needs root on lab-a" in str(exc.value) and "--sudo" in str(exc.value)
+        assert "requires root privileges" not in str(exc.value)
+    # sudo is never used unless asked for
+    assert host.calls == [(["containerlab", "destroy", "-t", "x.clab.yml"], False)] * 2
+
+
+def test_containerlab_is_otherwise_untouched():
+    host = _RootedHost()
+    assert host.containerlab(["inspect", "--all"]).stdout == "ok"  # works without root
+    asked = _RootedHost(sudo=True)
+    assert asked.containerlab(["destroy", "-t", "x.clab.yml"]).stdout == "ok"
+    assert asked.calls == [(["containerlab", "destroy", "-t", "x.clab.yml"], True)]
+    # Any other failure is the command's own, as before
+    assert asked.containerlab(["broken"], check=False).exit_code == 1
+    with pytest.raises(CommandError):
+        asked.containerlab(["broken"])

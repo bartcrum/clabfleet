@@ -6,6 +6,7 @@ Usage:
                      [--wait [--wait-timeout SECONDS]]
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
+    clabfleet stop <topology.clab.yml> [--cluster <cluster.yaml>]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
     clabfleet snapshot <topology.clab.yml> [--nodes GLOB] [--dir DIR] [--no-save] [--name NAME]
     clabfleet snapshot <topology.clab.yml> --list [--dir DIR]
@@ -38,6 +39,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import sys
@@ -138,6 +140,10 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--cluster", metavar="CLUSTER_YAML",
                        help="Operate on all hosts in a cluster inventory")
 
+    def add_json_arg(p):
+        p.add_argument("--json", action="store_true",
+                       help="Print the full result as JSON (for scripts)")
+
     # --- deploy ---
     p_deploy = sub.add_parser("deploy", help="Deploy a containerlab topology")
     p_deploy.add_argument("topology", help="Path to a containerlab topology file")
@@ -165,6 +171,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_deploy.add_argument("--skip-link-check", action="store_true",
                           help="Deploy across hosts without first checking that they "
                                "reach each other on the VXLAN port")
+    add_json_arg(p_deploy)
 
     # --- destroy ---
     p_destroy = sub.add_parser("destroy", aliases=["teardown"], help="Destroy a lab")
@@ -172,11 +179,23 @@ def _build_parser() -> argparse.ArgumentParser:
     add_cluster_arg(p_destroy)
     p_destroy.add_argument("--keep-lab-dir", action="store_true",
                            help="Keep the lab directory (saved configs, certs, copied files)")
+    add_json_arg(p_destroy)
+
+    # --- stop ---
+    p_stop = sub.add_parser(
+        "stop", help="Save the configs, then remove the lab's containers",
+        description="Save every node's running config, then remove the containers "
+                    "and keep the lab directory: the next deploy starts from the "
+                    "saved configs. If saving fails on a host, nothing is removed.")
+    p_stop.add_argument("topology", help="Path to the topology file the lab was deployed from")
+    add_cluster_arg(p_stop)
+    add_json_arg(p_stop)
 
     # --- save ---
     p_save = sub.add_parser("save", help="Save running configs of all lab nodes")
     p_save.add_argument("topology", help="Path to the topology file")
     add_cluster_arg(p_save)
+    add_json_arg(p_save)
 
     def add_nodes_arg(p):
         p.add_argument("--nodes", action="append", metavar="GLOB",
@@ -227,6 +246,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_inspect.add_argument("topology", nargs="?",
                            help="Topology file (default: all labs on the host(s))")
     add_cluster_arg(p_inspect)
+    add_json_arg(p_inspect)
 
     # --- exec ---
     p_exec = sub.add_parser(
@@ -601,6 +621,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         )
     elif cmd in ("destroy", "teardown"):
         summary = deployer.destroy(args.topology, cleanup=not args.keep_lab_dir)
+    elif cmd == "stop":
+        summary = deployer.stop(args.topology)
     elif cmd == "save":
         summary = deployer.save(args.topology)
     elif cmd == "inspect":
@@ -608,13 +630,110 @@ def _dispatch(args: argparse.Namespace) -> int:
     else:
         raise ValueError(f"Unknown command {cmd}")
 
-    print(json.dumps(summary, indent=2, default=str))
+    if args.json:
+        print(json.dumps(summary, indent=2, default=str))
+    else:
+        print(_summary_text("destroy" if cmd == "teardown" else cmd, summary))
     failed = [
         name for name, result in summary.get("hosts", {}).items()
         if "error" in result
     ]
     not_ready = summary.get("readiness", {}).get("ready") is False
     return 1 if failed or not_ready else 0
+
+
+_CLAB_LOG_LINE = re.compile(r"^\d\d:\d\d:\d\d (INFO|WARN|DEBU)\b")
+
+
+def _error_text(text) -> str:
+    """An error on one line: containerlab pads and wraps its own, after its log lines."""
+    lines = [ln.strip() for ln in str(text).splitlines()]
+    kept = [ln for ln in lines if ln and ln != "ERROR" and not _CLAB_LOG_LINE.match(ln)]
+    return " ".join(kept) or "failed"
+
+
+def _table(rows: list[tuple]) -> list[str]:
+    """Rows as aligned columns, indented under a heading."""
+    if not rows:
+        return []
+    widths = [max(len(str(r[i])) for r in rows) for i in range(len(rows[0]))]
+    return ["  " + "  ".join(str(c).ljust(w) for c, w in zip(r, widths)).rstrip() for r in rows]
+
+
+def _summary_text(cmd: str, summary: dict) -> str:
+    """What deploy, destroy, stop, save or inspect did, for people (``--json`` has it all)."""
+    hosts = summary.get("hosts", {})
+    if cmd == "inspect":
+        out = []
+        for host, result in hosts.items():
+            if "error" in result:
+                gone = "containers not found" in result["error"]  # containerlab's words for it
+                out.append(f"{host}: " + ("not deployed" if gone else _error_text(result["error"])))
+                continue
+            labs = result.get("data") or {}
+            if not labs:
+                out.append(f"{host}: no labs running" if result.get("status") != "not-deployed"
+                           else f"{host}: not deployed")
+            for lab, containers in labs.items():
+                out.append(f"{lab} on {host}: {len(containers)} node{'' if len(containers) == 1 else 's'}")
+                prefix = f"clab-{lab}-"
+                out += _table([(c.get("name", "").removeprefix(prefix), c.get("kind", ""), c.get("state", ""),
+                                (c.get("ipv4_address") or "").split("/")[0]) for c in containers])
+        return "\n".join(out) or "No hosts"
+
+    lab = summary.get("lab", "")
+    placement = summary.get("placement", {})
+    if cmd == "deploy":
+        head = "dry run, nothing deployed" if summary.get("dry_run") else {
+            "deployed": "deployed", "partial": "PARTLY deployed", "failed": "FAILED",
+            "rolled-back": "FAILED, rolled back", "rollback-failed": "FAILED, rollback incomplete",
+        }.get(summary.get("status"), summary.get("status") or "not deployed")
+    else:
+        failed = any("error" in r for r in hosts.values())
+        done = {"destroy": "destroyed", "save": "configs saved",
+                "stop": "stopped, configs saved (the next deploy starts from them)"}[cmd]
+        if hosts and all(r.get("status") == "not-deployed" for r in hosts.values()):
+            done = "not deployed"
+        head = done if not failed else (
+            "NOT stopped: saving the configs failed, nothing was removed"
+            if cmd == "stop" and not summary.get("stopped") else f"{cmd} FAILED")
+    out = [f"{lab}: {head}"]
+
+    rows = []
+    for host in dict.fromkeys([*placement, *hosts]):
+        result, nodes = hosts.get(host, {}), placement.get(host) or hosts.get(host, {}).get("nodes") or []
+        count = f"{len(nodes)} node{'' if len(nodes) == 1 else 's'}" if nodes else ""
+        if "error" in result:
+            state = f"FAILED: {_error_text(result['error'])}"
+        else:
+            state = {"ok": "ok", "not-deployed": "not deployed"}.get(result.get("status"), result.get("status", ""))
+        took = f"{result['seconds']:g}s" if "seconds" in result else ""
+        rows.append((host, count, state, took) if cmd == "deploy" else (host, state, took))
+    if cmd == "deploy" and summary.get("dry_run"):
+        out += [f"  {host} ({len(nodes)} node{'' if len(nodes) == 1 else 's'}): {', '.join(nodes)}"
+                for host, nodes in placement.items()]
+    else:
+        out += _table(rows)
+
+    links = summary.get("cross_host_links") or []
+    if links:
+        vnis = summary.get("vni_range")
+        out.append(f"  {len(links)} link{'' if len(links) == 1 else 's'} between hosts"
+                   + (f", VNI {vnis[0]}-{vnis[1]}" if vnis else "") + ":")
+        out += ["  " + ln for ln in _table([(f"{c['a']} - {c['b']}", " - ".join(c["hosts"]), f"VNI {c['vni']}")
+                                           for c in links])]
+    if summary.get("written"):
+        out.append(f"  per-host topology files: {', '.join(str(p) for p in summary['written'])}")
+    if summary.get("rollback"):
+        out.append("  rollback: " + ", ".join(f"{h} {r}" for h, r in summary["rollback"].items()))
+    readiness = summary.get("readiness")
+    if readiness:
+        if readiness.get("ready"):
+            out.append(f"  all nodes ready after {readiness.get('seconds', 0):g}s")
+        else:
+            out.append(f"  NOT ready after {readiness.get('seconds', 0):g}s: "
+                       + ", ".join(f"{n} ({d})" for n, d in (readiness.get("pending") or {}).items()))
+    return "\n".join(out)
 
 
 def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:

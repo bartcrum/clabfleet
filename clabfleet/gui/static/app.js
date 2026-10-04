@@ -819,6 +819,19 @@ async function selectOtherLab(lab) {
   renderNodesTable();
 }
 
+// When a topology's kept lab directory last had a config saved (unix time), if it has one
+function savedAt(topoId) {
+  return (S.state?.topologies || []).find((t) => t.id === topoId)?.saved_at || null;
+}
+
+// "07:18" today, "2 Oct 07:18" before
+function fmtWhen(unix) {
+  const d = new Date(unix * 1000);
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time
+    : `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${time}`;
+}
+
 function currentLabName() {
   if (!S.selected) return null;
   return S.selected.type === "topo" ? S.detail?.name : S.selected.lab;
@@ -834,8 +847,12 @@ function renderLabHead() {
   $("#lab-name").textContent = lab || "";
   const badge = $("#lab-state");
   badge.className = `badge ${st.state}`;
-  // Counts are in the status strip below
-  badge.textContent = st.state === "stopped" ? "not deployed" : st.state;
+  // Counts are in the status strip below. A lab that is not running may
+  // have its configs kept from a Stop: the next deploy starts from them
+  const saved = isTopo && st.state === "stopped" ? savedAt(S.selected.id) : null;
+  badge.textContent = saved ? `stopped · configs saved ${fmtWhen(saved)}`
+    : st.state === "stopped" ? "not deployed" : st.state;
+  badge.title = saved ? `The lab directory clab-${lab}/ holds configs saved ${new Date(saved * 1000).toLocaleString()}. Deploy starts the nodes from them; "Discard saved configs" in the ⋯ menu starts over from the topology.` : "";
 
   const topoFile = labContainers(lab)[0]?.topo_file;
   const path = isTopo ? S.detail?.path || "" : topoFile || "";
@@ -852,11 +869,16 @@ function renderLabHead() {
   actions.hidden = !isTopo;
   const busy = isTopo && !!runningJob(S.selected.id);
   if (isTopo) renderEditorState();
-  actions.querySelector('[data-action="deploy"]').hidden = st.deployed > 0;
+  const deployBtn = actions.querySelector('[data-action="deploy"]');
+  deployBtn.hidden = st.deployed > 0;
+  deployBtn.lastChild.textContent = saved ? "Deploy from saved configs" : "Deploy";
   $("#lab-secondary").hidden = st.deployed === 0;
+  // Destroy also removes the kept lab directory of a stopped lab
+  const destroyBtn = actions.querySelector('[data-action="destroy"]');
+  destroyBtn.lastChild.textContent = saved ? "Discard saved configs…" : "Destroy lab…";
   for (const btn of actions.querySelectorAll("[data-action]")) {
     const a = btn.dataset.action;
-    const enabled = a === "deploy" ? st.deployed === 0 : st.deployed > 0;
+    const enabled = a === "deploy" ? st.deployed === 0 : st.deployed > 0 || (a === "destroy" && !!saved);
     btn.disabled = busy || !enabled || !!S.detail?.error;
   }
 }
@@ -1421,6 +1443,15 @@ function actionImpact(action, lab) {
   const where = hosts.length > 1 ? ` on ${hosts.length} hosts (${hosts.join(", ")})` : hosts.length ? ` on ${hosts[0]}` : "";
   const n = `${cs.length} node${cs.length === 1 ? "" : "s"}`;
   const big = cs.length >= TYPE_TO_CONFIRM_NODES ? lab : null;
+  if (action === "destroy" && !cs.length) {
+    return {
+      title: `Discard the saved configs of ${lab}?`, ok: "Discard saved configs", danger: true,
+      body: [
+        `Removes the lab directory clab-${lab}/ with the configs saved there. The next Deploy starts every node from the topology's startup configs.`,
+        "Snapshots and the topology file are kept.",
+      ],
+    };
+  }
   if (action === "destroy") {
     return {
       title: `Destroy ${lab}?`, ok: "Destroy lab", danger: true, typeToConfirm: big,

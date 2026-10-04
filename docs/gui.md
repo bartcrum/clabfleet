@@ -201,8 +201,13 @@ an operator.
   the lab down to free memory and disk: it saves every node's running
   config, then removes the containers and keeps the lab directory (a few
   MB), so the next Deploy starts from the saved configs. If saving fails
-  on a host, nothing is removed. **Destroy** also deletes the lab
-  directory. Above the output, Activity
+  on a host, nothing is removed. A stopped lab says so: its badge reads
+  "stopped · configs saved 07:20", the button becomes **Deploy from saved
+  configs**, and **Discard saved configs** in the ⋯ menu removes the lab
+  directory, so the next Deploy starts from the topology again (shown for
+  a lab that runs on this machine alone). **Destroy** also deletes the lab
+  directory. `clabfleet stop` does the same from the command line. Above
+  the output, Activity
   shows each host's steps (plan, images, deploy, links, ready) and how
   long each took; a finished job pops up with View and Open lab.
 - **Run on nodes:** the Run tab (operators) runs one command on every node
