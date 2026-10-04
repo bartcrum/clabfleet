@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .cluster import ClusterConfig, HostInfo, create_runner
+from .cluster import ClusterConfig, RunnerPool, create_runner
 from .deployer import LabDeployer, clab_dir, read_placement_record
 from .execute import select_nodes
 from .nodes import NO_SHELL_KINDS
@@ -104,7 +104,7 @@ class Snapshotter:
         self.cluster = cluster
         self.on_output = on_output
         self.interactive_sudo = interactive_sudo
-        self._runners: dict[str, Runner] = {}
+        self._runners = RunnerPool(lambda host: create_runner(host), interactive_sudo)
 
     def take(
         self,
@@ -155,7 +155,7 @@ class Snapshotter:
                 texts[node] = text
                 logger.info("Captured %s from %s:%s", node, info["host"], info["source"])
         finally:
-            self._close()
+            self._runners.close()
 
         if not captured:
             raise SnapshotError(
@@ -207,7 +207,7 @@ class Snapshotter:
         for host in hosts:
             source = f"{clab_dir(self.cluster, host, topo)}/{node}/{rel}"
             try:
-                text, err = read_file(self._runner(host), source, host.sudo)
+                text, err = read_file(self._runners.get(host), source, host.sudo)
             except Exception as exc:  # noqa: BLE001 - an unreachable host skips its nodes
                 text, err = None, f"unreachable: {exc}"
             if text is not None:
@@ -216,18 +216,6 @@ class Snapshotter:
                 return info, text, ""
             errors.append(err if len(hosts) == 1 else f"{host.name}: {err}")
         return None, "", "; ".join(errors)
-
-    def _runner(self, host: HostInfo) -> Runner:
-        if host.name not in self._runners:
-            runner = create_runner(host)
-            runner.interactive_sudo = self.interactive_sudo
-            self._runners[host.name] = runner
-        return self._runners[host.name]
-
-    def _close(self) -> None:
-        for runner in self._runners.values():
-            runner.close()
-        self._runners.clear()
 
 
 def check_name(name: str) -> None:

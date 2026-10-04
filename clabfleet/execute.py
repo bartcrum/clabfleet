@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
-from .cluster import ClusterConfig, HostInfo, create_runner
+from .cluster import ClusterConfig, HostInfo, RunnerPool, create_runner
 from .deployer import hosts_for_lab
 from .nodes import (
     DEFAULT_SSH_PASSWORD,
@@ -27,9 +27,7 @@ from .nodes import (
     KIND_SSH_USER,
     NO_SHELL_KINDS,
     SSH_CLI_KINDS,
-    InspectError,
-    inspect_all,
-    parse_inspect,
+    lab_containers,
     run_docker,
 )
 from .runner import Runner, SSHRunner
@@ -112,7 +110,7 @@ class LabExecutor:
         )
         self.parallel = max(1, parallel)
         self.timeout = timeout
-        self._runners: dict[str, Runner] = {}
+        self._runners = RunnerPool(lambda host: create_runner(host))
 
     def run(
         self,
@@ -127,7 +125,8 @@ class LabExecutor:
         topo = load_topology(topology_file)
         selected = select_nodes(topo, nodes)
         try:
-            containers, host_errors = self._running_nodes(topo)
+            containers, host_errors = lab_containers(
+                hosts_for_lab(self.cluster, topo), topo.name, self._runners.get)
             jobs = []
             results: dict[str, NodeResult] = {}
             for name in selected:
@@ -153,7 +152,7 @@ class LabExecutor:
                 for _ in pool.map(lambda job: self._exec(job[0], job[1], command), jobs):
                     pass
         finally:
-            self._close()
+            self._runners.close()
 
         return {
             "lab": topo.name,
@@ -164,27 +163,9 @@ class LabExecutor:
 
     # ------------------------------------------------------------------
 
-    def _running_nodes(self, topo: Topology) -> tuple[dict[str, dict], dict[str, str]]:
-        """node name → container info for the lab, plus per-host errors."""
-        found: dict[str, dict] = {}
-        errors: dict[str, str] = {}
-        for host in hosts_for_lab(self.cluster, topo):
-            try:
-                data = inspect_all(self._runner(host))
-            except InspectError as exc:
-                errors[host.name] = str(exc)
-                continue
-            except Exception as exc:
-                errors[host.name] = f"unreachable: {exc}"
-                continue
-            for c in parse_inspect(data, host.name):
-                if c["lab"] == topo.name:
-                    found[c["node"]] = c
-        return found, errors
-
     def _exec(self, result: NodeResult, container: dict, command: str) -> None:
         host = self._host(result.host)
-        runner = self._runner(host)
+        runner = self._runners.get(host)
         try:
             if result.mode == "ssh":
                 code, output = self._ssh_exec(runner, result.kind, container["ipv4"], command)
@@ -203,16 +184,6 @@ class LabExecutor:
 
     def _host(self, name: str) -> HostInfo:
         return next(h for h in self.cluster.hosts if h.name == name)
-
-    def _runner(self, host: HostInfo) -> Runner:
-        if host.name not in self._runners:
-            self._runners[host.name] = create_runner(host)
-        return self._runners[host.name]
-
-    def _close(self) -> None:
-        for runner in self._runners.values():
-            runner.close()
-        self._runners.clear()
 
 
 def ssh_exec(runner: Runner, kind: str, ipv4: str, command: str, *,

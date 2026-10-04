@@ -47,6 +47,7 @@ from typing import Optional
 from .cluster import (
     ClusterConfig,
     HostInfo,
+    RunnerPool,
     create_runner,
     probe_host_resources,
 )
@@ -128,7 +129,7 @@ class LabDeployer:
         self.cluster = cluster
         self.on_output = on_output
         self.interactive_sudo = interactive_sudo
-        self._runners: dict[str, Runner] = {}
+        self._runners = RunnerPool(lambda host: create_runner(host), interactive_sudo)
 
     # ------------------------------------------------------------------
     # Public API
@@ -268,7 +269,7 @@ class LabDeployer:
         finally:
             if registered:
                 _unregister_in_flight(topo.name)
-            self._close_runners()
+            self._runners.close()
 
         return summary
 
@@ -291,9 +292,9 @@ class LabDeployer:
                 if cleanup and not self._in_place(host, topo):
                     result = summary["hosts"][host.name]
                     if result.get("status") == "ok":
-                        self._runner(host).remove_tree(host.lab_dir(topo.name))
+                        self._runners.get(host).remove_tree(host.lab_dir(topo.name))
         finally:
-            self._close_runners()
+            self._runners.close()
         if all(r.get("status") in ("ok", "not-deployed") for r in summary["hosts"].values()):
             remove_placement_record(topo)
         return summary
@@ -308,7 +309,7 @@ class LabDeployer:
                 summary["hosts"][host.name] = self._on_host(host, topo, "save", [])
                 summary["hosts"][host.name]["seconds"] = _since(started)
         finally:
-            self._close_runners()
+            self._runners.close()
         return summary
 
     def inspect(self, topology_file: Optional[str | Path] = None) -> dict:
@@ -329,7 +330,7 @@ class LabDeployer:
                     )
                 summary["hosts"][host.name] = result
         finally:
-            self._close_runners()
+            self._runners.close()
         return summary
 
     # ------------------------------------------------------------------
@@ -360,7 +361,7 @@ class LabDeployer:
             # one (MemAvailable) already excludes what running labs use
             explicit_ram = host.max_ram > 0
             try:
-                probe_host_resources(self._runner(host), host)
+                probe_host_resources(self._runners.get(host), host)
             except Exception as exc:
                 raise DeploymentError(
                     f"Host {host.name} ({host.host}) unreachable: {exc}"
@@ -393,7 +394,7 @@ class LabDeployer:
             found: dict[str, tuple[HostInfo, dict]] = {}
             for host in hosts:
                 try:
-                    data = inspect_all(self._runner(host))
+                    data = inspect_all(self._runners.get(host))
                 except Exception as exc:
                     logger.warning("Could not inspect %s: %s", host.name, exc)
                     continue
@@ -404,7 +405,7 @@ class LabDeployer:
                 return {}
             with ThreadPoolExecutor(max_workers=min(16, len(found))) as pool:
                 checks = pool.map(
-                    lambda item: check_ready(self._runner(item[0]), item[1], item[0].sudo),
+                    lambda item: check_ready(self._runners.get(item[0]), item[1], item[0].sudo),
                     found.values(),
                 )
                 return dict(zip(found, checks))
@@ -419,7 +420,7 @@ class LabDeployer:
             try:
                 result = self._on_host(host, topo, "destroy", ["--cleanup"])
                 if result.get("status") == "ok" and not self._in_place(host, topo):
-                    self._runner(host).remove_tree(host.lab_dir(topo.name))
+                    self._runners.get(host).remove_tree(host.lab_dir(topo.name))
             except Exception as exc:  # noqa: BLE001 - keep rolling back the others
                 result = {"status": "error", "error": str(exc)}
             status = result.get("status")
@@ -440,7 +441,7 @@ class LabDeployer:
         """
         in_flight = {name: e for name, e in _IN_FLIGHT.items() if name != lab}
         try:
-            usage = running_usage(inspect_all(self._runner(host)), exclude_lab=lab)
+            usage = running_usage(inspect_all(self._runners.get(host)), exclude_lab=lab)
         except Exception as exc:
             logger.warning("Could not list running labs on %s (%s); placement "
                            "ignores them", host.name, exc)
@@ -468,7 +469,7 @@ class LabDeployer:
         used: set[int] = set()
         for host in self.cluster.hosts:
             try:
-                by_lab = scan_used_vnis(self._runner(host), host)
+                by_lab = scan_used_vnis(self._runners.get(host), host)
             except Exception as exc:
                 logger.warning(
                     "Could not check VNIs in use on %s (%s); VXLAN links may "
@@ -525,7 +526,7 @@ class LabDeployer:
         """Raise DeploymentError if hosts sharing links cannot reach each other."""
         pairs = vxlan_pairs(cross_links)
         hosts = {h.name: h for h in self.cluster.hosts}
-        runners = {name: self._runner(hosts[name]) for pair in pairs for name in pair}
+        runners = {name: self._runners.get(hosts[name]) for pair in pairs for name in pair}
         logger.info("Checking VXLAN connectivity between %s", ", ".join(sorted(runners)))
         results = check_links(runners, self.cluster.hosts, pairs, self.cluster.dst_port)
         bad = failures(results)
@@ -551,7 +552,7 @@ class LabDeployer:
             images = node_images(topo, data["topology"]["nodes"])
             if not images:
                 continue
-            runner = self._runner(host)
+            runner = self._runners.get(host)
             sudo = False
             missing = missing_images(runner, list(images), sudo=False)
             if missing is None and host.sudo:
@@ -595,7 +596,7 @@ class LabDeployer:
     ) -> dict:
         extra = ["--reconfigure"] if reconfigure else []
         nodes = list(data["topology"]["nodes"])
-        runner = self._runner(host)
+        runner = self._runners.get(host)
 
         if self._in_place(host, topo):
             logger.info("Deploying '%s' locally from %s", topo.name, topo.path)
@@ -639,7 +640,7 @@ class LabDeployer:
         lab_dir = host.lab_dir(topo.name)
         topo_file = f"{topo.name}.clab.yml"
         try:
-            deployed = self._runner(host).exists(f"{lab_dir}/{topo_file}")
+            deployed = self._runners.get(host).exists(f"{lab_dir}/{topo_file}")
         except Exception as exc:
             return {"status": "error", "error": f"unreachable: {exc}"}
         if not deployed:
@@ -660,7 +661,7 @@ class LabDeployer:
     ) -> dict:
         on_output = self._output_for(host) if stream else None
         try:
-            result = self._runner(host).containerlab(
+            result = self._runners.get(host).containerlab(
                 args, cwd=cwd, check=check, on_output=on_output
             )
         except CommandError:
@@ -679,18 +680,6 @@ class LabDeployer:
             except json.JSONDecodeError:
                 out["output"] = result.stdout
         return out
-
-    def _runner(self, host: HostInfo) -> Runner:
-        if host.name not in self._runners:
-            runner = create_runner(host)
-            runner.interactive_sudo = self.interactive_sudo
-            self._runners[host.name] = runner
-        return self._runners[host.name]
-
-    def _close_runners(self) -> None:
-        for runner in self._runners.values():
-            runner.close()
-        self._runners.clear()
 
 
 def runs_in_place(cluster: ClusterConfig, host: HostInfo, topo: Topology) -> bool:

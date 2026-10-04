@@ -200,6 +200,39 @@ def create_runner(host_info: HostInfo) -> Runner:
     )
 
 
+class RunnerPool:
+    """One runner per host, created on first use and closed together.
+
+    ``factory`` is the caller's own ``create_runner``, so each module keeps
+    creating runners through its module-level name.
+    """
+
+    def __init__(self, factory, interactive_sudo: Optional[bool] = None):
+        self._factory = factory
+        self._interactive_sudo = interactive_sudo
+        self._runners: dict[str, Runner] = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def get(self, host: HostInfo) -> Runner:
+        if host.name not in self._runners:
+            runner = self._factory(host)
+            if self._interactive_sudo is not None:
+                runner.interactive_sudo = self._interactive_sudo
+            self._runners[host.name] = runner
+        return self._runners[host.name]
+
+    def close(self) -> None:
+        for runner in self._runners.values():
+            runner.close()
+        self._runners.clear()
+
+
 def probe_host_resources(runner: Runner, host_info: HostInfo) -> dict:
     """Fill in max_cpu/max_ram from the host when not set in the inventory.
 
