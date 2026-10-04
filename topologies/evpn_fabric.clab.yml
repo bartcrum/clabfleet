@@ -510,27 +510,33 @@ topology:
               redistribute connected
 
     # -- Hosts --
+    # eth1 has MTU 1450: VXLAN adds 50 bytes and the fabric links carry 1500,
+    # so a larger packet from a host would be dropped between leaves.
     Host-1:
       kind: linux
       exec:
+        - ip link set eth1 mtu 1450
         - ip addr add 10.10.10.11/24 dev eth1
         - ip route replace default via 10.10.10.1
 
     Host-2:
       kind: linux
       exec:
+        - ip link set eth1 mtu 1450
         - ip addr add 10.20.20.12/24 dev eth1
         - ip route replace default via 10.20.20.1
 
     Host-3:
       kind: linux
       exec:
+        - ip link set eth1 mtu 1450
         - ip addr add 10.10.10.13/24 dev eth1
         - ip route replace default via 10.10.10.1
 
     Host-4:
       kind: linux
       exec:
+        - ip link set eth1 mtu 1450
         - ip addr add 10.20.20.14/24 dev eth1
         - ip route replace default via 10.20.20.1
 
