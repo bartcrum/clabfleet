@@ -28,6 +28,7 @@ import ipaddress
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from .ifmap import naming_for
 from .topology import dump_yaml, topology_from_dict
 
 DEFAULT_LINK_SUBNET = "10.0.0.0/16"
@@ -196,18 +197,19 @@ TEMPLATES: dict[str, Template] = {t.name: t for t in [
 
 # --- Kinds ---
 
-def _ceos_if(index: int) -> tuple[str, str]:
-    return f"eth{index}", f"Ethernet{index}"
+def _namer(kind: str) -> Callable[[int], tuple[str, str]]:
+    """Port number (from 1) → (link endpoint name, config name), by ifmap's rules."""
+    naming = naming_for(kind)
+
+    def names(index: int) -> tuple[str, str]:
+        endpoint = naming.slot(index - 1)  # ifmap counts data ports from 0
+        return endpoint, naming.config_name(endpoint)
+    return names
 
 
-def _iol_if(index: int) -> tuple[str, str]:
-    # IOL ports go Ethernet0/0-0/3, 1/0-1/3, ...; 0/0 is management
-    name = f"Ethernet{index // 4}/{index % 4}"
-    return name, name
-
-
-def _linux_if(index: int) -> tuple[str, str]:
-    return f"eth{index}", f"eth{index}"
+_ceos_if = _namer("arista_ceos")
+_iol_if = _namer("cisco_iol")
+_linux_if = _namer("linux")
 
 
 def _render_ceos(node: PlanNode, plan: Plan) -> dict:
