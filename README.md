@@ -74,6 +74,10 @@ clabfleet --sudo inspect topologies/three_router_triangle.clab.yml
 # Save running configs into the lab directory
 clabfleet --sudo save topologies/three_router_triangle.clab.yml
 
+# Stop it: save the configs and remove the containers; the next deploy
+# starts from the saved configs
+clabfleet --sudo stop topologies/three_router_triangle.clab.yml
+
 # Tear it down (add --keep-lab-dir to keep saved configs)
 clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 ```

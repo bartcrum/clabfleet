@@ -13,6 +13,7 @@ pytest.importorskip("aiohttp")
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 from clabfleet.cluster import ClusterConfig, HostInfo  # noqa: E402
+from clabfleet.deployer import LabDeployer  # noqa: E402
 from clabfleet.gui import server, state  # noqa: E402
 from clabfleet.gui.state import (  # noqa: E402
     JobManager,
@@ -21,7 +22,7 @@ from clabfleet.gui.state import (  # noqa: E402
     topology_view,
 )
 from clabfleet.nodes import access_modes, parse_inspect, terminal_command  # noqa: E402
-from clabfleet.topology import topology_from_dict  # noqa: E402
+from clabfleet.topology import load_topology, topology_from_dict  # noqa: E402
 
 TOPO = """\
 name: t
@@ -363,6 +364,20 @@ def test_logs_terminal_over_websocket(tmp_path, monkeypatch):
     assert exit_msg == {"t": "exit", "code": 0}
 
 
+def test_topologies_say_when_a_kept_lab_directory_had_configs_saved(tmp_path):
+    ws = _workspace(tmp_path)
+    assert ws.topologies()[0]["saved_at"] is None  # never deployed: no lab directory
+    lab = ws.topologies()[0]["name"]
+    node = next(iter(load_topology(tmp_path / "t.clab.yml").nodes))
+    kept = tmp_path / f"clab-{lab}" / node
+    kept.mkdir(parents=True)
+    os.utime(kept, (1000, 1000))
+    assert ws.topologies()[0]["saved_at"] == 1000
+    # Several hosts: the lab directory is not next to the file, nothing is said
+    many = Workspace(ClusterConfig(hosts=[HostInfo("localhost"), HostInfo("b", host="10.0.0.2")]), [tmp_path])
+    assert many.topologies()[0]["saved_at"] is None
+
+
 def test_stop_saves_first_and_keeps_the_lab_directory(tmp_path, monkeypatch):
     calls = []
     save_fails = [False]
@@ -380,6 +395,8 @@ def test_stop_saves_first_and_keeps_the_lab_directory(tmp_path, monkeypatch):
         def destroy(self, path, cleanup=True):
             calls.append(("destroy", cleanup))
             return {"hosts": {"localhost": {"status": "ok", "seconds": 0.5}}}
+
+        stop = LabDeployer.stop  # the real one, over the fake save and destroy
 
     monkeypatch.setattr(state, "LabDeployer", FakeDeployer)
     ws = _workspace(tmp_path)

@@ -163,6 +163,10 @@ def test_cli_summaries_for_people():
     assert text("destroy", {"lab": "lab", "hosts": {"a": {"status": "ok", "seconds": 1.3},
                                                     "b": {"status": "not-deployed", "seconds": 0.1}}}) == (
         "lab: destroyed\n  a  ok            1.3s\n  b  not deployed  0.1s")
+    assert text("stop", {"lab": "lab", "stopped": True, "hosts": {"a": {"status": "ok", "seconds": 2}}}) == (
+        "lab: stopped, configs saved (the next deploy starts from them)\n  a  ok  2s")
+    assert text("stop", {"lab": "lab", "stopped": False, "hosts": {"a": {"error": "node unreachable"}}}) == (
+        "lab: NOT stopped: saving the configs failed, nothing was removed\n  a  FAILED: node unreachable")
     assert text("save", {"lab": "lab", "hosts": {"a": {"error": "no route to host"}}}) == (
         "lab: save FAILED\n  a  FAILED: no route to host")
     assert text("inspect", {"hosts": {

@@ -6,6 +6,7 @@ Usage:
                      [--wait [--wait-timeout SECONDS]]
     clabfleet deploy <topology.clab.yml> --cluster <cluster.yaml> [--strategy bin-pack]
     clabfleet destroy <topology.clab.yml> [--cluster <cluster.yaml>] [--keep-lab-dir]
+    clabfleet stop <topology.clab.yml> [--cluster <cluster.yaml>]
     clabfleet save <topology.clab.yml> [--cluster <cluster.yaml>]
     clabfleet snapshot <topology.clab.yml> [--nodes GLOB] [--dir DIR] [--no-save] [--name NAME]
     clabfleet snapshot <topology.clab.yml> --list [--dir DIR]
@@ -179,6 +180,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_destroy.add_argument("--keep-lab-dir", action="store_true",
                            help="Keep the lab directory (saved configs, certs, copied files)")
     add_json_arg(p_destroy)
+
+    # --- stop ---
+    p_stop = sub.add_parser(
+        "stop", help="Save the configs, then remove the lab's containers",
+        description="Save every node's running config, then remove the containers "
+                    "and keep the lab directory: the next deploy starts from the "
+                    "saved configs. If saving fails on a host, nothing is removed.")
+    p_stop.add_argument("topology", help="Path to the topology file the lab was deployed from")
+    add_cluster_arg(p_stop)
+    add_json_arg(p_stop)
 
     # --- save ---
     p_save = sub.add_parser("save", help="Save running configs of all lab nodes")
@@ -610,6 +621,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         )
     elif cmd in ("destroy", "teardown"):
         summary = deployer.destroy(args.topology, cleanup=not args.keep_lab_dir)
+    elif cmd == "stop":
+        summary = deployer.stop(args.topology)
     elif cmd == "save":
         summary = deployer.save(args.topology)
     elif cmd == "inspect":
@@ -648,7 +661,7 @@ def _table(rows: list[tuple]) -> list[str]:
 
 
 def _summary_text(cmd: str, summary: dict) -> str:
-    """What deploy, destroy, save or inspect did, for people (``--json`` has it all)."""
+    """What deploy, destroy, stop, save or inspect did, for people (``--json`` has it all)."""
     hosts = summary.get("hosts", {})
     if cmd == "inspect":
         out = []
@@ -677,10 +690,13 @@ def _summary_text(cmd: str, summary: dict) -> str:
         }.get(summary.get("status"), summary.get("status") or "not deployed")
     else:
         failed = any("error" in r for r in hosts.values())
-        done = {"destroy": "destroyed", "save": "configs saved"}[cmd]
+        done = {"destroy": "destroyed", "save": "configs saved",
+                "stop": "stopped, configs saved (the next deploy starts from them)"}[cmd]
         if hosts and all(r.get("status") == "not-deployed" for r in hosts.values()):
             done = "not deployed"
-        head = f"{cmd} FAILED" if failed else done
+        head = done if not failed else (
+            "NOT stopped: saving the configs failed, nothing was removed"
+            if cmd == "stop" and not summary.get("stopped") else f"{cmd} FAILED")
     out = [f"{lab}: {head}"]
 
     rows = []
