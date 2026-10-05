@@ -143,9 +143,19 @@ an operator.
   Routing tab) or a link opens its details in a panel on the right, which
   narrows the canvas instead of covering it. Drag its left edge to resize
   it; on narrow screens it opens from the bottom. A node shows its state,
-  CPU and memory, its interfaces with their peers and live state (click
-  one to select the link), the protocols it runs (click one to see it on
-  the Routing tab), and its terminal and Config diff buttons. A link
+  CPU and memory, its interfaces in one table, the protocols it runs
+  (click one to see it on the Routing tab), and its terminal and Config
+  diff buttons. The interface table lists every link end with its peer
+  and live state (click one to select the link) and, for a node whose
+  startup config could be read, every configured interface (loopbacks,
+  VLAN interfaces, port-channels and the VXLAN interface too) with its
+  addresses and VRF. Under each interface is what runs on it: its OSPF
+  area and adjacency, its BGP sessions, the VTEP and its source, the MLAG
+  peer-link and ports, its port-channel and access VLAN, and "shut" if
+  the config shuts it down. A session or adjacency is marked ✓ or ✕ from
+  the live state, and a click shows it on the Routing tab. Addresses and
+  protocols are the startup config's, as on the Routing tab; nodes
+  without a readable config (Linux hosts) list their links only. A link
   shows the state of each end and the packet capture form.
 - **Live link and node state:** while a deployed lab is open, links with
   an end down are drawn red and dashed. The link's tooltip says which

@@ -324,3 +324,44 @@ def test_gui_routing_endpoint(tmp_path, monkeypatch):
             assert resp.status == 200 and resp.headers["Cache-Control"] == "no-cache"
 
     asyncio.run(scenario())
+
+
+def test_interfaces_of_a_node_with_what_runs_on_each():
+    view = routing_view(load_topology(TOPOLOGIES / "three_router_triangle.clab.yml"))
+    rows = {r["name"]: r for r in view["interfaces"]["R1"]}
+    assert list(rows) == ["Loopback0", "Ethernet0/1", "Ethernet0/2"]
+    assert rows["Loopback0"] == {
+        "name": "Loopback0", "addresses": ["1.1.1.1/32"], "vrf": "", "shutdown": False,
+        "description": "", "link": None,
+        "uses": [{"proto": "ospf", "text": "OSPF area 0 · passive"}]}
+    # A link's end names its link; an adjacency its id, for the live state
+    wired = rows["Ethernet0/1"]
+    assert wired["addresses"] == ["10.0.12.1/24"] and wired["link"] == "link0"
+    assert wired["uses"] == [
+        {"proto": "ospf", "text": "OSPF area 0"},
+        {"proto": "ospf", "text": "OSPF adjacency with R2", "id": "ospf0"}]
+    # They are the adjacencies the Routing tab shows
+    ids = {u["id"] for node in view["interfaces"].values() for r in node for u in r["uses"]
+           if "id" in u}
+    assert ids == {a["id"] for a in view["ospf"]["adjacencies"]}
+
+
+def test_interfaces_of_an_evpn_mlag_leaf():
+    view = routing_view(load_topology(TOPOLOGIES / "evpn_mlag.clab.yml"))
+    rows = {r["name"]: r for r in view["interfaces"]["Leaf-1"]}
+    texts = {name: [u["text"] for u in r["uses"]] for name, r in rows.items()}
+    assert texts["Ethernet1"] == ["eBGP with Spine-1"]
+    assert texts["Loopback0"] == ["eBGP with Spine-1 · evpn", "eBGP with Spine-2 · evpn"]
+    assert texts["Loopback1"] == ["VTEP source"] and texts["Vxlan1"] == ["VTEP · 3 VNIs"]
+    assert texts["Ethernet3"] == ["in Port-channel10"]
+    assert texts["Port-channel10"] == ["MLAG peer-link"]
+    assert texts["Port-channel5"] == ["mlag 5", "VLAN 10"]
+    assert texts["Vlan4093"] == ["iBGP with Leaf-2"]
+    assert texts["Vlan4094"] == ["MLAG peering with Leaf-2"]
+    assert texts["Vlan10"] == ["anycast gateway"]
+    assert rows["Vlan10"]["vrf"] == "TENANT" and rows["Vlan10"]["addresses"] == ["10.10.10.1/24"]
+    assert rows["Ethernet5"]["link"] and rows["Port-channel5"]["link"] is None
+    (pair,) = [p for p in view["mlag"]["pairs"] if "Leaf-1" in p["nodes"]]
+    assert rows["Vlan4094"]["uses"][0]["id"] == pair["id"]
+    # Hosts have no config to read: the GUI shows their links only
+    assert "Host-1" not in view["interfaces"]

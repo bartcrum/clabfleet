@@ -1402,32 +1402,74 @@ function renderNodeCard() {
   syncInspector();
 }
 
-// The node's links: interface, far end and (live) state; a row selects the link
+// The node's interfaces in one table: its links (far end, live state) and,
+// where its config could be read, every configured interface with its
+// addresses and what runs on it. A row selects its link; a protocol opens
+// it in the Routing tab.
 function nodeInterfaces(name, live) {
+  const config = window.Routing?.interfaces(name) || [];
+  const byLink = new Map(config.filter((c) => c.link).map((c) => [c.link, c]));
   const rows = [];
   for (const l of S.detail.links) {
     for (const [mine, other, side] of [[l.a, l.b, "a"], [l.b, l.a, "b"]]) {
       if (mine.node !== name) continue;
       const end = live?.links?.[l.id]?.[side];
-      rows.push({ l, iface: mine.iface, peer: endpointLabel(other), state: end?.state, detail: end?.detail });
+      const c = byLink.get(l.id);
+      // The config's name for the port (Ethernet1), which is what the node calls it
+      rows.push({ l, iface: c?.name || mine.iface, wired: mine.iface, peer: endpointLabel(other),
+                  state: end?.state, detail: end?.detail, c });
     }
   }
+  const wired = new Set(rows.map((r) => r.c));
+  for (const c of config) if (!wired.has(c)) rows.push({ iface: c.name, c });
   if (!rows.length) return null;
   rows.sort((x, y) => naturalCmp(x.iface || "", y.iface || ""));
   const showState = rows.some((r) => r.state);
+  const showAddr = rows.some((r) => r.c?.addresses.length || r.c?.vrf);
+  const columns = 2 + (showState ? 1 : 0) + (showAddr ? 1 : 0);
+  if (rows.some((r) => r.c?.uses.some((u) => u.id))) window.Routing.pollLive();
+  // What runs on the interface goes on a line of its own under it: the
+  // inspector is too narrow for a fifth column
+  const uses = (r) => (r.c?.shutdown || r.c?.uses.length ? h("tr", { class: "if-uses-row" },
+    h("td", { colspan: columns }, h("div", { class: "if-uses" },
+      r.c.shutdown ? h("span", { class: "if-use shut", title: "shutdown in the config" }, "shut") : null,
+      r.c.uses.map((u) => interfaceUse(name, u))))) : null);
   return [
     h("h4", {}, "Interfaces"),
-    h("table", { class: "rt-table" },
-      h("thead", {}, h("tr", {}, h("th", {}, "Interface"), h("th", {}, "Peer"), showState ? h("th", {}, "State") : null)),
-      h("tbody", {}, rows.map((r) => h("tr", {
-        class: "go", title: `Select the link ${name}:${r.iface} ↔ ${r.peer}`,
+    h("table", { class: "rt-table if-table" },
+      h("thead", {}, h("tr", {},
+        h("th", {}, "Interface"),
+        showAddr ? h("th", {}, "Address") : null,
+        h("th", {}, "Peer"),
+        showState ? h("th", {}, "State") : null)),
+      h("tbody", {}, rows.flatMap((r) => [h("tr", r.l ? {
+        class: "go", title: `Select the link ${name}:${r.wired} ↔ ${r.peer}`,
         onclick: () => { showView("diagram"); selectLink(r.l.id); },
-      },
-        h("td", {}, r.iface),
-        h("td", {}, r.peer),
-        showState ? h("td", { class: r.state || "", title: r.detail || "" }, r.state === "down" ? `down · ${r.detail}` : r.state || "") : null)))),
+      } : {},
+        h("td", { title: [r.c?.description, r.wired && r.wired !== r.iface ? `${r.wired} in the topology` : ""].filter(Boolean).join(" · ") }, r.iface),
+        showAddr ? h("td", {},
+          (r.c?.addresses || []).map((a) => h("div", {}, a)),
+          r.c?.vrf ? h("div", { class: "muted" }, `vrf ${r.c.vrf}`) : null) : null,
+        // In a narrow inspector the peer breaks after its node, nowhere else
+        h("td", { class: "peer" }, (r.peer || "").split(/(?<=:)/).flatMap((part, i) => [i ? h("wbr") : null, h("span", {}, part)])),
+        showState ? h("td", { class: r.state || "", title: r.detail || "" }, r.state === "down" ? `down · ${r.detail}` : r.state || "") : null),
+        uses(r)]))),
   ];
 }
+
+// One thing that runs on an interface. With the Routing tab's live state,
+// a session or adjacency also says whether it is up (✓) or down (✕).
+function interfaceUse(node, u) {
+  if (!ROUTED.has(u.proto)) return h("span", { class: "if-use" }, u.text);
+  const state = u.id ? window.Routing.useState(u.proto, u.id) : "";
+  const mark = state === "up" ? "✓ " : state && state !== "unknown" ? "✕ " : "";
+  return h("button", {
+    class: `if-use go ${state}`, type: "button",
+    title: `Show it in the Routing tab${state ? ` (live: ${state})` : ""}`,
+    onclick: (ev) => { ev.stopPropagation(); window.Routing.openUse(u.proto, u.id, node); },
+  }, mark + u.text);
+}
+const ROUTED = new Set(["ospf", "bgp", "evpn", "mlag"]);  // protocols with a Routing view
 
 // ---------------------------------------------------------------------------
 // Jobs

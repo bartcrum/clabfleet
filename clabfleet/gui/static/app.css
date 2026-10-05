@@ -322,6 +322,19 @@ body.viewer .operator-only { display: none !important; }
 .insp-card .rt-table tr.go:hover td { background: var(--panel-2); }
 .insp-card .rt-table .down { color: var(--danger); }
 .insp-card .rt-table .up { color: var(--ok); }
+.insp-card .if-table td { vertical-align: top; }
+.insp-card .if-table tr:not(.if-uses-row) td:not(.peer), .insp-card .if-table .peer span { white-space: nowrap; }
+.insp-card .if-table tr:has(+ .if-uses-row) td { border-bottom: 0; padding-bottom: 0; }
+.insp-card .if-table .if-uses-row td { padding-top: 2px; }
+.insp-card .if-uses { display: flex; flex-wrap: wrap; gap: 3px; }
+.insp-card .if-use {
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; background: none;
+  font: inherit; font-size: var(--fs-xs); color: var(--text); white-space: nowrap;
+}
+.insp-card button.if-use { cursor: pointer; }
+.insp-card button.if-use:hover { border-color: var(--muted); }
+.insp-card .if-use.up { color: var(--ok); }
+.insp-card .if-use.down, .insp-card .if-use.shut { color: var(--danger); }
 .insp-card .proto-list { display: grid; gap: 2px; margin: 0 0 4px; }
 .insp-card .proto-row {
   display: grid; grid-template-columns: 44px 1fr auto; gap: 8px; align-items: baseline; width: 100%;
