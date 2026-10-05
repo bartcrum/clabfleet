@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import pytest
 
 pytest.importorskip("aiohttp")
-pytest.importorskip("cryptography")
+pytest.importorskip("jwt")
 
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
@@ -342,8 +342,8 @@ EC_JWK = {"kty": "EC", "kid": "ec-1", "crv": "P-256",
 
 
 def _jwt(claims: dict, alg: str = "RS256", kid: str = "rsa-1", key=None) -> str:
-    signed = (f"{_b64(json.dumps({'alg': alg, 'kid': kid}).encode())}."
-              f"{_b64(json.dumps(claims).encode())}")
+    header = {"alg": alg, **({"kid": kid} if kid else {})}
+    signed = f"{_b64(json.dumps(header).encode())}.{_b64(json.dumps(claims).encode())}"
     if alg == "RS256":
         sig = (key or RSA_KEY).sign(signed.encode(), padding.PKCS1v15(), hashes.SHA256())
     elif alg == "PS256":
@@ -357,60 +357,96 @@ def _jwt(claims: dict, alg: str = "RS256", kid: str = "rsa-1", key=None) -> str:
     return f"{signed}.{_b64(sig)}"
 
 
+ISSUER = "https://id.example.com"
+
+
+def _claims(**changes):
+    """An ID token's claims as a provider would send them for nonce n1;
+    None leaves a claim out."""
+    now = int(time.time())
+    claims = {"iss": ISSUER, "aud": "clabfleet", "sub": "u1", "nonce": "n1",
+              "iat": now - 5, "exp": now + 300, **changes}
+    return {k: v for k, v in claims.items() if v is not None}
+
+
+def _verify(token, keys=None):
+    return oidc.verify_id_token(token, [EC_JWK, RSA_JWK] if keys is None else keys,
+                                ISSUER, "clabfleet", "n1")
+
+
 def test_id_token_signatures():
-    claims = {"sub": "1", "name": "x"}
-    keys = [EC_JWK, RSA_JWK]
+    """Tokens are signed here with cryptography alone, so the signer and
+    the verifier (PyJWT) are not the same code."""
+    claims = _claims()
     for alg, kid in (("RS256", "rsa-1"), ("PS256", "rsa-1"), ("ES256", "ec-1")):
-        assert oidc.verify_jwt(_jwt(claims, alg, kid), keys) == claims
+        assert _verify(_jwt(claims, alg, kid)) == claims
+    # Without a key id in the token, every key of the right kind is tried
+    assert _verify(_jwt(claims, "ES256", None)) == claims
 
     token = _jwt(claims)
     head, body, sig = token.split(".")
-    forged = _b64(json.dumps({"sub": "2", "name": "x"}).encode())
+    forged = _b64(json.dumps({**claims, "sub": "u2"}).encode())
     stranger = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     for bad, error in (
             (f"{head}.{forged}.{sig}", "not from the provider's keys"),
             (_jwt(claims, key=stranger), "not from the provider's keys"),
             (_jwt(claims, kid="rsa-2"), "not from the provider's keys"),
             (_jwt(claims, "ES256", "rsa-1"), "not from the provider's keys"),
+            (_jwt(claims, "RS256", "ec-1"), "not from the provider's keys"),
             (_jwt(claims, "none"), "'none', which is not accepted"),
             (_jwt(claims, "HS256"), "'HS256', which is not accepted"),
             (f"{head}.{body}", "not a signed JWT"),
-            ("not a token", "not a JWT")):
+            ("not a token", "not a signed JWT")):
         with pytest.raises(LoginRefused, match=error):
-            oidc.verify_jwt(bad, keys)
+            _verify(bad)
+    # A token "signed" with the public key as an HMAC secret is not a way in
+    import hashlib
+    import hmac
+    from cryptography.hazmat.primitives import serialization
+    pem = RSA_KEY.public_key().public_bytes(serialization.Encoding.PEM,
+                                            serialization.PublicFormat.SubjectPublicKeyInfo)
+    signed = f"{_b64(json.dumps({'alg': 'HS256', 'kid': 'rsa-1'}).encode())}.{body}"
+    confused = f"{signed}.{_b64(hmac.new(pem, signed.encode(), hashlib.sha256).digest())}"
+    with pytest.raises(LoginRefused, match="which is not accepted"):
+        _verify(confused)
+    # A key marked for encryption, or for another algorithm, signs nothing
+    for marked in ({**RSA_JWK, "use": "enc"}, {**RSA_JWK, "alg": "RS512"}):
+        with pytest.raises(LoginRefused, match="not from the provider's keys"):
+            _verify(token, [marked])
     # A short RSA key signs nothing we accept
     weak = rsa.generate_private_key(public_exponent=65537, key_size=1024)
     weak_jwk = {"kty": "RSA", "kid": "rsa-1", "n": _num(weak.public_key().public_numbers().n),
                 "e": _num(65537)}
-    with pytest.raises(LoginRefused):
-        oidc.verify_jwt(_jwt(claims, key=weak), [weak_jwk])
+    with pytest.raises(LoginRefused, match="not from the provider's keys"):
+        _verify(_jwt(claims, key=weak), [weak_jwk])
 
 
 def test_id_token_claims():
-    now = 1_800_000_000
-    good = {"iss": "https://id.example.com", "aud": "clabfleet", "sub": "u1", "nonce": "n1",
-            "iat": now - 5, "exp": now + 300}
+    now = int(time.time())
 
     def check(**changes):
-        claims = {k: v for k, v in {**good, **changes}.items() if v is not None}
-        oidc.check_id_token(claims, "https://id.example.com", "clabfleet", "n1", now)
+        return _verify(_jwt(_claims(**changes)))
 
     check()
     check(aud=["clabfleet"], azp="clabfleet")
     check(exp=now - 30)  # within the clocks' allowance
     for changes, error in (
-            ({"iss": "https://evil.example.com"}, "not https://id.example.com"),
+            ({"iss": "https://evil.example.com"}, "not from https://id.example.com"),
+            ({"iss": None}, "no 'iss' claim"),
             ({"aud": "another"}, "for another application"),
+            ({"aud": None}, "no 'aud' claim"),
             ({"aud": ["clabfleet", "another"]}, "issued to another application"),
             ({"azp": "another"}, "issued to another application"),
             ({"exp": now - 61}, "expired"),
-            ({"exp": None}, "expired"),
-            ({"exp": "tomorrow"}, "expired"),
+            ({"exp": None}, "no 'exp' claim"),
+            ({"exp": "tomorrow"}, "not valid"),
+            ({"iat": None}, "no 'iat' claim"),
             ({"iat": now + 600}, "not valid yet"),
             ({"nbf": now + 600}, "not valid yet"),
             ({"nonce": "n2"}, "does not belong to this login"),
             ({"nonce": None}, "does not belong to this login"),
-            ({"sub": ""}, "names no subject")):
+            ({"sub": ""}, "names no subject"),
+            ({"sub": None}, "no 'sub' claim")):
         with pytest.raises(LoginRefused, match=error):
             check(**changes)
 
@@ -668,7 +704,7 @@ def test_oidc_tokens_that_are_refused(tmp_path):
                 (lambda c: _jwt(c, key=stranger), good, "not from the provider's keys"),
                 (lambda c: _jwt(c, "none"), good, "which is not accepted"),
                 (_jwt, {**good, "aud": "another-app"}, "for another application"),
-                (_jwt, {**good, "iss": "https://evil.example.com"}, "is from"),
+                (_jwt, {**good, "iss": "https://evil.example.com"}, "is not from"),
                 (_jwt, {**good, "nonce": "replayed"}, "does not belong to this login"),
                 (_jwt, {**good, "exp": 1}, "expired"),
                 (_jwt, {**good, "groups": ["sales"]},

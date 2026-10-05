@@ -448,7 +448,8 @@ clabfleet directory check --user alice    # LDAP: alice's entry, and the role he
   at start-up; with `--public-url`, that address). The login page gets a
   **Log in with ...** button. The GUI uses the authorization code flow
   with PKCE, checks the ID token's signature against the provider's keys
-  and its issuer, audience, expiry and nonce, and only finishes a login
+  and its issuer, audience, expiry and nonce (with the PyJWT library;
+  only public-key signatures are accepted), and only finishes a login
   in the browser that started it. A public client without a secret works
   too (leave `client_secret` out).
 
