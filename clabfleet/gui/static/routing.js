@@ -1125,6 +1125,18 @@ window.Routing = {
   health: rtHealth,
   focus: rtFocus,
   nodeSummary: rtNodeSummary,
+  // A node's configured interfaces with what runs on each (null: its
+  // config was not read), for the inspector's table
+  interfaces(name) {
+    const d = RT.data;
+    return d && !d.error && RT.topo === rtTopoId() ? d.interfaces?.[name] || null : null;
+  },
+  // The live state of an adjacency, session or pair by its id ("" if not known)
+  useState(proto, id) { return rtFreshLive()?.[proto]?.[id]?.state || ""; },
+  // Open what runs on an interface: its session, or the node in that protocol's view
+  openUse(proto, id, node) {
+    rtFocus(proto, id ? { type: "edge", id } : { type: "node", id: node }, false);
+  },
   // Keep the live state fresh while the Health panel is open (called on
   // every render, so at most one request per few seconds)
   pollLive() {

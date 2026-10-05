@@ -290,6 +290,7 @@ projectors for training sessions.
    **Done** (branch `gui-batch3`): a Run tab (operators): node globs, mode, command; outputs as a list, side by side, or diffed against the first node; audited.
 9. **Node detail page — S.** Interfaces with config IPs, live state and
    the protocols on each, in one table. Fits the inspector (B2).
+   **Done** (branch `node-detail-table`): the inspector's interface table lists every configured interface (loopbacks, SVIs, port-channels, the VXLAN interface) with addresses and VRF, the peer and live state of link ends, and under each what runs on it (OSPF area and adjacency, BGP sessions, VTEP, MLAG, port-channel, VLAN, shut), marked up or down from the live state and opening in the Routing tab.
 10. **New lab wizard — M.** The `clabfleet new` templates as a form with
     a live diagram preview before writing the file.
     **Done as a drawing builder** (branch `topology-builder`): New lab from

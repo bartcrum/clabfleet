@@ -638,6 +638,82 @@ def _number(items: list[dict], prefix: str) -> list[dict]:
     return items
 
 
+# --- Interfaces ---------------------------------------------------------------
+
+def _interfaces(lab: _Lab, ospf: Optional[dict], bgp: Optional[dict], evpn: Optional[dict],
+                mlag: Optional[dict]) -> dict:
+    """Every configured interface of each parsed node, with its addresses,
+    the link it is an end of, and what runs on it.
+
+    ``uses`` are ``{"proto", "text"}``, with the ``id`` of the adjacency,
+    session or pair where there is one (its live state can be looked up by
+    it). Protocols come from the views built above, so the table never
+    disagrees with the Routing tab."""
+    uses: dict[tuple[str, str], list[dict]] = {}
+
+    def use(node: str, iface: str, proto: str, text: str, ref: str = "") -> None:
+        entry = {"proto": proto, "text": text}
+        if ref:
+            entry["id"] = ref
+        uses.setdefault((node, canonical(iface)), []).append(entry)
+
+    for node, o in ((ospf or {}).get("nodes") or {}).items():
+        for i in o["interfaces"]:
+            extras = [f"cost {i['cost']}"] if i["cost"] is not None else []
+            if i["passive"]:
+                extras.append("passive")
+            use(node, i["name"], "ospf", " · ".join([f"OSPF area {i['area']}", *extras]))
+    for adj in (ospf or {}).get("adjacencies") or []:
+        for mine, other in ((adj["a"], adj["b"]), (adj["b"], adj["a"])):
+            use(mine["node"], mine["iface"], "ospf", f"OSPF adjacency with {other['node']}", adj["id"])
+    for ses in (bgp or {}).get("sessions") or []:
+        families = [f for f in ses["families"] if f != "ipv4"]
+        for mine, other in ((ses["a"], ses["b"]), (ses["b"], ses["a"])):
+            if not mine.get("node") or not mine.get("iface"):
+                continue  # the far end is outside the lab
+            peer = other.get("node") or other.get("ip") or "?"
+            kind = "eBGP" if ses["type"] == "ebgp" else "iBGP"
+            use(mine["node"], mine["iface"], "bgp",
+                " · ".join([f"{kind} with {peer}", *families]), ses["id"])
+    for node, vtep in ((evpn or {}).get("vteps") or {}).items():
+        vnis = len(vtep["l2_vnis"]) + len(vtep["l3_vnis"])
+        use(node, vtep["interface"], "evpn", f"VTEP · {vnis} VNI{'' if vnis == 1 else 's'}")
+        if vtep["source_interface"]:
+            use(node, vtep["source_interface"], "evpn", "VTEP source")
+    for pair in (mlag or {}).get("pairs") or []:
+        for side, far in ((pair["a"], pair["b"]), (pair["b"], pair["a"])):
+            if side["local_interface"]:
+                use(side["node"], side["local_interface"], "mlag",
+                    f"MLAG peering with {far['node']}", pair["id"])
+            if side["peer_link"]:
+                use(side["node"], side["peer_link"], "mlag", "MLAG peer-link", pair["id"])
+
+    out = {}
+    for node, cfg in sorted(lab.configs.items()):
+        rows = []
+        for iface in cfg.interfaces.values():
+            mine = list(uses.get((node, iface.name), []))
+            if iface.mlag_id is not None:
+                mine.append({"proto": "mlag", "text": f"mlag {iface.mlag_id}"})
+            if iface.channel_group is not None:
+                mine.append({"proto": "l2", "text": f"in Port-channel{iface.channel_group}"})
+            if iface.access_vlan is not None:
+                mine.append({"proto": "l2", "text": f"VLAN {iface.access_vlan}"})
+            if iface.anycast:
+                mine.append({"proto": "evpn", "text": "anycast gateway"})
+            rows.append({
+                "name": iface.name,
+                "addresses": [str(a) for a in iface.addresses],
+                "vrf": iface.vrf,
+                "shutdown": iface.shutdown,
+                "description": iface.description,
+                "link": lab.link_of.get((node, iface.name)),
+                "uses": mine,
+            })
+        out[node] = rows
+    return out
+
+
 # --- Entry point --------------------------------------------------------------
 
 def routing_view(topo: Topology) -> dict:
@@ -659,6 +735,8 @@ def routing_view(topo: Topology) -> dict:
         "port_channels": {name: pcs for name, cfg in sorted(lab.configs.items())
                           if (pcs := {i.name: cfg.port_channel_members(i.name) for i in cfg.interfaces.values()
                                       if i.name.lower().startswith("port-channel")})},
+        # Per node, its configured interfaces and what runs on each
+        "interfaces": _interfaces(lab, ospf, bgp, evpn, mlag),
         "unparsed": lab.unparsed,
         "problems": lab.problems,
         # Which node owns each address (anycast gateways left out): resolves
