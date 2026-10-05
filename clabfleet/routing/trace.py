@@ -292,10 +292,13 @@ def trace(lab: Lab, ask: Callable[[str, str], str], src: str, dst: str,
     """Hops from ``src`` towards address ``dst`` (owned by ``dst_node`` if
     known). Returns {"reached", "hops": [{"node", "vrf", "route", "error"?}],
     "edges": [{"a", "b", "a_iface", "b_iface", "overlay", "vni", "flood"}]}."""
+    # IPv4 only, and in its plain form: the address goes into commands on
+    # the nodes. (An IPv6 address may carry a scope id of any text, which a
+    # shell would run.)
     try:
-        ipaddress.ip_address(dst)
+        dst = str(ipaddress.IPv4Address(dst))
     except ValueError:
-        raise TraceError(f"'{dst}' is not an IP address") from None
+        raise TraceError(f"'{dst}' is not an IPv4 address") from None
     hops, edges = [], []
     seen: set[tuple[str, Optional[str]]] = set()
     # node, VRF, MAC to bridge (after an L2 VXLAN hop), MAC known for dst,
