@@ -43,7 +43,7 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <span>clabfleet</span>
     </div>
-    <div id="hosts" class="hosts" aria-label="Lab hosts"></div>
+    <div id="hosts" class="hosts" aria-label="Lab hosts: open the Hosts page"></div>
     <span id="whoami" class="whoami small" hidden></span>
     <button id="users" class="btn ghost small" hidden title="Add operators and viewers, change roles, reset logins"><svg class="ico" aria-hidden="true"><use href="#i-users"/></svg>Users</button>
     <button id="password" class="btn ghost small" hidden title="Change your password"><svg class="ico" aria-hidden="true"><use href="#i-key"/></svg>Password</button>
@@ -90,6 +90,16 @@
         <div id="welcome-labs" class="cards"><div class="card skeleton"></div><div class="card skeleton"></div></div>
         <h2 class="operator-only">Start a new lab</h2>
         <div id="welcome-new" class="cards operator-only"></div>
+      </div>
+
+      <!-- Hosts: capacity, the labs on each host, labs across hosts (hosts.js) -->
+      <div id="cluster" class="welcome cluster" hidden>
+        <div class="cluster-head">
+          <h1 id="cluster-title" tabindex="-1">Hosts</h1>
+          <button id="cluster-close" class="btn ghost small" type="button">Back to the start page</button>
+        </div>
+        <p id="cluster-summary" class="muted"></p>
+        <div id="cluster-hosts" class="host-cards"></div>
       </div>
 
       <div id="lab" class="lab" hidden>
@@ -481,6 +491,7 @@
   <script src="/static/lanes.js"></script>
   <script src="/static/racks.js"></script>
   <script src="/static/annotations.js"></script>
+  <script src="/static/hosts.js"></script>
   <script src="/static/main.js"></script>
 </body>
 </html>

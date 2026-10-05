@@ -904,9 +904,14 @@ class Workspace:
                                len(removed), host.name, ", ".join(removed))
 
     def host_status(self) -> list[dict]:
+        """Each host as it is now: reachable, containerlab's version, its
+        CPUs and memory, and what placement may use of them (``max_cpu``,
+        ``max_ram``; ``max_ram_set`` when the inventory sets the RAM, which
+        is when placement reserves running labs' RAM against it)."""
         result = []
         for host in copy.deepcopy(self.cluster.hosts):
             entry = {"name": host.name, "host": host.host, "local": host.is_local}
+            ram_set = host.max_ram > 0
             try:
                 runner = self.runner(self.host(host.name))
                 facts = probe_host_resources(runner, host)
@@ -918,6 +923,9 @@ class Workspace:
                     mem_available_mb=facts.get("MemAvailable_mb"),
                     vtep=host.vtep,
                     tags=host.tags,
+                    max_cpu=host.max_cpu,  # probed into the copy when the inventory has none
+                    max_ram=host.max_ram,
+                    max_ram_set=ram_set,
                 )
             except Exception as exc:
                 entry.update(ok=False, error=str(exc))

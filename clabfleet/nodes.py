@@ -143,6 +143,16 @@ def terminal_stop_command(container: str, tag: str) -> list[str]:
     return ["docker", "exec", container, "sh", "-c", TERMINAL_STOP, "clabfleet-stop", tag]
 
 
+def container_estimate(labels: dict, kind: str) -> tuple[float, int]:
+    """Estimated (vCPU, RAM MB) of a lab container: its ``lab.cpu`` /
+    ``lab.ram`` labels when it has them, else the per-kind estimate."""
+    cpu, ram = kind_estimate(kind)
+    try:
+        return float(labels.get(LABEL_CPU, cpu)), int(labels.get(LABEL_RAM, ram))
+    except (TypeError, ValueError):
+        return cpu, ram
+
+
 def parse_inspect(data: dict, host_name: str) -> list[dict]:
     """Normalise `containerlab inspect --all --details --format json` output."""
     if not isinstance(data, dict):
@@ -153,12 +163,16 @@ def parse_inspect(data: dict, host_name: str) -> list[dict]:
             labels = c.get("Labels") or {}
             net = c.get("NetworkSettings") or {}
             names = c.get("Names") or [c.get("name", "")]
+            kind = labels.get("clab-node-kind") or c.get("kind", "")
+            cpu, ram = container_estimate(labels, kind)
             containers.append({
                 "id": c.get("Id") or c.get("ID") or c.get("container_id", ""),
                 "lab": labels.get("containerlab", lab_name),
                 "node": labels.get("clab-node-name") or names[0],
                 "container": names[0],
-                "kind": labels.get("clab-node-kind") or c.get("kind", ""),
+                "kind": kind,
+                "cpu": cpu,  # what placement counts for it (an estimate)
+                "ram": ram,
                 "image": c.get("Image") or c.get("image", ""),
                 "state": c.get("State") or c.get("state", ""),
                 "status": c.get("Status") or c.get("status", ""),
@@ -220,13 +234,7 @@ def running_usage(data: dict, exclude_lab: str | None = None) -> dict[str, dict]
             state = c.get("State") or c.get("state", "")
             if lab == exclude_lab or state != "running":
                 continue
-            kind = labels.get("clab-node-kind") or c.get("kind", "")
-            cpu, ram = kind_estimate(kind)
-            try:
-                cpu = float(labels.get(LABEL_CPU, cpu))
-                ram = int(labels.get(LABEL_RAM, ram))
-            except (TypeError, ValueError):
-                pass
+            cpu, ram = container_estimate(labels, labels.get("clab-node-kind") or c.get("kind", ""))
             entry = usage.setdefault(lab, {"nodes": 0, "cpu": 0.0, "ram": 0})
             entry["nodes"] += 1
             entry["cpu"] += cpu
