@@ -103,6 +103,30 @@ def test_find_node_only_in_workspace_labs(tmp_path, monkeypatch):
     assert "not in this workspace" in asyncio.run(scenario())
 
 
+def test_host_status_says_what_placement_may_use(tmp_path, monkeypatch):
+    """For the Hosts page: the host's own numbers, and the capacity
+    placement works with (probed, or the inventory's)."""
+    class Probed:
+        def run(self, args, **kwargs):
+            out = {"nproc": "8\n", "cat": "MemTotal: 16384000 kB\nMemAvailable: 8192000 kB\n",
+                   "containerlab": "    version: 0.79.0\n"}[args[0]]
+            return type("Result", (), {"exit_code": 0, "stdout": out, "stderr": ""})()
+
+    def status(**host):
+        ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost", **host)]), [tmp_path])
+        monkeypatch.setattr(ws, "runner", lambda h: Probed())
+        (entry,) = ws.host_status()
+        return entry
+
+    probed = status()
+    assert probed["ok"] and probed["version"] == "0.79.0" and probed["cpus"] == 8
+    assert (probed["mem_total_mb"], probed["mem_available_mb"]) == (16000, 8000)
+    assert (probed["max_cpu"], probed["max_ram"], probed["max_ram_set"]) == (8, 8000, False)
+    # The inventory's limits count before the host's own numbers
+    limited = status(max_cpu=4, max_ram=4096)
+    assert (limited["max_cpu"], limited["max_ram"], limited["max_ram_set"]) == (4, 4096, True)
+
+
 def test_topology_sketch_for_thumbnails():
     topo = topology_from_dict({
         "name": "t",
@@ -170,9 +194,13 @@ def test_parse_inspect_details():
     }]}
     assert parse_inspect(data, "h1") == [{
         "id": "", "lab": "lab1", "node": "r1", "container": "clab-lab1-r1", "kind": "arista_ceos",
+        "cpu": 1, "ram": 2048,  # the kind's estimate, as placement counts it
         "image": "ceos:4.35.6M", "state": "running", "status": "Up 5 minutes",
         "ipv4": "172.20.20.2", "topo_file": "/x/lab1.clab.yml", "host": "h1",
     }]
+    # A node's own lab.cpu / lab.ram labels count before the kind's estimate
+    data["lab1"][0]["Labels"].update({"lab.cpu": "4", "lab.ram": "8192"})
+    assert [(c["cpu"], c["ram"]) for c in parse_inspect(data, "h1")] == [(4.0, 8192)]
     assert parse_inspect({}, "h1") == []
 
 

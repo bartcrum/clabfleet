@@ -51,6 +51,24 @@ an operator.
   and links (labs of up to 60 nodes). Destroy and Redeploy
   ask in a dialog that says what will be removed; labs of 10 or more
   nodes ask you to type the lab name.
+- **Hosts page:** click a host in the top bar (or Ctrl+K, "Hosts page")
+  for a card per lab host: whether it answers, its containerlab version,
+  VTEP address and tags, and what is on it.
+  - **Memory** is measured on the host: in use of total.
+  - **vCPU** is what placement counts for the running lab nodes there (a
+    node's `lab.cpu` label, else an estimate for its kind) of what the
+    host may use (`max_cpu` in the cluster file, else its CPUs). It is
+    not CPU load. The bar turns amber from 80 % and says "over capacity"
+    past the limit.
+  - **RAM for labs** is shown when the cluster file sets `max_ram`, which
+    is when placement reserves running labs' RAM against it.
+  - **Labs:** each lab with nodes on the host, how many of them run, what
+    is counted for them, and the other hosts the lab is also on. The
+    line at the top says how many labs span hosts. Click a lab to open
+    it.
+
+  The page follows the same reads as the rest of the GUI: hosts every 30
+  seconds, labs every 5. A host that does not answer shows the error.
 - **Sidebar:** every `*.clab.yml` under the current directory (or each
   `--dir`), with live state, plus any other labs running on your hosts.
   Filter it with the box at the top; deployed labs come first, with a ring

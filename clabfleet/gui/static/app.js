@@ -415,11 +415,15 @@ async function refreshHosts() {
       const meta = hst.ok
         ? `clab ${hst.version || "missing"} · ${hst.cpus ?? "?"} CPU · ${fmtMem(hst.mem_available_mb)} free`
         : "unreachable";
-      return h("span", { class: "host-chip", title: hst.error || hst.host },
+      return h("button", {
+        class: "host-chip", type: "button", onclick: () => window.Hosts?.show(),
+        title: `${hst.error || hst.host}: capacity and labs on the Hosts page`,
+      },
         h("span", { class: `dot ${hst.ok && hst.version ? "running" : "error"}` }),
         h("span", {}, hst.name),
         h("span", { class: "meta" }, meta));
     }));
+    window.Hosts?.render();
   } catch (e) {
     box.replaceChildren(h("span", { class: "host-chip" }, `hosts: ${e.message}`));
   }
@@ -586,6 +590,7 @@ function renderSidebar() {
   $("#topo-list").replaceChildren(...items);
 
   renderWelcome();
+  window.Hosts?.render();
   const others = [...new Set(allContainers().map((c) => c.lab))].filter((l) => !topoNames.has(l));
   $("#others-section").hidden = !others.length;
   $("#other-list").replaceChildren(...others.map((lab) => {
@@ -791,6 +796,7 @@ async function selectTopology(id) {
   window.Lanes?.reset();
   window.Annotations?.reset();
   S.selected = { type: "topo", id };
+  window.Hosts?.close();
   S.selectedNode = null;
   try {
     S.detail = await api(`/api/topologies/${encodeURIComponent(id).replace(/%2F/g, "/")}`);
@@ -842,6 +848,7 @@ async function selectOtherLab(lab) {
   if (!(await confirmDiscard())) return;
   window.Builder?.reset();
   S.selected = { type: "lab", lab };
+  window.Hosts?.close();
   S.detail = null;
   S.live = null;
   S.selectedNode = null;

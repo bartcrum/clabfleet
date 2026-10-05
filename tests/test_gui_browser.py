@@ -55,14 +55,16 @@ def _fake_lab(monkeypatch, ws):
     containers = [{
         "lab": topo.name, "node": n, "state": "running", "status": "Up 2 minutes", "ready": True,
         "kind": topo.effective_node(n)["kind"], "host": "localhost", "container": f"clab-{topo.name}-{n}",
+        "cpu": 1.0, "ram": 512,
         "image": topo.effective_node(n).get("image", ""), "ipv4": f"172.20.20.{i + 2}",
         "topo_file": str(TOPOLOGIES / "spine_leaf.clab.yml"),
     } for i, n in enumerate(topo.nodes)]
     monkeypatch.setattr(Workspace, "runtime", lambda self, max_age=0: [
         HostState("localhost", ok=True, containers=containers)])
     monkeypatch.setattr(Workspace, "host_status", lambda self: [
-        {"name": "localhost", "host": "localhost", "ok": True, "version": "0.79.0", "cpus": 8,
-         "mem_available_mb": 8000, "error": None}])
+        {"name": "localhost", "host": "localhost", "local": True, "ok": True, "version": "0.79.0",
+         "cpus": 8, "mem_total_mb": 16000, "mem_available_mb": 8000, "max_cpu": 8, "max_ram": 8000,
+         "max_ram_set": False, "vtep": None, "tags": [], "error": None}])
     now = time.time
     monkeypatch.setattr(Workspace, "live_state", lambda self, topo_id: {
         "updated": now(), "interval": 5, "nodes": {}, "links": {}, "errors": {}, "refreshing": False})
@@ -187,6 +189,23 @@ async def steps(page):
     # Start page with the lab cards
     await page.until("document.querySelectorAll('#welcome-labs .card:not(.skeleton)').length === 2")
     await page.until("document.querySelectorAll('#topo-list .lab-item').length === 2")
+    # Hosts page, from the host chip: the host's capacity and the lab on it
+    await page.until("!!document.querySelector('button.host-chip')")
+    await page.js("document.querySelector('button.host-chip').click()")
+    await page.until("!document.querySelector('#cluster').hidden && "
+                     "document.querySelectorAll('.host-card').length === 1")
+    assert await page.js("document.querySelector('#empty').hidden") is True
+    assert await page.js("document.querySelector('#cluster-summary').textContent") == (
+        "1 host · 1 lab deployed")
+    assert await page.js("document.querySelectorAll('.host-card .meter').length") == 2  # memory, vCPU
+    meters = await page.js("document.querySelector('.meters').innerText")
+    assert "7.8 GB of 15.6 GB in use" in meters
+    # Ten nodes at one vCPU each on a host that may use eight
+    assert "10 of 8 counted for running labs" in meters and "over capacity" in meters
+    assert "spine-leaf-fabric" in await page.js("document.querySelector('.host-labs').innerText")
+    await page.js("document.querySelector('#cluster-close').click()")
+    assert await page.js("document.querySelector('#empty').hidden") is False
+    assert await page.js("document.querySelector('#cluster').hidden") is True
     # The deployed lab: its diagram, a node face per node, fresh live data
     await page.js("selectTopology('spine_leaf.clab.yml')")
     await page.until("document.querySelectorAll('#diagram .node').length === 10")

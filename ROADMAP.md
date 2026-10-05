@@ -223,6 +223,11 @@ websocket plumbing in `clabfleet/gui/terminals.py`.
 
 ### 3.5 Cluster view page — S
 
+**Done.** The Hosts page, opened from a host in the top bar: per host,
+memory in use (measured), the vCPU placement counts for its running lab
+nodes against what the host may use (and RAM when the inventory sets
+`max_ram`), the labs on it, and the other hosts each lab is also on.
+
 A hosts page with per-host capacity bars, running labs, and which labs
 span hosts, built on `Workspace.host_status()`.
 

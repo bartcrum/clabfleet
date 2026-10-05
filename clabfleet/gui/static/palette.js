@@ -33,6 +33,7 @@ function buildCommands() {
       if (!document.querySelector(`.tab[data-view="${view}"]`)?.hidden) add("Go to", `${label} tab`, () => showView(view));
     }
     add("Go to", "Health panel", () => openHealth());
+    add("Go to", "Hosts page", () => window.Hosts?.show());
     add("Go to", "Activity panel", () => activatePane("activity", true));
   }
 

@@ -111,6 +111,9 @@ button { font: inherit; color: inherit; }
   background: var(--panel-2); font-size: 12px;
 }
 .host-chip .meta { color: var(--muted); }
+button.host-chip { cursor: pointer; color: inherit; font-family: inherit; }
+button.host-chip:hover { border-color: var(--muted); }
+button.host-chip:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .whoami { color: var(--muted); white-space: nowrap; }
 .whoami b { color: var(--text); font-weight: 600; }
 
@@ -808,6 +811,31 @@ body:not(.viewer) .diagram .anno { cursor: move; }
 .card .mini circle.host { fill: var(--muted); }
 .card.new { border-style: dashed; background: transparent; }
 .card .ico { margin: 0; }
+
+/* ---------- hosts page ---------- */
+.cluster-head { display: flex; align-items: center; gap: 12px; }
+.cluster-head h1 { margin: 0; flex: 1; outline: none; }
+.host-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; align-items: start; }
+.host-card {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px 16px; min-width: 0;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.host-card p { margin: 0; }
+.host-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.host-head h2 { margin: 0; font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text); }
+.meters, .meter-row { display: grid; grid-template-columns: minmax(0, 1fr); }
+.meters { gap: 10px; }
+.meter-row { gap: 3px; }
+.meter-text { display: flex; gap: 8px; align-items: baseline; font-size: 12px; flex-wrap: wrap; }
+.meter-text b { min-width: 52px; }
+.meter-over { color: var(--danger); font-weight: 600; }
+.meter { height: 8px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; }
+.meter-fill { height: 100%; background: var(--action); }
+.meter.high .meter-fill { background: var(--warn); }
+.meter.over .meter-fill { background: var(--danger); }
+table.host-labs { font-size: 12px; }
+table.host-labs th, table.host-labs td { padding: 6px 10px 6px 0; }
+table.host-labs th { white-space: nowrap; }
 
 /* ---------- accessibility (E1, E2) ---------- */
 .sr-only {
