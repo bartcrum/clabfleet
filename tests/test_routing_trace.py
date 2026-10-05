@@ -486,3 +486,110 @@ def test_a_switchs_own_address_on_a_subnet_is_reached():
     })
     r = trace(lab(), ask, "H1", "10.20.20.9")
     assert not r["reached"] and ("L1", "show ip arp vrf TENANT 10.20.20.9 | json") in ask.asked
+
+
+INJECTIONS = ["fe80::1%$(id)", "fe80::1%eth0\nbash id", "::1", "fe80::1%`id`", "10.0.0.1;id",
+              "10.0.0.1 | bash", "$(id)", "10.0.0.1\nbash"]
+
+
+def test_only_a_plain_ipv4_address_goes_into_commands():
+    """An IPv6 address may carry a scope id of any text ("fe80::1%$(id)"),
+    which Python accepts as an address and a shell on a node would run."""
+    for dst in INJECTIONS:
+        ask = asker({})
+        with pytest.raises(TraceError, match="is not an IPv4 address"):
+            trace(lab(), ask, "H1", dst)
+        assert ask.asked == [], dst  # no node was asked anything
+    # Its plain form is what is used
+    ask = asker({("H1", "ip route get 10.0.0.1"): "local 10.0.0.1 dev lo"})
+    assert trace(lab(), ask, "H1", "10.0.0.1")["reached"]
+    assert ask.asked == [("H1", "ip route get 10.0.0.1")]
+
+
+def test_node_commands_are_plain_text_and_run_without_a_shell(tmp_path, monkeypatch):
+    from clabfleet.cluster import ClusterConfig, HostInfo
+    from clabfleet.gui import state
+    from clabfleet.gui.state import HostState, Workspace
+    from clabfleet.runner import CommandResult
+
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    containers = [
+        {"lab": "t", "node": "H1", "state": "running", "kind": "linux", "host": "localhost",
+         "container": "clab-t-H1"},
+        {"lab": "t", "node": "L1", "state": "running", "kind": "arista_ceos", "host": "localhost",
+         "container": "clab-t-L1"}]
+    monkeypatch.setattr(ws, "_recent_runtime",
+                        lambda: [HostState("localhost", ok=True, containers=containers)])
+    ran = []
+
+    class Recorder:
+        def run(self, args, **kwargs):
+            ran.append(list(args))
+            return CommandResult(0, "ok", "")
+
+    monkeypatch.setattr(ws, "runner", lambda host: Recorder())
+
+    # A Linux node: the program and its arguments, with no shell to expand anything
+    assert ws.node_command("t", "H1", "ip route get 10.0.0.1") == "ok"
+    assert ran == [["timeout", "15", "docker", "exec", "clab-t-H1", "ip", "route", "get", "10.0.0.1"]]
+    assert "sh" not in ran[0]
+    # cEOS: one command for its CLI
+    ran.clear()
+    ws.node_command("t", "L1", "show ip route vrf all 10.0.0.1 | json")
+    assert ran[0][-2:] == ["-c", "show ip route vrf all 10.0.0.1 | json"]
+
+    # Anything that could be a second command, or be expanded, is refused on
+    # every kind of node before anything runs: also when it comes out of
+    # another node's answer (a VRF or interface name, a next hop)
+    ran.clear()
+    for node in ("H1", "L1"):
+        for command in ("ip route get fe80::1%$(id)", "show ip route 10.0.0.1\nbash id",
+                        "show ip arp vrf X;bash 10.0.0.1 | json", "ip neigh show `id`",
+                        "show ip interface Vlan10 && id", "show vrf 'x'", "show ip route \"x\"",
+                        "ip route get 10.0.0.1 > /tmp/x", "show ip route\t10.0.0.1", ""):
+            with pytest.raises(ValueError, match="unexpected characters"):
+                ws.node_command("t", node, command)
+    assert ran == []
+    # Every command the GUI builds is plain text
+    for command in ("show ip route vrf all 10.0.0.1 | json", "show running-config diffs",
+                    "show mac address-table address 00:1c:73:2c:6c:8a | json",
+                    "show ip interface Port-Channel10 | json", "show ip interface Ethernet1/1 | json",
+                    "ip -o link show master bond0", "ip -o -4 addr show",
+                    "show bgp evpn route-type ip-prefix ipv4 detail | json"):
+        assert state.SAFE_COMMAND.fullmatch(command), command
+    ws.close()
+
+
+def test_a_viewer_cannot_inject_through_the_trace(tmp_path, monkeypatch):
+    """The whole way in: /api/trace as a viewer, with the real walk."""
+    import asyncio
+
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from clabfleet.cluster import ClusterConfig, HostInfo
+    from clabfleet.gui import server
+    from clabfleet.gui.auth import UserStore
+    from clabfleet.gui.state import Workspace
+
+    (tmp_path / "t.clab.yml").write_text(
+        "name: t\ntopology:\n  nodes:\n    R1: {kind: linux, image: a}\n")
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    viewer = UserStore(tmp_path / "users.yaml")
+    token = viewer.add("vic", "viewer")
+    asked = []
+    monkeypatch.setattr(Workspace, "node_command",
+                        lambda self, lab, node, command, shell=True: asked.append(command) or "")
+
+    async def scenario():
+        async with TestClient(TestServer(server.create_app(ws, users=viewer))) as client:
+            await client.post("/login", json={"token": token})
+            for dst in INJECTIONS:
+                resp = await client.post("/api/trace/t.clab.yml", json={"src": "R1", "dst": dst})
+                assert resp.status == 400, dst
+                assert "is not an IPv4 address" in await resp.text()
+
+    asyncio.run(scenario())
+    # Nothing built from the address reached a node (hosts are only asked
+    # for their own addresses, a fixed command, and not even that here)
+    assert asked == []

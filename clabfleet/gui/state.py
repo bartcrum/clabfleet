@@ -139,6 +139,9 @@ def topology_view(topo: Topology) -> dict:
     return {"name": topo.name, "nodes": nodes, "links": links}
 
 
+# What a read-only command on a node may consist of (``Workspace.node_command``)
+SAFE_COMMAND = re.compile(r"[A-Za-z0-9 _.:/|-]+")
+
 SKETCH_MAX_NODES = 60  # larger labs get no thumbnail: too small to read, too much to send
 
 
@@ -461,7 +464,7 @@ class Workspace:
         trace can go on to the host from a switch that has no MAC entry for
         it (aged out), as it does for a destination given by name."""
         try:
-            address = str(ipaddress.ip_address(address))
+            address = str(ipaddress.IPv4Address(address))
         except ValueError:
             return None  # trace() says what is wrong with it
         for node, kind in kinds.items():
@@ -575,7 +578,15 @@ class Workspace:
 
     def node_command(self, lab: str, node: str, command: str, shell: bool = True) -> str:
         """A read-only command on a running node: the CLI on cEOS (``Cli``),
-        SSH on IOS kinds, and with ``shell`` ``sh -c`` on any other kind."""
+        SSH on IOS kinds, and with ``shell`` the program itself on any other
+        kind (no shell runs it, so nothing in it is expanded).
+
+        Commands are built from addresses, interface and VRF names, some of
+        them read from other nodes: one with anything but plain command text
+        in it (a newline, ``;``, ``$``, quotes) is refused, as it could be a
+        second command on a node's CLI."""
+        if not SAFE_COMMAND.fullmatch(command):
+            raise ValueError("refusing to run a command with unexpected characters on a node")
         container = next((c for hs in self._recent_runtime() for c in hs.containers
                           if c["lab"] == lab and c["node"] == node), None)
         if not container or container.get("state") != "running":
@@ -597,7 +608,7 @@ class Workspace:
             return text
         if shell:
             res = run_docker(runner, ["timeout", "15", "docker", "exec", container["container"],
-                                      "sh", "-c", command], host.sudo)
+                                      *command.split()], host.sudo)
             if res.exit_code != 0:
                 raise RuntimeError((res.stderr or res.stdout).strip()[-300:] or f"{command} failed")
             return res.stdout
