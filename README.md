@@ -94,7 +94,7 @@ refuses for lack of root ends with a line saying so.
 
 | Guide | What it covers |
 |-------|----------------|
-| [Command line](docs/cli.md) | Waiting for nodes to boot, running commands on nodes, config snapshots and diffs, packet capture, validation, the routing view, lab templates, node images, a remote host, environment variables |
+| [Command line](docs/cli.md) | Waiting for nodes to boot, running commands on nodes, config snapshots and diffs, packet capture, validation, the routing view, path trace, lab templates, node images, a remote host, environment variables |
 | [Web GUI](docs/gui.md) | The diagram and rack view, terminals, captures, editing topologies, users and roles, OIDC and LDAP / Active Directory logins, sessions |
 | [Multi-host cluster deployment](docs/cluster.md) | The cluster inventory, checking hosts, placement strategies and pinning, how links between hosts work |
 | [Import from live network](docs/import-live.md) | Device sources, kinds and images, interface names, sanitising configs, re-syncing |

@@ -416,11 +416,15 @@ class Workspace:
         (``routing.trace``). A node destination is its router-id, or for a
         host its first address outside the management network; an address
         that is a host's is traced to that host."""
+        return self.trace_topology(load_topology(self.topology_path(topo_id)), src, dst)
+
+    def trace_topology(self, topo: Topology, src: str, dst: str) -> dict:
+        """``trace`` for a topology already loaded (the CLI's, which need
+        not be in the workspace)."""
         from ..routing.trace import Lab, TraceError, trace
 
-        topo = load_topology(self.topology_path(topo_id))
         if src not in topo.nodes:
-            raise ValueError(f"No node '{src}' in {topo_id}")
+            raise ValueError(f"No node '{src}' in {topo.name}")
         dst_node = dst if dst in topo.nodes else None
         if dst_node:
             dst = self._node_address(topo, dst_node)

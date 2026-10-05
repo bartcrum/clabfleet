@@ -310,3 +310,76 @@ def test_mlag_pair_and_bundles():
     assert "bond0 is a bundle of eth1, eth2" in notes
     assert "VTEP 10.255.2.34 is the MLAG pair L3 + L4: either may take it" in notes
     assert "Port-Channel5 is a bundle of Ethernet5" in notes
+
+
+def test_trace_cli(tmp_path, monkeypatch, capsys):
+    """`clabfleet trace`: the GUI's walk from the command line."""
+    from clabfleet import cli
+    from clabfleet.gui.state import Workspace
+    from clabfleet.routing import trace as trace_mod
+
+    # Any file name will do: the CLI's topology need not look like a workspace's
+    path = tmp_path / "lab.yaml"
+    path.write_text(
+        "name: t\ntopology:\n  nodes:\n"
+        "    L1: {kind: arista_ceos, image: a}\n"
+        "    H1: {kind: linux, image: a}\n"
+        "    H2: {kind: linux, image: a}\n"
+        "  links:\n    - endpoints: ['H1:eth1', 'L1:eth1']\n")
+    answer = {
+        "reached": True, "truncated": False,
+        "hops": [{"node": "H1", "vrf": None, "route": "10.0.0.2 via 10.0.0.1 dev eth1 ",
+                  "notes": ["a note"]},
+                 {"node": "L1", "vrf": "TENANT", "route": "10.0.0.0/24 connected"},
+                 {"node": "L2", "vrf": "default", "error": "L2 is not running"},
+                 {"node": "H2", "vrf": None, "route": "destination"}],
+        "edges": [{"a": "H1", "b": "L1", "a_iface": "eth1", "b_iface": "eth1", "overlay": False,
+                   "vni": None, "flood": False},
+                  {"a": "L1", "b": "L2", "a_iface": "", "b_iface": "", "overlay": True,
+                   "vni": 10010, "flood": False},
+                  {"a": "L1", "b": "L3", "a_iface": "", "b_iface": "", "overlay": True,
+                   "vni": None, "flood": True}],
+    }
+    seen = {}
+
+    def fake_trace(lab, ask, src, dst, dst_node=None):
+        seen.update(src=src, dst=dst, dst_node=dst_node)
+        return answer
+
+    monkeypatch.setattr(trace_mod, "trace", fake_trace)
+    monkeypatch.setattr(Workspace, "node_command", lambda self, lab, node, command, shell=True: (
+        "3: eth1    inet 10.0.0.2/24 scope global eth1\n"))
+
+    assert cli.main(["trace", str(path), "H1", "H2"]) == 0
+    assert seen == {"src": "H1", "dst": "10.0.0.2", "dst_node": "H2"}
+    assert capsys.readouterr().out == (
+        "H1 reaches H2 (10.0.0.2) · equal-cost paths\n"
+        "\n"
+        "  1. H1               10.0.0.2 via 10.0.0.1 dev eth1\n"
+        "                      a note\n"
+        "  2. L1 [VRF TENANT]  10.0.0.0/24 connected\n"
+        "  3. L2               error: L2 is not running\n"
+        "  4. H2               destination\n"
+        "\n"
+        "Links taken:\n"
+        "  H1:eth1 -> L1:eth1\n"
+        "  L1 ~> L2  VXLAN VNI 10010\n"
+        "  L1 ~> L3  VXLAN (flooded: address not learned)\n")
+
+    assert cli.main(["trace", str(path), "H1", "H2", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "src": "H1", "dst": "10.0.0.2", "dst_node": "H2", **answer}
+
+    # Not reached: exit 1, and the verdict says so
+    answer = {"reached": False, "truncated": True, "edges": [],
+              "hops": [{"node": "H1", "vrf": None, "route": "no route to 192.0.2.9"}]}
+    assert cli.main(["trace", str(path), "H1", "192.0.2.9"]) == 1
+    assert capsys.readouterr().out == (
+        "H1 does not reach 192.0.2.9 · stopped after the hop limit\n"
+        "\n"
+        "  1. H1  no route to 192.0.2.9\n")
+
+    # A node that is not in the topology, and a file that is not there
+    assert cli.main(["trace", str(path), "Nope", "H2"]) == 1
+    assert "No node 'Nope' in t" in capsys.readouterr().err
+    assert cli.main(["trace", str(tmp_path / "missing.clab.yml"), "H1", "H2"]) == 1

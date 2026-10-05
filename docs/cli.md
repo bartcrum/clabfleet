@@ -239,6 +239,59 @@ has drifted, for example after changes on the CLI.
 A node is only asked about the protocols its startup config uses. Other
 kinds show their sessions as unknown.
 
+## Trace a path
+
+```bash
+clabfleet trace topologies/evpn_mlag.clab.yml Host-1 Host-4       # node to node
+clabfleet trace topologies/evpn_mlag.clab.yml Leaf-1 10.255.0.2   # node to an address
+clabfleet trace topologies/evpn_mlag.clab.yml Host-1 Host-4 --json
+```
+
+Follows traffic from a node through the running lab, hop by hop, by
+looking the destination up in each node's own tables, as you would at its
+CLI. It is the walk behind the GUI's Trace tab. Only read-only commands
+are run, and nothing is sent.
+
+```
+Host-1 reaches Host-4 (10.20.20.14) · equal-cost paths
+
+  1. Host-1               10.20.20.14 via 10.10.10.1 dev bond0 src 10.10.10.11 uid 0
+                          bond0 is a bundle of eth1, eth2
+  2. Leaf-1 [VRF TENANT]  10.20.20.0/24 connected (VRF TENANT)
+                          VTEP 10.255.2.34 is the MLAG pair Leaf-3 + Leaf-4: either may take it
+  ...
+  6. Host-4               destination
+
+Links taken:
+  Host-1:eth1 -> Leaf-1:eth5
+  Host-1:eth2 -> Leaf-2:eth5
+  Leaf-1 ~> Leaf-3  VXLAN (flooded: address not learned)
+  ...
+  Leaf-4:eth6 -> Host-4:eth2
+```
+
+- **Destination:** a node name is traced to its router-id, or for a host
+  to its first address outside the management network. An address that
+  belongs to a Linux host of the lab is traced to that host.
+- **What is read:** routes on Arista cEOS (VRFs included), Cisco IOS kinds
+  and Linux hosts; IPv4. Other kinds end the path with "cannot look up
+  routes on kind ...".
+- **Branches:** every equal-cost next hop is followed, a port-channel or
+  a Linux bond to each member link, and an MLAG pair's shared VTEP to
+  both leaves.
+- **VXLAN:** a route through a VTEP is a `~>` hop to that VTEP. Bridged
+  traffic is found through ARP, the MAC and VXLAN tables, the EVPN MAC/IP
+  routes or, when the address has not been learned, the VLAN's flood
+  list.
+- **Limits:** the walk stops after 16 hops and visits a node once per
+  VRF. The lab must be running: a node that is not ends its branch with
+  an error.
+- **Exit code:** 0 if the destination is reached, 1 if it is not. An
+  error (no such node, a file that cannot be loaded) also exits 1, with
+  `Error:` on stderr and nothing on stdout.
+- `--cluster` finds the nodes on the hosts of a cluster; `--json` prints
+  the hops and links for scripts.
+
 ## Generate a lab from a template
 
 ```bash
