@@ -55,18 +55,23 @@ def local_root_problem(sudo: bool) -> Optional[str]:
     should: what a deploy would run into, known before anyone tries one.
 
     With ``sudo``: sudo would ask for a password, which a GUI job cannot
-    type. Without: containerlab is not installed setuid (where its own
-    ``clab_admins`` group decides), so it needs sudo."""
-    if os.geteuid() == 0:
+    type. It is asked about containerlab itself, as a sudo rule may allow
+    that one command without a password and nothing else. Without:
+    containerlab is not installed setuid (where its own ``clab_admins``
+    group decides), so it needs sudo."""
+    path = shutil.which("containerlab")
+    if os.geteuid() == 0 or not path:
         return None
     if sudo:
         try:
-            ok = subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+            res = subprocess.run(["sudo", "-n", "containerlab", "version"],
+                                 capture_output=True, text=True)
         except OSError:
             return "--sudo was given, but there is no sudo on this machine"
-        return None if ok else f"sudo asks for a password here, so deploys will fail. {SUDO_HELP}"
-    path = shutil.which("containerlab")
-    if not path or os.stat(path).st_mode & stat.S_ISUID:
+        if res.returncode != 0 and any(t in res.stderr + res.stdout for t in SUDO_NEEDS_PASSWORD):
+            return f"sudo asks for a password here, so deploys will fail. {SUDO_HELP}"
+        return None
+    if os.stat(path).st_mode & stat.S_ISUID:
         return None
     return ("containerlab needs root here, so deploys will fail. Start clabfleet with --sudo "
             "(or CLAB_SUDO=1)")

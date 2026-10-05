@@ -189,10 +189,11 @@ def test_containerlab_says_what_to_do_when_sudo_wants_a_password():
 def test_local_root_problem(tmp_path, monkeypatch):
     from clabfleet import runner
 
-    def sudo_answers(code):
+    def sudo_answers(code, stderr=""):
         def run(cmd, **kwargs):
-            assert cmd == ["sudo", "-n", "true"]
-            return subprocess.CompletedProcess(cmd, code, b"", b"")
+            # containerlab itself: a sudo rule may allow it and nothing else
+            assert cmd == ["sudo", "-n", "containerlab", "version"]
+            return subprocess.CompletedProcess(cmd, code, "", stderr)
         monkeypatch.setattr(runner.subprocess, "run", run)
 
     binary = tmp_path / "containerlab"
@@ -203,8 +204,11 @@ def test_local_root_problem(tmp_path, monkeypatch):
     # --sudo: fine while sudo needs no password
     sudo_answers(0)
     assert runner.local_root_problem(True) is None
-    sudo_answers(1)
+    sudo_answers(1, "sudo: a password is required\n")
     assert "sudo asks for a password here" in runner.local_root_problem(True)
+    # containerlab failing for a reason of its own is not sudo's doing
+    sudo_answers(1, "Error: something else\n")
+    assert runner.local_root_problem(True) is None
     # No --sudo: containerlab must be setuid to get root on its own
     binary.chmod(0o755)
     assert "Start clabfleet with --sudo" in runner.local_root_problem(False)
