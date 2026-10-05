@@ -220,6 +220,11 @@ async def steps(page):
     await page.until("document.querySelector('#health-list').children.length > 0")
     await page.js("openDiff('spine_leaf.clab.yml', 'Leaf-1', 'running')")
     await page.until("[...document.querySelectorAll('.pane.activity-pane pre')].some(p => p.textContent.includes('No drift'))")
+    # Every dock tab that is always there shows its pane when clicked
+    for pane in ("activity", "health", "run", "trace", "events"):
+        await page.js(f"document.querySelector('.dock-tab[data-pane=\"{pane}\"]').click()")
+        assert await page.js("document.querySelector('.pane.active').dataset.pane") == pane, pane
+        assert await page.js("document.querySelector('.dock-tab.active').dataset.pane") == pane
     # Events: the recorded change, in the list and on the strip
     await page.js("document.querySelector('.dock-tab[data-pane=\"events\"]').click()")
     await page.until("document.querySelectorAll('#events-list .health-row').length === 1")
