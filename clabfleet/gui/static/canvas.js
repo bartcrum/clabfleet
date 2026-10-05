@@ -6,7 +6,7 @@
 // interface labels, hover focus, zoom and pan, pointer and keyboard
 // handling. Each canvas passes its own view and callbacks.
 //
-// Uses app.js globals: S, $, s, naturalCmp, NODE_W, NODE_H, announce.
+// Uses app.js globals: S, $, s, naturalCmp, NODE_W, NODE_H, announce, nodeRole.
 // ---------------------------------------------------------------------------
 
 // --- layout ---------------------------------------------------------------------------
@@ -145,16 +145,58 @@ function ensurePositions(model) {
     if (S.positions[nd.id]) fixed[nd.id] = S.positions[nd.id];
     else if (nd.node?.pos) fixed[nd.id] = nd.node.pos;
   }
-  const missing = model.nodes.some((nd) => !fixed[nd.id]);
-  let pos = fixed;
-  if (missing) {
-    const real = model.nodes.filter((n) => !n.pseudo);
-    const roleNamed = real.filter((n) => tierOf(n) >= 0).length;
-    const useTiers = !Object.keys(fixed).length && real.length > 1 && roleNamed === real.length;
-    pos = useTiers ? tieredLayout(model.nodes, model.links)
-      : separate(autoLayout(model.nodes, model.links, fixed), model.nodes, fixed);
-  }
+  const pos = layoutPositions(model, fixed);
   for (const nd of model.nodes) S.positions[nd.id] = pos[nd.id];
+}
+
+// Where a model's nodes go: the ``fixed`` positions if every node has one,
+// else rows by role when every node's name tells its role, else a force
+// layout around the fixed ones
+function layoutPositions(model, fixed) {
+  if (!model.nodes.some((nd) => !fixed[nd.id])) return fixed;
+  const real = model.nodes.filter((n) => !n.pseudo);
+  const roleNamed = real.filter((n) => tierOf(n) >= 0).length;
+  const useTiers = !Object.keys(fixed).length && real.length > 1 && roleNamed === real.length;
+  return useTiers ? tieredLayout(model.nodes, model.links)
+    : separate(autoLayout(model.nodes, model.links, fixed), model.nodes, fixed);
+}
+
+// A thumbnail of a topology for a card (D1): its nodes as dots (hosts
+// smaller) and its links as lines, laid out as the Diagram would. ``sketch``
+// is the server's {nodes: [[name, kind, pos]], links: [[i, j]]}; ``key``
+// names it, so that a card redrawn with the same sketch reuses the drawing.
+const MINI_W = 200, MINI_H = 64, MINI_PAD = 7;
+const miniCache = new Map();
+
+function miniDiagram(key, sketch) {
+  if (!sketch) return null;
+  const signature = JSON.stringify(sketch);
+  const cached = miniCache.get(key);
+  if (cached?.signature === signature) return cached.svg.cloneNode(true);
+  const nodes = sketch.nodes.map(([id, kind]) => ({ id, node: { kind }, pseudo: false }));
+  const links = sketch.links.map(([a, b]) => ({ a: { id: nodes[a].id }, b: { id: nodes[b].id } }));
+  const fixed = {};
+  for (const [id, , pos] of sketch.nodes) if (pos) fixed[id] = pos;
+  const pos = layoutPositions({ nodes, links }, fixed);
+  // Fill the box in both directions: a thumbnail shows the shape, not the distances
+  const xs = nodes.map((n) => pos[n.id][0]), ys = nodes.map((n) => pos[n.id][1]);
+  const fit = (v, values, size) => {
+    const lo = Math.min(...values), span = Math.max(...values) - lo;
+    return span ? MINI_PAD + ((v - lo) / span) * (size - 2 * MINI_PAD) : size / 2;
+  };
+  const at = (id) => [fit(pos[id][0], xs, MINI_W), fit(pos[id][1], ys, MINI_H)];
+  const svg = s("svg", { class: "mini", viewBox: `0 0 ${MINI_W} ${MINI_H}`, "aria-hidden": "true" },
+    links.map((l) => {
+      const [x1, y1] = at(l.a.id), [x2, y2] = at(l.b.id);
+      return s("line", { x1, y1, x2, y2 });
+    }),
+    nodes.map((n) => {
+      const [cx, cy] = at(n.id);
+      const host = nodeRole(n.id, n.node.kind) === "host";
+      return s("circle", { class: host ? "host" : "", cx, cy, r: host ? 2.4 : 3.6 });
+    }));
+  miniCache.set(key, { signature, svg });
+  return svg.cloneNode(true);
 }
 
 // --- labels and hover focus -----------------------------------------------------------

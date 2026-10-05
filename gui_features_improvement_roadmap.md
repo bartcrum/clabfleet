@@ -42,7 +42,7 @@ than a designed product:
 ### A. Visual language
 
 **A1. Device icons on nodes — S**
-**Done** (branch `gui-polish`): router, switch, host, firewall and generic glyphs from the name, then the kind; the kind's readable name on the second line. No vendor badge yet.
+**Done** (branch `gui-polish`): router, switch, host, firewall and generic glyphs from the name, then the kind; the kind's readable name on the second line. The vendor badge followed (branch `vendor-badge-mini-diagrams`): the vendor in a small neutral badge before the product, from the kind's `vendor_product` name.
 Today: every node is the same rounded box with a name and a kind string.
 Proposal: a small glyph per role (router, L3 switch, L2 switch, host,
 firewall, route server) on the left of the box, chosen from the kind and
@@ -176,7 +176,7 @@ colours, booting nodes breathing. All disabled under
 ### D. States and feedback
 
 **D1. First-run and empty states — S**
-**Done** (branch `gui-polish`): steps, topology cards, and new-lab cards (blank or a template). No mini diagrams on the cards.
+**Done** (branch `gui-polish`): steps, topology cards, and new-lab cards (blank or a template). The mini diagrams followed (branch `vendor-badge-mini-diagrams`): each topology and template card shows its nodes and links as a thumbnail, laid out as the Diagram would (labs of up to 60 nodes).
 Today: "Select a topology on the left."
 Proposal: a welcome screen with three steps (pick or generate a lab,
 deploy, open a terminal), the example topologies as cards with a mini

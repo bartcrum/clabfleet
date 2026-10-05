@@ -252,6 +252,38 @@ function kindName(kind) {
   return KIND_NAMES[kind] || kind || "";
 }
 
+// The vendor of a kind, for the badge on a node (A1), and the rest of its
+// name: "arista_ceos" is Arista's cEOS. containerlab names kinds
+// vendor_product; a kind of a vendor not listed here has no badge.
+const VENDORS = {
+  arista: "Arista", cisco: "Cisco", nokia: "Nokia", juniper: "Juniper", fortinet: "Fortinet",
+  paloalto: "Palo Alto", checkpoint: "Check Point", mikrotik: "MikroTik", dell: "Dell",
+  aruba: "Aruba", huawei: "Huawei", sonic: "SONiC", cumulus: "Cumulus",
+};
+const VENDOR_OF_ALIAS = { ceos: "arista", srl: "nokia" };
+
+function kindParts(kind) {
+  const name = kindName(kind);
+  const vendor = VENDORS[VENDOR_OF_ALIAS[kind] || String(kind || "").split("_")[0]];
+  if (!vendor) return { vendor: "", product: name };
+  if (name.startsWith(`${vendor} `)) return { vendor, product: name.slice(vendor.length + 1) };
+  return { vendor, product: String(kind).split("_").slice(1).join("_") };
+}
+
+// The second line of a node's box: the vendor as a small badge, then the
+// product, cut to what is left of the box
+const BADGE_CHAR = 5.4, KIND_CHAR = 6.7;
+function nodeKindLine(kind) {
+  const { vendor, product } = kindParts(kind);
+  if (!vendor) return s("text", { class: "kind", x: TEXT_X, y: 13 }, truncate(product, 16));
+  const width = Math.round(vendor.length * BADGE_CHAR + 8);
+  const room = Math.floor((NODE_W / 2 - 6 - (TEXT_X + width + 4)) / KIND_CHAR);
+  return s("g", { class: "kind" },
+    s("rect", { class: "vendor", x: TEXT_X, y: 3.5, width, height: 13, rx: 3 }),
+    s("text", { class: "vendor", x: TEXT_X + width / 2, y: 13, "text-anchor": "middle" }, vendor),
+    room >= 2 ? s("text", { x: TEXT_X + width + 4, y: 13 }, truncate(product, room)) : null);
+}
+
 // Motion (C5): a node or edge whose state changed since the last drawing
 // pulses once. The first look at it only sets the baseline; nothing moves
 // under prefers-reduced-motion (the stylesheet stops every animation).
@@ -580,6 +612,7 @@ async function renderWelcome() {
   $("#welcome-labs").replaceChildren(...(topos.length ? topos.map((t) => {
     const st = labStatus(t.name, t.nodes);
     return h("button", { class: "card", onclick: () => selectTopology(t.id), title: t.error || t.path },
+      miniDiagram(`topo:${t.id}`, t.sketch),
       h("span", { class: "card-head" },
         h("span", { class: `dot ${t.error ? "error" : st.state}` }),
         h("b", {}, t.name)),
@@ -598,6 +631,7 @@ async function renderWelcome() {
       h("span", { class: "muted small" }, "Draw nodes and links, then generate configs")),
     ...Object.entries(welcomeTemplates).map(([name, t]) =>
       h("button", { class: "card new", onclick: () => window.Builder.newLab(name) },
+        miniDiagram(`template:${name}`, t.sketch),
         h("span", { class: "card-head" }, h("b", {}, name)),
         h("span", { class: "muted small" }, t.description))));
 }
@@ -1217,7 +1251,7 @@ function renderDiagram(fit) {
       s("rect", { x: -NODE_W / 2, y: -NODE_H / 2, width: NODE_W, height: NODE_H, rx: 9 }),
       nodeFace(nd.id, nd.node.kind, stClass),
       s("text", { class: "name", x: TEXT_X, y: -2 }, truncate(nd.id, 13)),
-      s("text", { class: "kind", x: TEXT_X, y: 13 }, truncate(kindName(nd.node.kind), 16)),
+      nodeKindLine(nd.node.kind),
       multi && (nodeHost(lab, nd.id) || nd.node.host_pin)
         ? s("text", { class: "hostbadge", x: NODE_W / 2 - 6, y: NODE_H / 2 + 13, "text-anchor": "end" }, `@${nodeHost(lab, nd.id) || nd.node.host_pin}`)
         : null,

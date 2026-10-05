@@ -65,7 +65,7 @@ from .sessions import (
     CAPTURE, MAX_SESSIONS, MAX_USER_SESSIONS, TERMINAL, OpenSession, SessionLimitError,
     SessionRegistry,
 )
-from .state import UnloadableTopology, Workspace
+from .state import UnloadableTopology, Workspace, topology_sketch
 from .terminals import CaptureSession, LocalTerminal, SSHTerminal
 
 logger = logging.getLogger(__name__)
@@ -1133,8 +1133,10 @@ async def _create_topology(request):
 
 
 async def _builder_info(request):
-    """What the builder offers: kinds (with images and port names) and templates."""
-    from ..templates import KINDS, TEMPLATES
+    """What the builder offers: kinds (with images and port names) and
+    templates, each with a sketch of what its defaults build."""
+    from ..templates import KINDS, TEMPLATES, generate
+    from ..topology import topology_from_dict
 
     return web.json_response({
         "kinds": {k: {"image": s.image, "ports": [s.interface(i)[0] for i in range(1, 9)],
@@ -1142,7 +1144,8 @@ async def _builder_info(request):
         "templates": {t.name: {"description": t.description, "default_name": t.default_name,
                                "params": [{"name": p.name, "default": p.default, "help": p.help,
                                            "min": p.minimum, "max": p.maximum}
-                                          for p in t.params]}
+                                          for p in t.params],
+                               "sketch": topology_sketch(topology_from_dict(generate(t.name)))}
                       for t in TEMPLATES.values()},
     })
 

@@ -35,7 +35,8 @@ an operator.
   not running, a square an error. Hover or select a node to fade
   everything but it, its links and its neighbours. Each node shows a
   device glyph (router, switch, host, firewall) chosen from its name, then
-  its kind, with its status on the glyph's corner. Zoom with the wheel, the
+  its kind, with its status on the glyph's corner, and under its name the
+  vendor as a small badge with the product next to it (Arista · cEOS). Zoom with the wheel, the
   −, 100 %, + and Fit buttons at the bottom right, or `+`, `-`, `0` (fit),
   `1` (actual size) and the arrow keys once the canvas has focus; below
   60 % interface names and labels hide so the shape stays readable. From
@@ -46,7 +47,8 @@ an operator.
   problems as they appear and clear. Text and status colours meet WCAG AA
   contrast in both themes. With
   no lab selected, the start page lists the topologies and ways to start a
-  new lab. Destroy and Redeploy
+  new lab (blank, or a template), each card with a thumbnail of its nodes
+  and links (labs of up to 60 nodes). Destroy and Redeploy
   ask in a dialog that says what will be removed; labs of 10 or more
   nodes ask you to type the lab name.
 - **Sidebar:** every `*.clab.yml` under the current directory (or each
