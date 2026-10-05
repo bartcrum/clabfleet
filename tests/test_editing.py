@@ -286,6 +286,9 @@ def test_builder_endpoints(tmp_path, monkeypatch):
             info = await (await client.get("/api/builder")).json()
             assert info["kinds"]["cisco_iol"]["ports"][:2] == ["Ethernet0/1", "Ethernet0/2"]
             assert info["kinds"]["arista_ceos"]["image"] and "spine-leaf" in info["templates"]
+            # Each template comes with a sketch of what its defaults build
+            ring = info["templates"]["ring"]["sketch"]
+            assert len(ring["nodes"]) == len(ring["links"]) == 4
 
             detail = await (await client.get("/api/topologies/t.clab.yml")).json()
             graph = {"nodes": [{"name": "a", "kind": "linux"}, {"name": "b", "kind": "linux"}],

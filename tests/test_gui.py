@@ -103,6 +103,36 @@ def test_find_node_only_in_workspace_labs(tmp_path, monkeypatch):
     assert "not in this workspace" in asyncio.run(scenario())
 
 
+def test_topology_sketch_for_thumbnails():
+    topo = topology_from_dict({
+        "name": "t",
+        "topology": {
+            "nodes": {
+                "s1": {"kind": "arista_ceos", "labels": {"graph-posX": "10", "graph-posY": "20"}},
+                "l1": {"kind": "linux"},
+                "l2": {"kind": "linux"},
+            },
+            "links": [
+                {"endpoints": ["s1:eth1", "l1:eth1"]},
+                {"endpoints": ["s1:eth2", "l2:eth1"]},
+                {"endpoints": ["l1:eth2", "host:l1-eth2"]},  # not between two nodes: left out
+            ],
+        },
+    })
+    assert state.topology_sketch(topo) == {
+        "nodes": [["s1", "arista_ceos", [10.0, 20.0]], ["l1", "linux", None], ["l2", "linux", None]],
+        "links": [[0, 1], [0, 2]]}
+
+    def lab(count):
+        return topology_from_dict({"name": "t", "topology": {
+            "nodes": {f"n{i}": {"kind": "linux"} for i in range(count)}}})
+
+    # One node is not a picture, and a very large lab would not be readable
+    assert state.topology_sketch(lab(1)) is None
+    assert state.topology_sketch(lab(state.SKETCH_MAX_NODES))["links"] == []
+    assert state.topology_sketch(lab(state.SKETCH_MAX_NODES + 1)) is None
+
+
 def test_topology_view_links_and_special_endpoints():
     topo = topology_from_dict({
         "name": "t",
@@ -290,6 +320,8 @@ def test_server_requires_token_and_same_origin(tmp_path, monkeypatch):
             assert resp.status == 200
             body = await resp.json()
             assert [t["id"] for t in body["topologies"]] == ["t.clab.yml"]
+            sketch = body["topologies"][0]["sketch"]  # for the card's thumbnail
+            assert sketch is None or len(sketch["nodes"]) == body["topologies"][0]["nodes"]
             assert body["jobs"] == []
             assert await (await client.get("/api/jobs")).json() == []
 

@@ -139,6 +139,23 @@ def topology_view(topo: Topology) -> dict:
     return {"name": topo.name, "nodes": nodes, "links": links}
 
 
+SKETCH_MAX_NODES = 60  # larger labs get no thumbnail: too small to read, too much to send
+
+
+def topology_sketch(topo: Topology) -> Optional[dict]:
+    """A topology cut down to what a thumbnail needs: ``nodes`` as
+    ``[name, kind, saved position or None]`` and ``links`` as pairs of node
+    indexes (links between two nodes only). None for a lab too large or
+    too small to be worth drawing."""
+    view = topology_view(topo)
+    if not 2 <= len(view["nodes"]) <= SKETCH_MAX_NODES:
+        return None
+    index = {n["name"]: i for i, n in enumerate(view["nodes"])}
+    links = [[index[link["a"]["node"]], index[link["b"]["node"]]] for link in view["links"]
+             if link["a"].get("node") in index and link["b"].get("node") in index]
+    return {"nodes": [[n["name"], n["kind"], n["pos"]] for n in view["nodes"]], "links": links}
+
+
 # ----------------------------------------------------------------------
 # Running labs
 # ----------------------------------------------------------------------
@@ -229,7 +246,8 @@ class Workspace:
             entry = {"id": topo_id, "path": str(path)}
             try:
                 topo = load_topology(path)
-                entry.update(name=topo.name, nodes=len(topo.nodes), saved_at=self._saved_at(topo))
+                entry.update(name=topo.name, nodes=len(topo.nodes), saved_at=self._saved_at(topo),
+                             sketch=topology_sketch(topo))
             except Exception as exc:
                 entry.update(name=path.name, error=str(exc))
             result.append(entry)
