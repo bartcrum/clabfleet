@@ -15,8 +15,9 @@ dependencies = [
 
 [project.optional-dependencies]
 napalm = ["napalm>=4.0"]
-gui = ["aiohttp>=3.13.3", "ruamel.yaml>=0.17.21"]
-dev = ["pytest>=7.0", "aiohttp>=3.13.3", "ruamel.yaml>=0.17.21"]
+gui = ["aiohttp>=3.13.3", "ruamel.yaml>=0.17.21", "cryptography>=42"]
+ldap = ["ldap3>=2.9"]
+dev = ["pytest>=7.0", "aiohttp>=3.13.3", "ruamel.yaml>=0.17.21", "cryptography>=42", "ldap3>=2.9"]
 
 [project.scripts]
 clabfleet = "clabfleet.cli:main"

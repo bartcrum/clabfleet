@@ -35,8 +35,10 @@ async function postLogin(creds, switchUser = false) {
 
 // The login form asks for a name and password when the GUI has named users
 // ("password"), else for the start-up token ("token"); named users can
-// switch to a token too
-const login = { mode: "token", useToken: false };
+// switch to a token too. ``sso``: the OIDC provider's label, for a button
+// that logs in there. ``directory``: the LDAP directory's label, whose
+// names and passwords the form takes as well.
+const login = { mode: "token", useToken: false, sso: null, directory: null };
 
 function renderLoginForm() {
   const token = login.mode === "token" || login.useToken;
@@ -44,16 +46,31 @@ function renderLoginForm() {
   $("#login-token").hidden = !token;
   $("#login-user").required = $("#login-pass").required = !token;
   $("#login-token").required = token;
+  const start = login.sso ? "Or log in" : "Log in";
   $("#login-hint").textContent = token
     ? "Open the GUI with your login link, or paste your token."
-    : "Log in with your user name and password.";
+    : login.directory
+      ? `${start} with your ${login.directory} name and password, or a local user's.`
+      : `${start} with your user name and password.`;
+  const sso = $("#login-sso");
+  sso.hidden = !login.sso;
+  sso.textContent = `Log in with ${login.sso}`;
   const sw = $("#login-switch");
   sw.hidden = login.mode !== "password";
   sw.textContent = login.useToken ? "Use a name and password" : "Use a login token instead";
 }
 
-function showLogin(message, mode) {
-  if (mode) login.mode = mode;
+// ``res``: the 401 that asked for a login; its headers say what is offered
+function showLogin(message, res) {
+  if (res) {
+    const label = (name) => {
+      const value = res.headers.get(name);
+      return value ? decodeURIComponent(value) : null;
+    };
+    login.mode = res.headers.get("X-Clabfleet-Login") || login.mode;
+    login.sso = label("X-Clabfleet-SSO");
+    login.directory = label("X-Clabfleet-Directory");
+  }
   renderLoginForm();
   $("#login").hidden = false;
   const err = $("#login-error");

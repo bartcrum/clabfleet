@@ -67,7 +67,7 @@ async function api(path, opts = {}) {
     headers: opts.body ? { "Content-Type": "application/json" } : undefined,
   });
   if (res.status === 401) {
-    showLogin("Your session has ended. Log in again.", res.headers.get("X-Clabfleet-Login"));
+    showLogin("Your session has ended. Log in again.", res);
   }
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
   return res.json();
@@ -1541,10 +1541,14 @@ async function boot() {
     login.useToken = !login.useToken;
     showLogin();
   });
-  const token = new URLSearchParams(location.hash.slice(1)).get("token");
-  let linkError = null;
-  if (token !== null) {
+  // #token=...: a login link. #login_error=...: single sign-on did not work out
+  const fragment = new URLSearchParams(location.hash.slice(1));
+  const token = fragment.get("token");
+  let linkError = fragment.get("login_error");
+  if (token !== null || linkError !== null) {
     history.replaceState(null, "", location.pathname + location.search);
+  }
+  if (token !== null) {
     try {
       await postLogin({ token });
     } catch (e) {
@@ -1553,7 +1557,7 @@ async function boot() {
   }
   const res = await fetch("/api/me");
   if (res.status === 401) {
-    showLogin(linkError, res.headers.get("X-Clabfleet-Login"));
+    showLogin(linkError, res);
     return;
   }
   // First login (admin / admin): a new password before anything else

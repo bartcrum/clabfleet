@@ -27,7 +27,9 @@ Usage:
     clabfleet new --list
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
                   [--bind ADDR] [--tls-cert CERT --tls-key KEY] [--users FILE | --single-token]
+                  [--directory FILE]
     clabfleet user add|passwd|list|remove|rotate [NAME] [--role operator|viewer] [--token]
+    clabfleet directory check [--user NAME] [--directory FILE]
 
 Without --cluster, commands target a single host: this machine by default,
 or a remote server over SSH with --host.
@@ -451,6 +453,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_gui.add_argument("--single-token", action="store_true",
                        help="No users: print a random token at start-up and let "
                             "whoever has it in as an operator")
+    p_gui.add_argument("--directory", metavar="FILE",
+                       help="OIDC and LDAP / Active Directory logins next to the users "
+                            "file's, with roles from groups (default: "
+                            "~/.clabfleet/directory.yaml when it exists)")
     p_gui.add_argument("--audit-log", metavar="FILE",
                        help="JSON Lines log of logins, jobs, edits and terminal "
                             "sessions (default with users: audit.jsonl next to the "
@@ -512,6 +518,17 @@ def _build_parser() -> argparse.ArgumentParser:
     u_rotate.add_argument("name")
     add_users_arg(u_rotate)
     add_url_arg(u_rotate)
+
+    # --- directory ---
+    p_dir = sub.add_parser("directory", help="Check the GUI's OIDC and LDAP login settings")
+    dir_sub = p_dir.add_subparsers(dest="directory_command", required=True)
+    d_check = dir_sub.add_parser(
+        "check", help="Read the directory file, reach the provider and the LDAP server, "
+                      "and show the role a user would get")
+    d_check.add_argument("--user", metavar="NAME",
+                         help="LDAP: look this user up and show their groups and role")
+    d_check.add_argument("--directory", metavar="FILE",
+                         help="Directory file (default: ~/.clabfleet/directory.yaml)")
 
     return parser
 
@@ -580,6 +597,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "user":
         return _user(args)
+
+    if cmd == "directory":
+        return _directory_check(args)
 
     cluster = _cluster_from_args(args)
 
@@ -771,15 +791,19 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
 
     if args.single_token and args.users:
         raise ValueError("--single-token and --users exclude each other")
+    if args.single_token and args.directory:
+        raise ValueError("--single-token and --directory exclude each other")
     users = None
     if not args.single_token:
         users = _user_store(args, must_exist=bool(args.users), bootstrap=not args.users)
         users.validate()
+    directory = None if args.single_token else _directory(args, must_exist=bool(args.directory))
     audit_path = args.audit_log or (users.path.parent / AUDIT_FILE_NAME if users else None)
     run(Workspace(cluster, roots), host=args.bind, port=args.port,
         open_browser=not args.no_browser, users=users, audit=AuditLog(audit_path),
         ssl_context=ssl_context, public_url=args.public_url,
-        max_sessions=args.max_sessions, max_user_sessions=args.max_user_sessions)
+        max_sessions=args.max_sessions, max_user_sessions=args.max_user_sessions,
+        directory=directory)
     return 0
 
 
@@ -805,6 +829,67 @@ def _user_store(args: argparse.Namespace, must_exist: bool = True, bootstrap: bo
     if not must_exist and not path.exists():
         return None
     return UserStore(path)
+
+
+def _directory(args: argparse.Namespace, must_exist: bool = True):
+    """The directory logins from --directory or the default file; None if
+    the default does not exist and ``must_exist`` is false."""
+    from .gui import directory
+
+    path = Path(args.directory or directory.DEFAULT_DIRECTORY_FILE).expanduser()
+    if not must_exist and not path.exists():
+        return None
+    return directory.load_directory(path)
+
+
+def _directory_check(args: argparse.Namespace) -> int:
+    from .gui.directory import DirectoryError
+
+    found = _directory(args)
+    print(f"{found.path}: read")
+    rc = 0
+    if found.oidc:
+        try:
+            import asyncio
+
+            from .gui.oidc import OidcClient
+        except ImportError as exc:
+            raise RuntimeError(f"OIDC logins need extra packages ({exc.name}). "
+                               "Install them with: pip install 'clabfleet[gui]'") from exc
+
+        async def discover():
+            client = OidcClient(found.oidc)
+            try:
+                return await client.metadata()
+            finally:
+                await client.close()
+
+        try:
+            meta = asyncio.run(discover())
+            print(f"oidc: {found.oidc.issuer} answers; logins go to "
+                  f"{meta['authorization_endpoint']}")
+        except DirectoryError as exc:
+            print(f"oidc: {exc}", file=sys.stderr)
+            rc = 1
+    if found.ldap:
+        cfg = found.ldap.config
+        try:
+            who = found.ldap.lookup(args.user or "clabfleet-directory-check")
+            print(f"ldap: {cfg.url} answers; bound as {cfg.bind_dn or '(anonymous)'}")
+            if args.user and not who:
+                print(f"ldap: no user '{args.user}' under {cfg.user_base} "
+                      "(or the account is disabled)", file=sys.stderr)
+                rc = 1
+            elif args.user:
+                print(f"ldap: {who.name} is {who.subject}")
+                print(f"ldap: role {who.role} from {'; '.join(who.groups)}" if who.role else
+                      f"ldap: {who.name} is in no group with a role and could not log in")
+        except DirectoryError as exc:
+            print(f"ldap: {exc}", file=sys.stderr)
+            rc = 1
+    elif args.user:
+        raise ValueError("--user looks a user up in LDAP, and there is no 'ldap:' section")
+    return rc
 
 
 def _user(args: argparse.Namespace) -> int:

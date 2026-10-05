@@ -2,6 +2,7 @@
 
 ```bash
 pip install -e ".[gui]"     # aiohttp, plus ruamel.yaml for saving edits
+pip install -e ".[gui,ldap]"  # with LDAP / Active Directory logins (ldap3)
 
 cd ~/Work/clabfleet
 clabfleet --sudo gui                     # this machine
@@ -326,9 +327,12 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
 - **Audit log:** `audit.jsonl` next to the users file (or `--audit-log
   FILE`; in single-token mode only with `--audit-log`). One JSON object
   per line with `ts`, `user`, `role`, `remote`, `event` and `details`.
-  Events: `login` (method: password or token), `login_failed` (with the
+  Events: `login` (method: password, token, oidc or ldap; for a
+  directory login also the groups that gave the role and the directory's
+  id of the user), `login_failed` (with the
   user name tried), `login_throttled` (once per address or user name and
-  minute after 5 failed logins), `logout`, `password_changed`,
+  minute after 5 failed logins), `logout`, `directory_login_ended` (an
+  LDAP user is gone or has no role any more), `password_changed`,
   `password_change_failed`, the `user_*` events above, `denied`, `job_started`
   (action, topology, options), `job_finished` (status, seconds),
   `topology_saved`, `positions_saved`, `terminal_opened` and
@@ -350,6 +354,122 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   origin check and secure cookies match the address browsers use. Over
   HTTPS the GUI sends `Strict-Transport-Security` (one year), so browsers
   will then use HTTPS for every port of that host name.
+
+## Logging in through your directory
+
+People can also log in with the accounts they already have: through an
+OAuth 2.0 / OpenID Connect provider (Microsoft Entra ID, AD FS, Okta,
+Keycloak, Google), with their LDAP / Active Directory name and password,
+or both. Their groups in the directory give them their role, so access is
+managed there and nobody has to be added to the GUI.
+
+Put the settings in `~/.clabfleet/directory.yaml` (or pass `--directory
+FILE`) and restart the GUI. The file holds a client secret or a bind
+password: keep it mode 0600. Like the users file, it is refused when other
+users could change it.
+
+```yaml
+oidc:
+  issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+  client_id: 0b0c...
+  client_secret_env: CLABFLEET_OIDC_SECRET   # or client_secret: ...
+  label: Entra ID                  # the button says "Log in with Entra ID"
+  roles:
+    operator: [netlab-admins]      # values of the groups claim
+    viewer: [netlab-readers]
+
+ldap:
+  url: ldaps://dc1.example.com
+  bind_dn: CN=svc-clabfleet,OU=Service,DC=example,DC=com
+  bind_password_env: CLABFLEET_LDAP_PASSWORD # or bind_password: ...
+  user_base: DC=example,DC=com
+  roles:
+    operator: ["CN=NetLab Admins,OU=Groups,DC=example,DC=com"]
+    viewer: ["CN=NetLab Readers,OU=Groups,DC=example,DC=com"]
+```
+
+```bash
+clabfleet directory check                 # reads the file, reaches the provider and the LDAP server
+clabfleet directory check --user alice    # LDAP: alice's entry, and the role her groups give her
+```
+
+- **Roles:** someone in an `operator` group is an operator, else someone
+  in a `viewer` group is a viewer, and anyone else is refused, even with
+  the right password. Operators are effectively root on the lab hosts
+  (see the security notes below): map that role to a group whose
+  membership is itself well guarded.
+- **Local users stay.** The users file works as before next to the
+  directory, so the admin can still log in when the directory is down,
+  and token users (scripts) are unaffected. A directory user whose name
+  is also a local user's is refused: the local user has that name. Remove
+  the local user to let the directory one in. Directory users are not
+  listed under **Users**; there is nothing to manage for them here.
+- **OIDC:** register the GUI with the provider as a web application with
+  the redirect URI `https://<server>:8650/login/oidc/callback` (printed
+  at start-up; with `--public-url`, that address). The login page gets a
+  **Log in with ...** button. The GUI uses the authorization code flow
+  with PKCE, checks the ID token's signature against the provider's keys
+  and its issuer, audience, expiry and nonce, and only finishes a login
+  in the browser that started it. A public client without a secret works
+  too (leave `client_secret` out).
+
+  | Setting | Default | |
+  |---|---|---|
+  | `issuer` | | The provider's issuer URL (https). Its endpoints are read from `<issuer>/.well-known/openid-configuration` |
+  | `client_id`, `client_secret` or `client_secret_env` | | The application's id and secret; `_env` names an environment variable holding the secret |
+  | `groups_claim` | `groups` | The claim with the user's groups: a list or one value. A path works too (`realm_access.roles` for Keycloak realm roles). If the ID token does not have it, the provider's userinfo endpoint is asked |
+  | `username_claim` | `preferred_username` | The claim shown as the user's name (then `email`, then `sub`). The audit log also records `sub`, which never changes |
+  | `scopes` | `openid profile email` | Add what your provider needs for the groups claim (often `groups`) |
+  | `session_hours` | `12` | A login ends after this long; the next one goes through the provider again (usually without a prompt) |
+  | `label` | `single sign-on` | The name on the login button |
+  | `ca_file` | system CAs | CA certificate (PEM) for a provider with a private CA |
+
+  Microsoft Entra ID sends group object ids in `groups` (add the groups
+  claim under Token configuration), so `roles` lists ids, or define app
+  roles and set `groups_claim: roles`. With more than 200 groups it
+  leaves the claim out; have it send only the groups assigned to the
+  application. Google has no groups claim: `groups_claim: email` with
+  the addresses under `roles` works for a few people.
+
+  The provider is not asked again during a session, so someone removed
+  from a group keeps their role until the session ends (`session_hours`).
+  **Log out** ends the GUI's session, not the provider's.
+- **LDAP / Active Directory:** people type their directory name and
+  password into the login form. The GUI finds the account with the bind
+  account, binds as it with the password, and reads its groups. A name
+  that belongs to a local user is checked locally only: a local password
+  is never sent to the directory. LDAP needs one more package: `pip
+  install 'clabfleet[ldap]'` (ldap3).
+
+  | Setting | Default | |
+  |---|---|---|
+  | `url` | | `ldaps://host[:port]`, or `ldap://host[:port]`, which is upgraded with StartTLS. The server's certificate is verified |
+  | `ca_file` | system CAs | CA certificate (PEM) of the domain's CA |
+  | `start_tls` | `true` for `ldap://` | `false` sends passwords in clear text (a warning at start-up); for tests only |
+  | `bind_dn`, `bind_password` or `bind_password_env` | anonymous | The account that looks users up. It needs to read users and their groups, nothing more |
+  | `user_base` | | Where users are searched (the whole subtree) |
+  | `user_filter` | Active Directory accounts by `sAMAccountName`, not disabled | The search for a user; `{username}` is the name typed, escaped. For another directory, e.g. `(&(objectClass=inetOrgPerson)(uid={username}))` |
+  | `username_attribute` | `sAMAccountName` | The attribute shown as the user's name (`uid` elsewhere) |
+  | `group_attribute` | `memberOf` | The attribute of the user that lists their groups' DNs |
+  | `nested_groups` | `false` | Active Directory: also count groups reached through other groups (searched under `group_base`, default `user_base`) |
+  | `recheck` | `300` | Seconds between checks that a logged-in user is still there with the same role |
+  | `timeout` | `10` | Seconds to wait for the server |
+  | `label` | `directory` | What the login form calls it ("your ... name and password") |
+
+  `roles` takes the groups' full DNs (compared without case), so a group
+  of the same name somewhere else in the tree does not count. A user's
+  primary group (Domain Users) is not in `memberOf`.
+
+  Every `recheck` seconds the GUI looks each logged-in user up again: a
+  changed group changes their role, and someone disabled, deleted or out
+  of every mapped group is logged out and their terminals close. If the
+  directory does not answer, logins hold for up to an hour past their
+  check and then end. Wrong passwords are limited like local ones (5 per
+  minute per address and per name), which also keeps the GUI from locking
+  directory accounts.
+- **Changed settings** end the directory logins made with the old ones
+  (a new secret, label or CA file does not). `--single-token` and
+  `--directory` exclude each other.
 
 ## Login and sessions
 
@@ -401,8 +521,9 @@ containers. They can also open shells on every node and, through
 only trusted people operators; `viewer` is the role for anyone else.
 Tokens are bearer secrets: anyone with a login link is that user until you
 rotate it. Passwords are only as strong as people make them; for a team,
-plan to put the GUI behind your directory (LDAP / Active Directory, or
-OAuth / OIDC through a reverse proxy) rather than rely on them.
+let people log in through your directory instead (see
+[Logging in through your directory](#logging-in-through-your-directory)):
+OIDC brings the provider's multi-factor login with it.
 Terminals and captures that are already open are closed
 within a few seconds when their user is removed, rotated, demoted from
 operator or logs out.

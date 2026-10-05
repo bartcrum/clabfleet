@@ -36,6 +36,8 @@ clabfleet/
   gui/
     server.py      # aiohttp app: API, auth middleware, terminal websockets
     auth.py        # Users file, roles, audit log
+    directory.py   # Directory logins: settings, groups to roles, LDAP / Active Directory
+    oidc.py        # OpenID Connect: the code flow with PKCE, ID token checks
     state.py       # Topology discovery, running labs
     jobs.py        # Deploy/destroy/save/snapshot jobs and their history
     terminals.py   # Local pty, SSH-channel and live capture sessions

@@ -10,7 +10,10 @@ localhost by default and every request must be authenticated. Two modes:
   their own token, and the user's role decides what they may do (see
   ``_allowed``: anything but a plain read needs an operator unless the
   handler is marked ``allow_viewer``). Logins, jobs, edits and terminal
-  sessions go to the audit log.
+  sessions go to the audit log. With a directory (``directory.py``),
+  people also log in through OpenID Connect (``/login/oidc``) or with
+  their LDAP / Active Directory name and password, and their groups give
+  them their role.
 
 In both modes passwords and tokens are only sent in the body of
 ``POST /login`` (login links carry the token in the URL fragment, which
@@ -52,8 +55,12 @@ from .auth import (
     login_link, operator_only, temporary_password,
 )
 from .captures import open_capture, pcap_filename, spec_from_query
+from .directory import LDAP, OIDC, Directory, DirectoryError, DirectoryUser, LoginRefused
+from .directory import GRACE as DIRECTORY_GRACE
+from .directory import RETRY as DIRECTORY_RETRY
 from .editing import EditConflict
 from .jobs import Job, JobManager
+from .oidc import OidcClient
 from .sessions import (
     CAPTURE, MAX_SESSIONS, MAX_USER_SESSIONS, TERMINAL, OpenSession, SessionLimitError,
     SessionRegistry,
@@ -73,7 +80,11 @@ SESSIONS_PER_USER = 20                # a further login ends that user's oldest 
 LOGIN_FAILURES = 5                    # failed logins allowed per remote address ...
 LOGIN_WINDOW = 60                     # ... in this many seconds; then 429 until it ends
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-PUBLIC_PATHS = {"/", "/login"}        # the page (it shows the login form) and the login
+# The page (it shows the login form) and the logins
+OIDC_CALLBACK = "/login/oidc/callback"
+PUBLIC_PATHS = {"/", "/login", "/login/oidc", OIDC_CALLBACK}
+OIDC_COOKIE = "clabfleet_oidc"        # the state of a login under way at the provider
+OIDC_COOKIE_AGE = 600                 # seconds it may take there
 MUST_CHANGE_PATHS = {"/api/me", "/api/password", "/logout"}  # all a must_change user may do
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
        "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
@@ -94,6 +105,12 @@ class _Session:
     credential: str    # User.credential at login: a new token or password ends the session
     created: float     # Unix seconds, so sessions kept on disk survive a restart
     last_seen: float
+    # Directory logins only (their credential is the directory configuration's
+    # fingerprint: a changed configuration ends the session)
+    source: str = ""      # "oidc" or "ldap"
+    role: str = ""        # from the user's groups at login or at the last re-check
+    checked: float = 0.0  # when the directory last confirmed the user
+    expires: float = 0.0  # when the session ends regardless; 0: SESSION_MAX_AGE only
 
 
 @dataclass
@@ -113,16 +130,27 @@ class Auth:
     id) and a restarted GUI with the same ``instance`` (its port) takes them
     over, so nobody has to log in again. In single-token mode the token
     changes with each start; sessions then belong to "the operator" rather
-    than to one token."""
+    than to one token.
+
+    With a ``directory`` (named-user mode only), people in it log in too.
+    They are not in the users file: their session carries their role, and
+    holds for as long as the directory vouches for them (see
+    ``directory.py``)."""
 
     def __init__(self, token: Optional[str] = None, users: Optional[UserStore] = None,
                  public_url: Optional[str] = None, *, instance: Optional[str] = None,
-                 session_file: Optional[SessionFile] = None):
+                 session_file: Optional[SessionFile] = None,
+                 directory: Optional[Directory] = None):
         if not token and not users:
             raise ValueError("Need a token or a users file")
+        if directory and not users:
+            raise ValueError("A directory needs named users (not --single-token)")
         self.token = token
         self.users = users
         self.public_url = public_url
+        self.directory = directory
+        self.oidc = OidcClient(directory.oidc) if directory and directory.oidc else None
+        self._tried: dict[str, float] = {}  # LDAP name -> when its re-check last failed
         # Browsers send a host's cookies to all of its ports, so each GUI
         # instance has its own cookie name
         self.instance = instance or secrets.token_hex(4)
@@ -163,6 +191,21 @@ class Auth:
             return None
         return self.users.check_password(name, password)
 
+    @property
+    def ldap(self):
+        return self.directory.ldap if self.directory else None
+
+    def directory_user(self, who: DirectoryUser, source: str) -> User:
+        """The GUI user for someone the directory let in. Local users keep
+        their names: a directory user with one of them is refused."""
+        if not who.role:
+            raise LoginRefused(f"{who.name} is in no group that may use this GUI",
+                               authenticated=True)
+        if who.name.casefold() in {n.casefold() for n in self.users.users()}:
+            raise LoginRefused(f"{who.name} is also the name of a local user of this GUI; "
+                               "log in as that user, or have it removed", authenticated=True)
+        return User(who.name, who.role, source=source)
+
     def start_session(self, user: User) -> str:
         """A new session id for ``user``. Beyond SESSIONS_PER_USER, the
         user's oldest sessions end."""
@@ -174,7 +217,13 @@ class Auth:
         sid = secrets.token_urlsafe(32)
         # Single-token mode: no token to tie the session to (it changes per start)
         tied = user.credential if self.multi_user else ""
-        self._sessions[hash_token(sid)] = _Session(user.name, tied, now, now)
+        session = _Session(user.name, tied, now, now)
+        if user.source:
+            session = _Session(user.name, self.directory.fingerprint(user.source), now, now,
+                               user.source, user.role, now)
+            if user.source == OIDC:
+                session.expires = now + self.directory.oidc.session_hours * 3600
+        self._sessions[hash_token(sid)] = session
         self._save()
         return sid
 
@@ -185,7 +234,11 @@ class Auth:
         now = time.time()
         if not session or self._expired(session, now):
             return None
-        if self.multi_user:
+        if session.source:
+            user = self._directory_session(session, now)
+            if not user:
+                return None
+        elif self.multi_user:
             # Re-read the user each time: removed or rotated users are out at once
             user = self.users.get(session.name)
             if not user or not hmac.compare_digest(user.credential, session.credential):
@@ -200,6 +253,45 @@ class Auth:
                 self._save()
         return user
 
+    def _directory_session(self, session: _Session, now: float) -> Optional[User]:
+        """The user of a directory login, while its directory is configured
+        as it was and (LDAP) confirmed the user not too long ago, and no
+        local user has taken the name since."""
+        configured = self.directory.fingerprint(session.source) if self.directory else None
+        if not configured or not hmac.compare_digest(configured, session.credential):
+            return None
+        if session.name.casefold() in {n.casefold() for n in self.users.users()}:
+            return None
+        if session.source == LDAP and (
+                now - session.checked > self.ldap.config.recheck + DIRECTORY_GRACE):
+            return None
+        return User(session.name, session.role, source=session.source)
+
+    def ldap_due(self) -> list[str]:
+        """The LDAP users with a session the directory should confirm again."""
+        if not self.ldap:
+            return []
+        now = time.time()
+        return sorted({s.name for s in self._sessions.values()
+                       if s.source == LDAP and now - s.checked >= self.ldap.config.recheck
+                       and now - self._tried.get(s.name, 0) >= DIRECTORY_RETRY})
+
+    def ldap_checked(self, name: str, role: Optional[str], reachable: bool = True) -> None:
+        """The outcome of a re-check: ``role`` as the directory has it now
+        (None ends the user's sessions). Not ``reachable``: asked again in a
+        while, and the sessions hold until the grace runs out."""
+        if not reachable:
+            self._tried[name] = time.time()
+            return
+        self._tried.pop(name, None)
+        for key, session in list(self._sessions.items()):
+            if session.source == LDAP and session.name == name:
+                if role:
+                    session.role, session.checked = role, time.time()
+                else:
+                    del self._sessions[key]
+        self._save()
+
     def logout(self, request: web.Request) -> None:
         if self._sessions.pop(self._session_key(request), None):
             self._save()
@@ -211,7 +303,8 @@ class Auth:
     @staticmethod
     def _expired(session: _Session, now: float) -> bool:
         return (now - session.last_seen > SESSION_IDLE
-                or now - session.created > SESSION_MAX_AGE)
+                or now - session.created > SESSION_MAX_AGE
+                or 0 < session.expires < now)
 
     def _expire(self) -> None:
         now = time.time()
@@ -263,9 +356,11 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
                users: Optional[UserStore] = None, audit: Optional[AuditLog] = None,
                public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
                max_user_sessions: int = MAX_USER_SESSIONS, instance: Optional[str] = None,
-               session_file: Optional[SessionFile] = None) -> web.Application:
+               session_file: Optional[SessionFile] = None,
+               directory: Optional[Directory] = None) -> web.Application:
     """The GUI app. Pass ``token`` for single-token mode or ``users`` for
-    named users; ``public_url`` is the address browsers use when it differs
+    named users, with a ``directory`` for OIDC and LDAP logins next to
+    them; ``public_url`` is the address browsers use when it differs
     from what the server sees (e.g. behind a TLS-terminating proxy).
     ``max_sessions``/``max_user_sessions`` cap open terminal tabs.
     ``instance`` names the session cookie and ``session_file`` keeps logins
@@ -274,7 +369,8 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app = web.Application(middlewares=[_auth_middleware], client_max_size=16 * 1024 * 1024)
     app[WORKSPACE] = workspace
     app[JOBS] = JobManager(workspace)
-    app[AUTH] = Auth(token, users, public_url, instance=instance, session_file=session_file)
+    app[AUTH] = Auth(token, users, public_url, instance=instance, session_file=session_file,
+                     directory=directory)
     app[AUDIT] = audit_log = audit or AuditLog(None)
     app[JOBS].on_finished = lambda job: _audit_job_finished(audit_log, job)
     app.on_response_prepare.append(_security_headers)
@@ -287,6 +383,8 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.cleanup_ctx.append(_watch_sessions)
     app.router.add_get("/", _index)
     app.router.add_post("/login", _login)
+    app.router.add_get("/login/oidc", _oidc_start)
+    app.router.add_get(OIDC_CALLBACK, _oidc_callback)
     app.router.add_post("/logout", _logout)
     app.router.add_get("/api/me", _me)
     app.router.add_post("/api/password", _change_password)
@@ -331,18 +429,19 @@ def run(workspace: Workspace, host: str = "127.0.0.1", port: int = 8650,
         open_browser: bool = True, *, users: Optional[UserStore] = None,
         audit: Optional[AuditLog] = None, ssl_context: Optional[ssl.SSLContext] = None,
         public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
-        max_user_sessions: int = MAX_USER_SESSIONS) -> None:
+        max_user_sessions: int = MAX_USER_SESSIONS,
+        directory: Optional[Directory] = None) -> None:
     token = None if users else secrets.token_urlsafe(24)
     # Logins are kept per port: a restart on the same port keeps them
     state_dir = users.path.parent if users else DEFAULT_USERS_FILE.expanduser().parent
     session_file = SessionFile(state_dir / SESSION_FILE.format(instance=port))
     app = create_app(workspace, token, users=users, audit=audit, public_url=public_url,
                      max_sessions=max_sessions, max_user_sessions=max_user_sessions,
-                     instance=str(port), session_file=session_file)
+                     instance=str(port), session_file=session_file, directory=directory)
     base = public_url.rstrip("/") if public_url else _base_url(host, port, ssl_context is not None)
 
     async def _announce(_app):
-        url, text = startup_message(base, token, users, audit)
+        url, text = startup_message(base, token, users, audit, directory)
         print(text, flush=True)
         if open_browser and not users:  # a named user's token is not ours to use
             asyncio.get_running_loop().run_in_executor(None, webbrowser.open, url)
@@ -360,13 +459,18 @@ def run(workspace: Workspace, host: str = "127.0.0.1", port: int = 8650,
 
 
 def startup_message(base: str, token: Optional[str], users: Optional[UserStore],
-                    audit: Optional[AuditLog]) -> tuple[str, str]:
+                    audit: Optional[AuditLog],
+                    directory: Optional[Directory] = None) -> tuple[str, str]:
     """(URL to open, text to print) when the GUI starts."""
     if users:
         url = f"{base}/"
         lines = [f"clabfleet GUI running at:\n\n    {url}\n",
                  "Users log in with their name and password (or token link).",
                  f"Users file: {users.path}"]
+        if directory:
+            lines += directory.describe()
+            if directory.oidc:
+                lines.append(f"  Redirect URI to register there: {base}{OIDC_CALLBACK}")
         first = users.get(BOOTSTRAP_USER)
         if first and first.must_change:
             password = users.initial_password()
@@ -423,6 +527,8 @@ async def _on_shutdown(app):
 
 async def _on_cleanup(app):
     app[CAPTURE_POOL].shutdown(wait=False, cancel_futures=True)
+    if app[AUTH].oidc:
+        await app[AUTH].oidc.close()
 
 
 # ----------------------------------------------------------------------
@@ -479,6 +585,18 @@ def _cookie_secure(request: web.Request) -> bool:
     return request.secure or bool(public_url and public_url.startswith("https:"))
 
 
+def _login_headers(auth: Auth) -> dict:
+    """What the login form offers, sent with a 401: a name and password
+    (named users, who may also have a token) or the start-up token, plus
+    the directories' labels (percent-encoded: headers are not UTF-8)."""
+    headers = {"X-Clabfleet-Login": "password" if auth.multi_user else "token"}
+    if auth.oidc:
+        headers["X-Clabfleet-SSO"] = quote(auth.oidc.config.label, safe="")
+    if auth.ldap:
+        headers["X-Clabfleet-Directory"] = quote(auth.ldap.config.label, safe="")
+    return headers
+
+
 @web.middleware
 async def _auth_middleware(request: web.Request, handler):
     if request.path.startswith("/static/") or request.path in PUBLIC_PATHS:
@@ -487,10 +605,7 @@ async def _auth_middleware(request: web.Request, handler):
     auth: Auth = request.app[AUTH]
     user = auth.identify(request)
     if not user:
-        # Tells the login form what to ask for: a name and password (named
-        # users, who may also have a token) or the start-up token
-        mode = "password" if auth.multi_user else "token"
-        raise web.HTTPUnauthorized(text="not logged in", headers={"X-Clabfleet-Login": mode})
+        raise web.HTTPUnauthorized(text="not logged in", headers=_login_headers(auth))
     request[USER_KEY] = user
     if user.must_change and request.path not in MUST_CHANGE_PATHS:
         raise web.HTTPForbidden(text="Set a new password first")
@@ -528,7 +643,10 @@ async def _login(request):
     Only from the GUI's own origin and as JSON, which a form on another
     site cannot send. A session of a different user is only replaced with
     ``switch``, so a stranger's login link cannot quietly swap accounts.
-    Failures are limited per address and, for passwords, per user name."""
+    Failures are limited per address and, for passwords, per user name.
+
+    With LDAP, a name that is not a local user's is tried there. A local
+    user's password is never sent to the directory."""
     auth: Auth = request.app[AUTH]
     remote = request.remote or ""
     if not _same_origin(request):
@@ -548,9 +666,15 @@ async def _login(request):
                                           failures=LOGIN_FAILURES, seconds=LOGIN_WINDOW)
             raise web.HTTPTooManyRequests(text="too many failed logins; try again in a minute",
                                           headers={"Retry-After": str(LOGIN_WINDOW)})
+    method, extra = "password" if by_password else "token", {}
     if by_password:
+        password = body.get("password")
         user = await asyncio.get_running_loop().run_in_executor(
-            None, auth.check_password, username, body.get("password"))
+            None, auth.check_password, username, password)
+        if (not user and auth.ldap and isinstance(username, str) and isinstance(password, str)
+                and not auth.users.get(username)):
+            method = LDAP
+            user, extra = await _ldap_login(request, username, password)
     else:
         user = auth.check_token(body.get("token"))
     if not user:
@@ -573,8 +697,112 @@ async def _login(request):
     resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
                     max_age=SESSION_MAX_AGE, httponly=True, samesite="Strict",
                     secure=secure or None)
-    request.app[AUDIT].record("login", user, remote,
-                              method="password" if by_password else "token")
+    request.app[AUDIT].record("login", user, remote, method=method, **extra)
+    return resp
+
+
+async def _ldap_login(request, username: str, password: str) -> tuple[Optional[User], dict]:
+    """(user, audit details) for a name and password checked with LDAP; no
+    user if they are wrong. Someone with the right password and no role is
+    told so, and a directory that does not answer is not a failed login."""
+    auth: Auth = request.app[AUTH]
+    try:
+        who = await asyncio.to_thread(auth.ldap.authenticate, username, password)
+        return auth.directory_user(who, LDAP), {"groups": list(who.groups), "subject": who.subject}
+    except LoginRefused as exc:
+        if not exc.authenticated:
+            return None, {}
+        request.app[AUDIT].record("login_failed", None, request.remote, reason=str(exc),
+                                  username=username, method=LDAP)
+        raise web.HTTPForbidden(text=_sentence(exc))
+    except DirectoryError as exc:
+        logger.warning("ldap: %s", exc)
+        request.app[AUDIT].record("login_failed", None, request.remote, username=username,
+                                  reason="the directory could not be asked", method=LDAP)
+        raise web.HTTPServiceUnavailable(
+            text="The directory could not be reached; try again in a moment")
+
+
+def _sentence(exc: Exception) -> str:
+    text = str(exc)
+    return text[:1].upper() + text[1:]
+
+
+def _oidc_cookie(request) -> tuple[str, bool]:
+    """(name, secure) of the cookie that ties a login at the provider to this browser."""
+    secure = _cookie_secure(request)
+    name = f"{OIDC_COOKIE}_{request.app[AUTH].instance}"
+    return (f"__Host-{name}" if secure else name), secure
+
+
+def _oidc_redirect(request, location: str, state: Optional[str] = None) -> web.Response:
+    """Send the browser on, setting the state cookie or (no ``state``) dropping it."""
+    resp = web.Response(status=302, headers={"Location": location})
+    name, secure = _oidc_cookie(request)
+    if state:
+        # Lax, not Strict: it must come back with the provider's redirect
+        resp.set_cookie(name, state, path="/", max_age=OIDC_COOKIE_AGE, httponly=True,
+                        samesite="Lax", secure=secure or None)
+    else:
+        resp.del_cookie(name, path="/", secure=secure or None, httponly=True, samesite="Lax")
+    return resp
+
+
+def _oidc_failed(request, message: str, reason: Optional[str] = None, **details) -> web.Response:
+    """Back to the login form with ``message`` (in the fragment, which stays
+    out of logs); ``reason`` goes to the audit log."""
+    request.app[AUDIT].record("login_failed", None, request.remote, method=OIDC,
+                              reason=reason or message, **details)
+    return _oidc_redirect(request, f"/#login_error={quote(message, safe='')}")
+
+
+async def _oidc_start(request):
+    """Send the browser to the provider to log in."""
+    auth: Auth = request.app[AUTH]
+    if not auth.oidc:
+        raise web.HTTPNotFound(text="Single sign-on is not set up")
+    base = (auth.public_url or f"{request.scheme}://{request.host}").rstrip("/")
+    try:
+        url, state = await auth.oidc.start(f"{base}{OIDC_CALLBACK}")
+    except DirectoryError as exc:
+        logger.warning("oidc: %s", exc)
+        return _oidc_failed(request, "The identity provider could not be reached; "
+                            "try again in a moment", reason=str(exc))
+    return _oidc_redirect(request, url, state)
+
+
+async def _oidc_callback(request):
+    """The provider's answer: swap its code for who the user is, and start
+    their session. Only for the browser the login was started in (the
+    state cookie), so nobody can be logged in with someone else's answer."""
+    auth: Auth = request.app[AUTH]
+    if not auth.oidc:
+        raise web.HTTPNotFound(text="Single sign-on is not set up")
+    query = request.query
+    state, code = query.get("state", ""), query.get("code", "")
+    cookie = request.cookies.get(_oidc_cookie(request)[0], "")
+    if not state or not cookie or not hmac.compare_digest(state.encode(), cookie.encode()):
+        return _oidc_failed(request, "That login was not started in this browser; try again")
+    if "error" in query or not code:
+        answer = (query.get("error_description") or query.get("error") or "no code")[:200]
+        return _oidc_failed(request, f"The identity provider refused the login: {answer}")
+    try:
+        who = await auth.oidc.finish(state, code)
+        user = auth.directory_user(who, OIDC)
+    except LoginRefused as exc:
+        return _oidc_failed(request, _sentence(exc))
+    except DirectoryError as exc:
+        logger.warning("oidc: %s", exc)
+        return _oidc_failed(request, "The identity provider could not be reached; "
+                            "try again in a moment", reason=str(exc))
+    auth.logout(request)  # a login always starts a fresh session
+    resp = _oidc_redirect(request, "/")
+    secure = _cookie_secure(request)
+    resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
+                    max_age=SESSION_MAX_AGE, httponly=True, samesite="Strict",
+                    secure=secure or None)
+    request.app[AUDIT].record("login", user, request.remote, method=OIDC,
+                              groups=list(who.groups), subject=who.subject)
     return resp
 
 
@@ -1155,13 +1383,42 @@ async def _revalidate_sessions(app) -> None:
         await asyncio.gather(*ended, return_exceptions=True)
 
 
+async def _recheck_ldap(app) -> None:
+    """Ask the directory again about the LDAP users whose check is due:
+    their role follows their groups, and someone gone or without a role is
+    logged out."""
+    auth: Auth = app[AUTH]
+
+    async def check(name: str) -> None:
+        try:
+            who = await asyncio.to_thread(auth.ldap.lookup, name)
+        except DirectoryError as exc:
+            logger.warning("ldap: could not re-check %s: %s", name, exc)
+            auth.ldap_checked(name, None, reachable=False)
+            return
+        role = who.role if who else None
+        if not role:
+            app[AUDIT].record("directory_login_ended", name, None, method=LDAP,
+                              reason="no role in the directory any more" if who
+                              else "not in the directory any more")
+        auth.ldap_checked(name, role)
+
+    await asyncio.gather(*(check(name) for name in auth.ldap_due()))
+
+
 async def _watch_sessions(app):
     """Background task: end sessions whose login was removed, rotated or
-    logged out (incoming messages are checked as they arrive, too)."""
+    logged out (incoming messages are checked as they arrive, too), and
+    keep LDAP logins in step with the directory. Logins kept from before a
+    restart are checked before the first request is served."""
+    with contextlib.suppress(Exception):
+        await _recheck_ldap(app)
+
     async def watch():
         while True:
             await asyncio.sleep(REVALIDATE_INTERVAL)
             try:
+                await _recheck_ldap(app)
                 await _revalidate_sessions(app)
             except Exception:  # noqa: BLE001 - keep watching
                 logger.exception("Session check failed")
