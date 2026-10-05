@@ -462,7 +462,8 @@ table.nodes td .open { display: flex; gap: 6px; }
 .login-error { color: var(--danger); }
 .login-fields { display: grid; gap: 10px; }
 .login-card input.sans { font-family: var(--sans); }
-.login-fields[hidden], .login-card input[hidden] { display: none; }
+.login-fields[hidden], .login-card input[hidden], .login-card a.btn[hidden] { display: none; }
+.login-card a.btn { justify-content: center; text-align: center; text-decoration: none; }
 .link-btn {
   border: 0; background: none; padding: 0; color: var(--muted); cursor: pointer;
   justify-self: start; text-decoration: underline;

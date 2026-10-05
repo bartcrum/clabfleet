@@ -235,7 +235,9 @@ operator unless marked otherwise. Logins, jobs, edits and terminal
 sessions go to a JSON Lines audit log. `--tls-cert`/`--tls-key` serve
 HTTPS, and a non-loopback `--bind` without TLS is refused unless
 `--insecure-http` is given. Without a users file the GUI keeps its
-single-token mode.
+single-token mode. People can also log in through OpenID Connect or
+LDAP / Active Directory (`~/.clabfleet/directory.yaml`), with their role
+from their groups.
 
 The GUI is single-token and localhost only. For a shared jump host: named
 users with per-user tokens, an audit log of terminal sessions and

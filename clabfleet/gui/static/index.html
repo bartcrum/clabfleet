@@ -297,6 +297,7 @@
   <div id="login" class="login" hidden>
     <form id="login-form" class="login-card">
       <h1>clabfleet</h1>
+      <a id="login-sso" class="btn primary" href="/login/oidc" hidden></a>
       <p id="login-hint" class="muted small"></p>
       <div id="login-fields" class="login-fields" hidden>
         <input id="login-user" class="sans" autocomplete="username" autocapitalize="off"
@@ -358,7 +359,9 @@
           <button class="btn primary small" type="submit">Add</button>
         </div>
         <p class="muted small">Operators can deploy, destroy, edit and open terminals; viewers
-          only look. A temporary password is replaced by the user at their first login.</p>
+          only look. A temporary password is replaced by the user at their first login.
+          People who log in through a directory are not listed: their groups give them
+          their role.</p>
         <p id="users-error" class="login-error small" role="alert" hidden></p>
       </form>
     </div>

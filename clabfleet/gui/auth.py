@@ -152,6 +152,7 @@ class User:
     created: str = ""
     password: str = ""      # scrypt string; "" for a user without a password
     must_change: bool = False  # may only set a new password (the first admin)
+    source: str = ""        # "oidc" or "ldap" for a directory user (not in the users file)
 
     @property
     def is_operator(self) -> bool:
@@ -408,8 +409,10 @@ class SessionFile:
     Holds the SHA-256 of each session id, never the id itself: reading the
     file does not let anyone use a session. Each entry also has the user
     name, the user's ``credential`` at login (a new token or password ends
-    the session) and its creation and last-use times (Unix seconds). A file
-    other users could change is not used, as for the users file.
+    the session) and its creation and last-use times (Unix seconds). A
+    directory login's entry also has where it came from, its role, when the
+    directory last confirmed it and when it ends. A file other users could
+    change is not used, as for the users file.
     """
 
     def __init__(self, path: Path):
@@ -417,7 +420,8 @@ class SessionFile:
         self.usable = True
 
     def load(self) -> dict[str, dict]:
-        """Session hash -> {name, credential, created, last_seen}."""
+        """Session hash -> {name, credential, created, last_seen, source,
+        role, checked, expires}."""
         try:
             check_private(self.path, "Sessions file")
             data = json.loads(self.path.read_text())
@@ -430,7 +434,11 @@ class SessionFile:
                     out[key] = {"name": str(s.get("name", "")),
                                 "credential": str(s.get("credential", "")),
                                 "created": float(s.get("created", 0)),
-                                "last_seen": float(s.get("last_seen", 0))}
+                                "last_seen": float(s.get("last_seen", 0)),
+                                "source": str(s.get("source", "")),
+                                "role": str(s.get("role", "")),
+                                "checked": float(s.get("checked", 0)),
+                                "expires": float(s.get("expires", 0))}
             return out
         except FileNotFoundError:
             return {}
