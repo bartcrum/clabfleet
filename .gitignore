@@ -15,3 +15,6 @@ configs/
 *.import-report.yaml
 users.yaml
 audit.jsonl
+
+# Local notes for Claude Code
+CLAUDE.md
