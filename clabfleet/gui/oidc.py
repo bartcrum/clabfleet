@@ -3,9 +3,9 @@ flow with PKCE).
 
 ``OidcClient.start`` gives the address at the provider to send the browser
 to; the provider sends it back to ``/login/oidc/callback`` with a code,
-which ``OidcClient.finish`` swaps for an ID token. The token's signature is
-checked against the provider's published keys, and its issuer, audience,
-expiry and nonce against what this login expects. The user's name and
+which ``OidcClient.finish`` swaps for an ID token. The token is checked
+with PyJWT: its signature against the provider's published keys, and its
+issuer, audience and dates; then its nonce against this login. The user's name and
 groups are read from its claims (and from the provider's userinfo endpoint
 when the token has no groups).
 
@@ -27,10 +27,8 @@ from typing import Optional
 from urllib.parse import quote, urlencode
 
 import aiohttp
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
-from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+import jwt
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from .directory import (
     DirectoryError, DirectoryUser, LoginRefused, OidcConfig, check_name, is_loopback_url,
@@ -47,116 +45,87 @@ HTTP_TIMEOUT = 10        # seconds for each request to the provider
 MAX_RESPONSE = 1 << 20   # bytes read of a provider's answer
 MIN_RSA_BITS = 2048
 
-HASHES = {"256": hashes.SHA256, "384": hashes.SHA384, "512": hashes.SHA512}
-CURVES = {"ES256": ("P-256", ec.SECP256R1), "ES384": ("P-384", ec.SECP384R1),
-          "ES512": ("P-521", ec.SECP521R1)}
-
-
-def _b64(text: str) -> bytes:
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
-
-
-def _uint(text: str) -> int:
-    return int.from_bytes(_b64(text), "big")
+# Signatures only a holder of the provider's private key can make. Never
+# "none", and never HS256, where the "key" would be something we hold.
+ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
+                        "ES256", "ES384", "ES512"})
 
 
 def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
-def _verify(alg: str, key: dict, signature: bytes, signed: bytes) -> None:
-    """Raise unless ``signature`` is ``key``'s over ``signed``."""
-    digest = HASHES[alg[2:]]()
-    if alg.startswith("ES"):
-        name, curve = CURVES[alg]
-        if key.get("kty") != "EC" or key.get("crv") != name:
-            raise InvalidSignature
-        public = ec.EllipticCurvePublicNumbers(_uint(key["x"]), _uint(key["y"]),
-                                               curve()).public_key()
-        half = len(signature) // 2  # the two numbers of the signature, side by side
-        der = encode_dss_signature(int.from_bytes(signature[:half], "big"),
-                                   int.from_bytes(signature[half:], "big"))
-        public.verify(der, signed, ec.ECDSA(digest))
-        return
-    if key.get("kty") != "RSA":
-        raise InvalidSignature
-    public = rsa.RSAPublicNumbers(_uint(key["e"]), _uint(key["n"])).public_key()
-    if public.key_size < MIN_RSA_BITS:
-        raise InvalidSignature
-    pad = (padding.PSS(padding.MGF1(digest), digest.digest_size) if alg.startswith("PS")
-           else padding.PKCS1v15())
-    public.verify(signature, signed, pad, digest)
-
-
 def jwt_header(token: str) -> dict:
     try:
-        header = json.loads(_b64(token.split(".")[0]))
-    except (ValueError, AttributeError) as exc:
-        raise LoginRefused("the ID token is not a JWT") from exc
-    if not isinstance(header, dict):
-        raise LoginRefused("the ID token is not a JWT")
-    return header
+        return jwt.get_unverified_header(token)
+    except jwt.InvalidTokenError as exc:
+        raise LoginRefused("the ID token is not a signed JWT") from exc
 
 
-def verify_jwt(token: str, keys: list) -> dict:
-    """The claims of a JWT signed by one of ``keys`` (JWKs); LoginRefused
-    otherwise. Only public-key signatures count: never "none", and never
-    HS256, where the signing key would be something we hold."""
+def _signing_key(jwk: dict, alg: str):
+    """The public key of a JWK if it may have signed with ``alg``, else None."""
+    if not isinstance(jwk, dict) or jwk.get("use", "sig") != "sig" or jwk.get("alg", alg) != alg:
+        return None
+    try:
+        key = jwt.PyJWK(jwk).key
+    except jwt.PyJWTError:
+        return None  # a key type or curve this does not read
+    if isinstance(key, rsa.RSAPublicKey) and key.key_size < MIN_RSA_BITS:
+        return None
+    return key
+
+
+def verify_id_token(token: str, keys: list, issuer: str, client_id: str, nonce: str) -> dict:
+    """The claims of an ID token; LoginRefused unless one of ``keys`` (the
+    provider's JWKs) signed it and it is from ``issuer``, for this client,
+    in date and the answer to the login that sent ``nonce``.
+
+    PyJWT checks the signature, issuer, audience and dates. What OpenID
+    Connect adds to a JWT is checked here: the authorized party, the nonce
+    and the subject."""
     header = jwt_header(token)
     alg, kid = header.get("alg"), header.get("kid")
-    if (not isinstance(alg, str) or alg[:2] not in ("RS", "PS", "ES") or alg[2:] not in HASHES):
+    if alg not in ALGORITHMS:
         raise LoginRefused(f"the ID token is signed with {alg!r}, which is not accepted")
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise LoginRefused("the ID token is not a signed JWT")
-    try:
-        signature = _b64(parts[2])
-    except ValueError as exc:
-        raise LoginRefused("the ID token is not a signed JWT") from exc
-    signed = f"{parts[0]}.{parts[1]}".encode()
-    for key in keys:
-        if (not isinstance(key, dict) or (kid and key.get("kid") != kid)
-                or key.get("use", "sig") != "sig" or key.get("alg", alg) != alg):
+    claims = None
+    for jwk in keys:
+        if kid and (not isinstance(jwk, dict) or jwk.get("kid") != kid):
+            continue
+        key = _signing_key(jwk, alg)
+        if key is None:
             continue
         try:
-            _verify(alg, key, signature, signed)
-        except (InvalidSignature, KeyError, ValueError, TypeError):
-            continue
-        try:
-            claims = json.loads(_b64(parts[1]))
-        except ValueError as exc:
-            raise LoginRefused("the ID token's claims are not JSON") from exc
-        if not isinstance(claims, dict):
-            raise LoginRefused("the ID token's claims are not JSON")
-        return claims
-    raise LoginRefused("the ID token's signature is not from the provider's keys")
-
-
-def check_id_token(claims: dict, issuer: str, client_id: str, nonce: str,
-                   now: Optional[float] = None) -> None:
-    """Raise LoginRefused unless the ID token is from ``issuer``, for this
-    client, in date and the answer to the login that sent ``nonce``."""
-    now = time.time() if now is None else now
-    if claims.get("iss") != issuer:
-        raise LoginRefused(f"the ID token is from {claims.get('iss')!r}, not {issuer}")
-    aud = claims.get("aud")
-    audiences = aud if isinstance(aud, list) else [aud]
-    if client_id not in audiences:
-        raise LoginRefused("the ID token is for another application")
-    if (len(audiences) > 1 or "azp" in claims) and claims.get("azp") != client_id:
+            claims = jwt.decode(
+                token, key, algorithms=[alg], audience=client_id, issuer=issuer,
+                leeway=CLOCK_SKEW, options={"require": ["iss", "aud", "exp", "iat", "sub"]})
+            break
+        except (jwt.InvalidSignatureError, jwt.InvalidKeyError, jwt.InvalidAlgorithmError,
+                TypeError):
+            continue  # not this key: a key of another kind, or not its signature
+        except jwt.ExpiredSignatureError as exc:
+            raise LoginRefused("the ID token has expired") from exc
+        except (jwt.ImmatureSignatureError, jwt.InvalidIssuedAtError) as exc:
+            raise LoginRefused(
+                "the ID token is not valid yet (check this machine's clock)") from exc
+        except jwt.InvalidAudienceError as exc:
+            raise LoginRefused("the ID token is for another application") from exc
+        except jwt.InvalidIssuerError as exc:
+            raise LoginRefused(f"the ID token is not from {issuer}") from exc
+        except jwt.MissingRequiredClaimError as exc:
+            raise LoginRefused(f"the ID token has no '{exc.claim}' claim") from exc
+        except jwt.InvalidTokenError as exc:
+            raise LoginRefused(f"the ID token is not valid: {exc}") from exc
+    if claims is None:
+        raise LoginRefused("the ID token's signature is not from the provider's keys")
+    aud = claims["aud"]
+    if (isinstance(aud, list) and len(aud) > 1 or "azp" in claims) and claims.get("azp") != client_id:
         raise LoginRefused("the ID token was issued to another application")
-    exp, iat = claims.get("exp"), claims.get("iat")
-    numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (exp, iat))
-    if not numbers or exp <= now - CLOCK_SKEW:
-        raise LoginRefused("the ID token has expired")
-    nbf = claims.get("nbf", iat)
-    if iat > now + CLOCK_SKEW or not isinstance(nbf, (int, float)) or nbf > now + CLOCK_SKEW:
-        raise LoginRefused("the ID token is not valid yet (check this machine's clock)")
     got = claims.get("nonce")
     if not isinstance(got, str) or not hmac.compare_digest(got.encode(), nonce.encode()):
         raise LoginRefused("the ID token does not belong to this login")
-    if not isinstance(claims.get("sub"), str) or not claims["sub"]:
+    if not isinstance(claims["sub"], str) or not claims["sub"]:
         raise LoginRefused("the ID token names no subject")
+    return claims
 
 
 def claim(claims: dict, name: str):
@@ -338,8 +307,7 @@ class OidcClient:
             raise LoginRefused(f"the provider gave no ID token: {str(detail or status)[:200]}")
         id_token = tokens["id_token"]
         keys = await self._signing_keys(jwt_header(id_token).get("kid"))
-        claims = verify_jwt(id_token, keys)
-        check_id_token(claims, cfg.issuer, cfg.client_id, pending.nonce)
+        claims = verify_id_token(id_token, keys, cfg.issuer, cfg.client_id, pending.nonce)
         if claim(claims, cfg.groups_claim) is None and "_claim_names" not in claims:
             claims = {**await self._userinfo(meta, tokens, claims["sub"]), **claims}
         return user_from_claims(cfg, claims)

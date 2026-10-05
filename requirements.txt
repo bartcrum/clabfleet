@@ -4,7 +4,7 @@ paramiko>=3.4
 # Web GUI (`clabfleet gui`, the "gui" extra)
 aiohttp>=3.13.3
 ruamel.yaml>=0.17.21
-cryptography>=42  # checks OIDC ID tokens (paramiko needs it too)
+PyJWT[crypto]>=2.8  # checks OIDC ID tokens
 
 # Optional: LDAP / Active Directory logins in the GUI (the "ldap" extra)
 # ldap3>=2.9
