@@ -11,6 +11,7 @@ import os
 import posixpath
 import shlex
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,11 +36,40 @@ class CommandError(Exception):
 
 
 class PrivilegeError(Exception):
-    """containerlab needs root on a host and was not told to use sudo."""
+    """containerlab needs root on a host and did not get it: clabfleet was
+    not told to use sudo, or sudo wants a password."""
 
 
 # How containerlab refuses a command that needs root
 NEEDS_ROOT = "requires root privileges"
+# How sudo refuses when it would have to ask for a password and may not
+# (`sudo -n`) or cannot (no terminal)
+SUDO_NEEDS_PASSWORD = ("a password is required", "a terminal is required")
+SUDO_HELP = ("Unlock sudo first (`sudo -v` in the terminal clabfleet runs in; it lasts "
+             "a few minutes), or let sudo run containerlab without a password "
+             "(see docs/troubleshooting.md)")
+
+
+def local_root_problem(sudo: bool) -> Optional[str]:
+    """Why containerlab will not get root on this machine, or None if it
+    should: what a deploy would run into, known before anyone tries one.
+
+    With ``sudo``: sudo would ask for a password, which a GUI job cannot
+    type. Without: containerlab is not installed setuid (where its own
+    ``clab_admins`` group decides), so it needs sudo."""
+    if os.geteuid() == 0:
+        return None
+    if sudo:
+        try:
+            ok = subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+        except OSError:
+            return "--sudo was given, but there is no sudo on this machine"
+        return None if ok else f"sudo asks for a password here, so deploys will fail. {SUDO_HELP}"
+    path = shutil.which("containerlab")
+    if not path or os.stat(path).st_mode & stat.S_ISUID:
+        return None
+    return ("containerlab needs root here, so deploys will fail. Start clabfleet with --sudo "
+            "(or CLAB_SUDO=1)")
 
 
 @dataclass
@@ -94,9 +124,14 @@ class Runner:
 
         Without sudo set, a command containerlab refuses for lack of root
         raises ``PrivilegeError``, which says what to do, in place of
-        containerlab's own error. sudo is never used unless asked for."""
+        containerlab's own error. So does sudo refusing for want of a
+        password. sudo is never used unless asked for."""
         cmd = ["containerlab", *args]
         result = self.run(cmd, cwd=cwd, check=False, sudo=self.sudo, on_output=on_output)
+        if self.sudo and result.exit_code != 0 and any(
+                text in result.stderr + result.stdout for text in SUDO_NEEDS_PASSWORD):
+            raise PrivilegeError(f"sudo asks for a password on {self.name or 'this host'}, "
+                                 f"and nobody is there to type it. {SUDO_HELP}")
         if not self.sudo and result.exit_code != 0 and NEEDS_ROOT in result.stdout + result.stderr:
             raise PrivilegeError(
                 f"containerlab needs root on {self.name or 'this host'}. Run clabfleet with --sudo "

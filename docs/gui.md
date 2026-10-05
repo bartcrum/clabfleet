@@ -4,10 +4,16 @@
 pip install -e ".[gui]"     # aiohttp, plus ruamel.yaml for saving edits
 pip install -e ".[gui,ldap]"  # with LDAP / Active Directory logins (ldap3)
 
-cd ~/Work/clabfleet
-clabfleet --sudo gui                     # this machine
+clabfleet --sudo gui                     # this machine; topologies under the current folder
+clabfleet --sudo gui --dir ~/labs        # topologies somewhere else
 clabfleet gui --cluster topologies/cluster.yaml   # all cluster hosts
 ```
+
+Deploying needs root for containerlab, and the GUI cannot type a sudo
+password: set that up once, as in
+[First-time setup](troubleshooting.md#first-time-setup-root-for-containerlab).
+The GUI warns at start-up if deploys would fail. For anything else that
+goes wrong, see [Troubleshooting](troubleshooting.md#troubleshooting).
 
 It prints its address (`http://localhost:8650/`); log in there. The first
 time, the users file `~/.clabfleet/users.yaml` is created with one user,
