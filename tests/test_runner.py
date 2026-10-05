@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from clabfleet.runner import CommandError, CommandResult, PrivilegeError, Runner, SSHRunner
@@ -163,3 +165,71 @@ def test_containerlab_is_otherwise_untouched():
     assert asked.containerlab(["broken"], check=False).exit_code == 1
     with pytest.raises(CommandError):
         asked.containerlab(["broken"])
+
+
+class _LockedSudo(Runner):
+    """A host where sudo wants a password and may not ask for it."""
+
+    name = "lab-a"
+
+    def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
+        return CommandResult(1, "", "sudo: a password is required")
+
+
+def test_containerlab_says_what_to_do_when_sudo_wants_a_password():
+    with pytest.raises(PrivilegeError) as exc:
+        _LockedSudo(sudo=True).containerlab(["deploy", "-t", "x.clab.yml"])
+    assert "sudo asks for a password on lab-a" in str(exc.value)
+    assert "sudo -v" in str(exc.value) and "docs/troubleshooting.md" in str(exc.value)
+    # Not asked to use sudo: its messages are not ours to explain
+    with pytest.raises(CommandError):
+        _LockedSudo().containerlab(["deploy", "-t", "x.clab.yml"])
+
+
+def test_local_root_problem(tmp_path, monkeypatch):
+    from clabfleet import runner
+
+    def sudo_answers(code):
+        def run(cmd, **kwargs):
+            assert cmd == ["sudo", "-n", "true"]
+            return subprocess.CompletedProcess(cmd, code, b"", b"")
+        monkeypatch.setattr(runner.subprocess, "run", run)
+
+    binary = tmp_path / "containerlab"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(runner.shutil, "which", lambda name: str(binary))
+    monkeypatch.setattr(runner.os, "geteuid", lambda: 1000)
+
+    # --sudo: fine while sudo needs no password
+    sudo_answers(0)
+    assert runner.local_root_problem(True) is None
+    sudo_answers(1)
+    assert "sudo asks for a password here" in runner.local_root_problem(True)
+    # No --sudo: containerlab must be setuid to get root on its own
+    binary.chmod(0o755)
+    assert "Start clabfleet with --sudo" in runner.local_root_problem(False)
+    binary.chmod(0o4755)
+    assert runner.local_root_problem(False) is None
+    # Nothing to say without containerlab, or as root
+    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
+    assert runner.local_root_problem(False) is None
+    monkeypatch.setattr(runner.os, "geteuid", lambda: 0)
+    assert runner.local_root_problem(True) is None
+
+
+def test_gui_warns_at_start_when_deploys_would_fail(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("aiohttp")
+    from clabfleet import cli
+    from clabfleet.gui import auth, server
+
+    monkeypatch.setattr(auth, "DEFAULT_USERS_FILE", tmp_path / "home" / "users.yaml")
+    monkeypatch.setattr(server, "run", lambda *a, **kw: None)
+    asked = []
+    monkeypatch.setattr(cli, "local_root_problem",
+                        lambda sudo: asked.append(sudo) or ("no root" if sudo else None))
+    base = ["gui", "--dir", str(tmp_path), "--no-browser"]
+    assert cli.main(["--sudo", *base]) == 0  # it still starts: looking needs no root
+    assert "WARNING: no root" in capsys.readouterr().err
+    assert cli.main(base) == 0
+    assert "WARNING" not in capsys.readouterr().err
+    assert asked == [True, False]

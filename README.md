@@ -84,7 +84,9 @@ clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
 
 These print a short summary; add `--json` for the full result, for scripts.
 
-containerlab needs root. `--sudo` (or `CLAB_SUDO=1`) runs it through `sudo`;
+containerlab needs root: set that up once, see
+[First-time setup](docs/troubleshooting.md#first-time-setup-root-for-containerlab).
+`--sudo` (or `CLAB_SUDO=1`) runs it through `sudo`;
 clabfleet never uses sudo unless asked. Without it, a command containerlab
 refuses for lack of root ends with a line saying so.
 
@@ -96,6 +98,7 @@ refuses for lack of root ends with a line saying so.
 | [Web GUI](docs/gui.md) | The diagram and rack view, terminals, captures, editing topologies, users and roles, OIDC and LDAP / Active Directory logins, sessions |
 | [Multi-host cluster deployment](docs/cluster.md) | The cluster inventory, checking hosts, placement strategies and pinning, how links between hosts work |
 | [Import from live network](docs/import-live.md) | Device sources, kinds and images, interface names, sanitising configs, re-syncing |
+| [First-time setup and troubleshooting](docs/troubleshooting.md) | Root for containerlab without password prompts, failed deploys, a lab after a reboot, lost changes after Redeploy, lost admin password, directory logins |
 | [Development](docs/development.md) | Running the tests, project structure |
 
 ## Example topologies

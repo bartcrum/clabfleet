@@ -69,7 +69,7 @@ from .deployer import LabDeployer
 from .execute import LabExecutor
 from .linkcheck import all_pairs, check_links, describe, failures
 from .nodes import inspect_all, running_usage
-from .runner import HOST_KEY_POLICIES
+from .runner import HOST_KEY_POLICIES, local_root_problem
 from .exporter import (
     ExportOptions,
     build_topology,
@@ -788,6 +788,12 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
                 "or --insecure-http if the network is trusted.")
         print(f"WARNING: listening on {args.bind} over plain HTTP (--insecure-http): "
               "tokens and terminal traffic are not encrypted.", file=sys.stderr)
+
+    # Say now what a deploy would fail on, not at the first Deploy click
+    for host in cluster.hosts:
+        problem = local_root_problem(host.sudo) if host.is_local else None
+        if problem:
+            print(f"WARNING: {problem}", file=sys.stderr)
 
     if args.single_token and args.users:
         raise ValueError("--single-token and --users exclude each other")
