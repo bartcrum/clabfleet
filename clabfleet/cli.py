@@ -19,6 +19,7 @@ Usage:
     clabfleet status [--cluster <cluster.yaml>]
     clabfleet validate <topology.clab.yml>... [--cluster <cluster.yaml>] [--strict]
     clabfleet routing <topology.clab.yml> [--protocol ospf|bgp|evpn|mlag] [--live [--cluster <cluster.yaml>]] [--json]
+    clabfleet trace <topology.clab.yml> <node> <node|address> [--cluster <cluster.yaml>] [--json]
     clabfleet export-live [<inventory>] [-o output.clab.yml] [--netbox URL | --nautobot URL
                           | --ansible FILE] [--filter KEY=VALUE] [--allowed-network CIDR]
                           [--sanitise [--allow-residual] | --no-sanitise]
@@ -337,6 +338,20 @@ def _build_parser() -> argparse.ArgumentParser:
     add_cluster_arg(p_routing)
     p_routing.add_argument("--json", action="store_true", help="Print the full view as JSON")
 
+    # --- trace ---
+    p_trace = sub.add_parser(
+        "trace", help="Follow traffic from a node to a node or an address through a running lab",
+        description="Walk the running nodes' routing and bridging tables hop by hop, as "
+                    "they are now: every equal-cost branch, and VXLAN between VTEPs. "
+                    "Only read-only commands are run and nothing is sent. Exits 0 if the "
+                    "destination is reached, 1 if not.")
+    p_trace.add_argument("topology", help="Topology file the lab was deployed from")
+    p_trace.add_argument("source", help="Node the traffic starts at")
+    p_trace.add_argument("destination",
+                         help="A node (its router-id, or a host's first address) or an IPv4 address")
+    add_cluster_arg(p_trace)
+    p_trace.add_argument("--json", action="store_true", help="Print the hops and links as JSON")
+
     # --- export-live ---
     p_live = sub.add_parser(
         "export-live", help="Build a topology from live network devices (NAPALM)",
@@ -617,6 +632,9 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "routing":
         return _routing(args, cluster)
+
+    if cmd == "trace":
+        return _trace(args, cluster)
 
     if cmd == "snapshot":
         return _snapshot(args, cluster)
@@ -1162,6 +1180,59 @@ def _routing(args: argparse.Namespace, cluster: ClusterConfig | None) -> int:
     else:
         print(format_report(view, args.protocol or PROTOCOLS, live), end="")
     return 0
+
+
+def _trace(args: argparse.Namespace, cluster: ClusterConfig) -> int:
+    # The walk itself is the GUI's (its Trace tab); it needs none of the GUI's packages
+    from .gui.state import Workspace
+
+    path = Path(args.topology)
+    topo = load_topology(path)
+    workspace = Workspace(cluster, [path.resolve().parent])
+    try:
+        result = workspace.trace_topology(topo, args.source, args.destination)
+    finally:
+        workspace.close()
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(format_trace(result), end="")
+    return 0 if result["reached"] else 1
+
+
+def format_trace(result: dict) -> str:
+    """A trace as text: the verdict, each hop with its route, then the links taken."""
+    target = result["dst_node"] or result["dst"]
+    if result["dst_node"]:
+        target += f" ({result['dst']})"
+    extras = []
+    if len({e["a"] for e in result["edges"]}) < len(result["edges"]):
+        extras.append("equal-cost paths")
+    if result.get("truncated"):
+        extras.append("stopped after the hop limit")
+    verdict = "reaches" if result["reached"] else "does not reach"
+    lines = [" · ".join([f"{result['src']} {verdict} {target}", *extras]), ""]
+    heads = [f"{number:>3}. {hop['node']}" +
+             (f" [VRF {hop['vrf']}]" if hop.get("vrf") and hop["vrf"] != "default" else "")
+             for number, hop in enumerate(result["hops"], 1)]
+    width = max(map(len, heads), default=0)
+    for head, hop in zip(heads, result["hops"]):
+        details = [hop["route"].strip()] if hop.get("route") else []
+        if hop.get("error"):
+            details.append(f"error: {hop['error']}")
+        details += hop.get("notes") or []
+        lines.append(f"{head:<{width}}  {details[0]}" if details else head)
+        lines += [f"{'':{width}}  {more}" for more in details[1:]]
+    if result["edges"]:
+        lines += ["", "Links taken:"]
+    for edge in result["edges"]:
+        if edge["overlay"]:
+            vni = f" VNI {edge['vni']}" if edge["vni"] else ""
+            flood = " (flooded: address not learned)" if edge["flood"] else ""
+            lines.append(f"  {edge['a']} ~> {edge['b']}  VXLAN{vni}{flood}")
+        else:
+            lines.append(f"  {edge['a']}:{edge['a_iface']} -> {edge['b']}:{edge['b_iface']}")
+    return "\n".join(lines) + "\n"
 
 
 def _export_live(args: argparse.Namespace) -> int:

@@ -132,7 +132,11 @@ function open(src, dst) {
 function setup() {
   $("#trace-form").addEventListener("submit", trace);
   $("#trace-clear").addEventListener("click", clear);
-  document.querySelector('.dock-tab[data-pane="trace"]').addEventListener("click", () => { fillForm(); render(); });
+  document.querySelector('.dock-tab[data-pane="trace"]').addEventListener("click", () => {
+    activatePane("trace");
+    fillForm();
+    render();
+  });
   render();
 }
 

@@ -85,7 +85,8 @@ an operator.
   the VLAN's flood list). A port-channel or a Linux bond branches to its
   member links, and an MLAG pair's shared VTEP to both leaves. The path
   is highlighted on the Diagram, VXLAN hops as arcs. It only reads;
-  viewers can use it too.
+  viewers can use it too. The same walk from a terminal: `clabfleet
+  trace` ([Trace a path](cli.md#trace-a-path)).
 - **Notes and boxes:** operators can put sticky notes and labelled boxes
   ("DC1", "tenant A") on the Diagram with Note and Box: drag to move, drag
   a box's corner to resize, double-click to edit, Delete to remove.
