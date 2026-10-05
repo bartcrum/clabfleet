@@ -193,8 +193,9 @@ the previous snapshot or the committed `startup-config`.
 ### 3.2 Lab templates — M
 
 **Done.** Templates `spine-leaf`, `ring` and `campus` for `arista_ceos`,
-`cisco_iol` and `linux`, with /31 links and per-tier loopbacks. No GUI
-action yet. The `linux` kind was tested on a live deploy. The cEOS and IOL
+`cisco_iol` and `linux`, with /31 links and per-tier loopbacks. In the
+GUI, New lab starts from a template or a blank canvas (the drawing
+builder). The `linux` kind was tested on a live deploy. The cEOS and IOL
 configs are only validated.
 
 `clabfleet new spine-leaf --spines 2 --leaves 4 --kind arista_ceos` that
@@ -314,7 +315,8 @@ New `clabfleet/routing/` package, `clabfleet/gui/static/routing.js`.
 **Done.** `routing --live` and the Routing tab's Live mode. cEOS through
 `docker exec` with `| json` output; IOL, CSR and Cat8kv over SSH with
 text parsing. EVPN state is the EVPN session state and the remote VTEPs
-each VTEP has learned; EVPN routes per VNI are left for later.
+each VTEP has learned. EVPN routes per VNI followed: a cEOS VTEP's card
+on the Routing tab reads its type-2 and type-5 routes on demand.
 
 Overlay the running state on the intended view: OSPF neighbour state,
 BGP session state, uptime and prefix counts, and sessions that are up but
@@ -330,5 +332,7 @@ including DR pseudo-nodes; routing problems reported by `validate`.
 ## Not planned
 
 - Replacing containerlab's own VXLAN handling with a custom overlay.
-- A full topology designer (drag nodes and links from a palette); YAML
-  editing in 2.6 covers the need with far less code.
+
+A full topology designer (drag nodes and links from a palette) used to be
+listed here, with YAML editing in 2.6 covering the need. It was built
+after all: the Diagram tab's Edit mode and New lab.
