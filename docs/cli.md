@@ -276,6 +276,15 @@ Links taken:
 - **What is read:** routes on Arista cEOS (VRFs included), Cisco IOS kinds
   and Linux hosts; IPv4. Other kinds end the path with "cannot look up
   routes on kind ...".
+- **VRFs:** on cEOS, traffic routed to a switch is looked up in the VRF
+  it arrives in (the one with the sender's next-hop address on a
+  connected subnet), so a route that only another VRF has does not carry
+  it. Where the trace starts on a switch there is no arrival, and the VRF
+  with the most specific route is used. An address that is the switch's
+  own on a connected subnet (a gateway, also a virtual one) is reached at
+  that switch.
+- **One way:** the path there, not the way back. A ping can still fail
+  when the other end has no route to the address the ping was sent from.
 - **Branches:** every equal-cost next hop is followed, a port-channel or
   a Linux bond to each member link, and an MLAG pair's shared VTEP to
   both leaves.

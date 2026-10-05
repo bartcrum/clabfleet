@@ -84,7 +84,9 @@ an operator.
   bridged traffic the MAC and VXLAN tables, the EVPN MAC/IP routes, or
   the VLAN's flood list). A port-channel or a Linux bond branches to its
   member links, and an MLAG pair's shared VTEP to both leaves. The path
-  is highlighted on the Diagram, VXLAN hops as arcs. It only reads;
+  is highlighted on the Diagram, VXLAN hops as arcs. Routed traffic stays
+  in the VRF it arrives in, and the trace is one way: it says nothing
+  about the way back. It only reads;
   viewers can use it too. The same walk from a terminal: `clabfleet
   trace` ([Trace a path](cli.md#trace-a-path)).
 - **Notes and boxes:** operators can put sticky notes and labelled boxes

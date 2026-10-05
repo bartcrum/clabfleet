@@ -383,3 +383,106 @@ def test_trace_cli(tmp_path, monkeypatch, capsys):
     assert cli.main(["trace", str(path), "Nope", "H2"]) == 1
     assert "No node 'Nope' in t" in capsys.readouterr().err
     assert cli.main(["trace", str(tmp_path / "missing.clab.yml"), "H1", "H2"]) == 1
+
+
+def vrfs(**routes):
+    """A ``show ip route vrf all`` answer: {vrf: (prefix, kind, vias, connected) or None}."""
+    return json.dumps({"vrfs": {
+        name: {"routes": {} if r is None else {
+            r[0]: {"routeType": r[1], "vias": r[2], "directlyConnected": r[3]}}}
+        for name, r in routes.items()}})
+
+
+GATEWAY_IN_TENANT = vrfs(default=None,
+                         TENANT=("10.10.10.0/24", "connected", [{"interface": "Vlan10"}], True))
+
+
+def test_routed_traffic_stays_in_the_vrf_it_arrives_in():
+    """A host's gateway is in VRF TENANT: a route the default VRF has to
+    the destination does not carry the host's traffic."""
+    only_default = vrfs(default=("10.255.0.1/32", "eBGP", [{"interface": "Ethernet1"}], False),
+                        TENANT=None)
+    ask = asker({
+        ("H1", "ip route get"): "10.255.0.1 via 10.10.10.1 dev eth1 src 10.10.10.11 uid 0",
+        ("L1", "show ip route vrf all 10.10.10.1 "): GATEWAY_IN_TENANT,
+        ("L1", "show ip route vrf all 10.255.0.1 "): only_default,
+    })
+    r = trace(lab(), ask, "H1", "10.255.0.1")
+    assert not r["reached"] and [h["node"] for h in r["hops"]] == ["H1", "L1"]
+    assert r["hops"][1]["vrf"] == "TENANT"
+    assert r["hops"][1]["route"] == "no route to 10.255.0.1 in VRF TENANT"
+
+    # From the switch itself there is no arrival: the VRF that has the route, as before
+    ask = asker({("L1", "show ip route vrf all 10.255.0.1 "): only_default,
+                 ("S1", "show ip route"): route("default", "10.255.0.1/32", "connected",
+                                                [{"interface": "Loopback0"}], True)})
+    assert trace(lab(), ask, "L1", "10.255.0.1")["reached"]
+
+    # The gateway's subnet in two VRFs, or nowhere, or no answer about it:
+    # the VRF cannot be told, and the most specific route is taken as before
+    both = vrfs(default=("10.10.10.0/24", "connected", [{"interface": "Vlan10"}], True),
+                TENANT=("10.10.10.0/24", "connected", [{"interface": "Vlan10"}], True))
+    for about_gateway in (both, vrfs(default=None), None):
+        answers = {
+            ("H1", "ip route get"): "10.255.0.1 via 10.10.10.1 dev eth1 src 10.10.10.11 uid 0",
+            ("L1", "show ip route vrf all 10.255.0.1 "): only_default,
+            ("S1", "show ip route"): route("default", "10.255.0.1/32", "connected",
+                                           [{"interface": "Loopback0"}], True)}
+        if about_gateway:
+            answers[("L1", "show ip route vrf all 10.10.10.1 ")] = about_gateway
+        r = trace(lab(), asker(answers), "H1", "10.255.0.1")
+        assert r["reached"] and r["hops"][1]["vrf"] == "default"
+
+
+def test_routed_between_switches_in_the_next_hops_vrf():
+    """A VRF-lite hop: the next switch looks the address up in the VRF its
+    end of the link is in, not in whichever VRF has a route."""
+    ask = asker({
+        ("L1", "show ip route vrf all 10.9.9.9 "): vrfs(RED=(
+            "10.9.9.0/24", "eBGP", [{"interface": "Ethernet1", "nexthopAddr": "10.0.1.0"}], False)),
+        ("S1", "show ip route vrf all 10.0.1.0 "): vrfs(
+            default=None, RED=("10.0.1.0/31", "connected", [{"interface": "Ethernet1"}], True)),
+        ("S1", "show ip route vrf all 10.9.9.9 "): vrfs(
+            default=("10.9.9.9/32", "connected", [{"interface": "Loopback9"}], True), RED=None),
+    })
+    r = trace(lab(), ask, "L1", "10.9.9.9")
+    assert not r["reached"] and r["hops"][1] == {
+        "node": "S1", "vrf": "RED", "route": "no route to 10.9.9.9 in VRF RED"}
+
+
+def test_a_switchs_own_address_on_a_subnet_is_reached():
+    """A gateway address, also a virtual (anycast) one, is the switch
+    itself: not an address to look for on the VLAN."""
+    def interface(**addresses):
+        return json.dumps({"interfaces": {"Vlan20": {"interfaceAddress": addresses}}})
+
+    connected = vrfs(default=None,
+                     TENANT=("10.20.20.0/24", "connected", [{"interface": "Vlan20"}], True))
+    for own in (interface(primaryIp={"address": "0.0.0.0", "maskLen": 0},
+                          virtualIp={"address": "10.20.20.1", "maskLen": 24}),
+                interface(primaryIp={"address": "10.20.20.1", "maskLen": 24}),
+                interface(primaryIp={"address": "10.20.20.2", "maskLen": 24},
+                          secondaryIps={"10.20.20.1": {"address": "10.20.20.1", "maskLen": 24}})):
+        ask = asker({
+            ("H1", "ip route get"): "10.20.20.1 via 10.10.10.1 dev eth1 src 10.10.10.11 uid 0",
+            ("L1", "show ip route vrf all 10.10.10.1 "): GATEWAY_IN_TENANT,
+            ("L1", "show ip route vrf all 10.20.20.1 "): connected,
+            ("L1", "show ip interface Vlan20"): own,
+        })
+        r = trace(lab(), ask, "H1", "10.20.20.1")
+        assert r["reached"] and [h["node"] for h in r["hops"]] == ["H1", "L1"]
+        assert r["hops"][1]["route"] == (
+            "10.20.20.0/24 connected (VRF TENANT): 10.20.20.1 is L1's own address on Vlan20")
+
+    # Another address on that subnet is looked for on the VLAN, as before
+    ask = asker({
+        ("H1", "ip route get"): "10.20.20.9 via 10.10.10.1 dev eth1 src 10.10.10.11 uid 0",
+        ("L1", "show ip route vrf all 10.10.10.1 "): GATEWAY_IN_TENANT,
+        ("L1", "show ip route vrf all 10.20.20.9 "): connected,
+        ("L1", "show ip interface Vlan20"): interface(virtualIp={"address": "10.20.20.1"}),
+        ("L1", "show ip arp"): json.dumps({"ipV4Neighbors": []}),
+        ("L1", "show vxlan flood"): json.dumps({}),
+        ("L1", "show bgp evpn"): json.dumps({}),
+    })
+    r = trace(lab(), ask, "H1", "10.20.20.9")
+    assert not r["reached"] and ("L1", "show ip arp vrf TENANT 10.20.20.9 | json") in ask.asked

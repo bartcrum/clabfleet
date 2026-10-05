@@ -4,8 +4,14 @@ Walks the routing tables the way someone at the CLI would: on each node,
 look the destination up, follow every next hop (ECMP branches) to the
 node behind that interface, and go on until a node owns the address.
 
-- cEOS (``show ip route vrf all <dst> | json``): the VRF the trace is in,
-  or the one with the most specific route; a route via a VTEP is a VXLAN
+- cEOS (``show ip route vrf all <dst> | json``): the VRF the trace is in.
+  Traffic routed to the node arrives in the VRF of the interface it was
+  sent to, the one with the sender's next-hop address on its subnet, and
+  is looked up there only: a route in another VRF does not carry it. An
+  address on a connected subnet that is the node's own (a gateway, also a
+  virtual one) is reached there. Only
+  where the trace starts, or where the VRF cannot be told, the VRF with
+  the most specific route is taken. A route via a VTEP is a VXLAN
   hop to that VTEP (an EVPN overlay hop) in the same VRF. A connected
   route on a VLAN interface is finished at layer 2: ARP (or the MAC the
   sending host had) gives the port behind the VLAN, or Vxlan1 and the
@@ -116,6 +122,47 @@ def _eos_flood(ask, node: str, vlan_iface: str) -> list:
     return [{"vtep": v, "l2": True, "flood": True} for v in vteps]
 
 
+def _eos_ingress_vrf(ask, node: str, gateway: str) -> Optional[str]:
+    """The VRF traffic sent to ``gateway`` arrives in on ``node``: the one
+    whose connected subnet has that address. None if it cannot be told (no
+    such subnet, or the same one in several VRFs)."""
+    try:
+        data = json.loads(ask(node, f"show ip route vrf all {gateway} | json"))
+    except Exception:  # noqa: BLE001 - no answer: the lookup that follows says so
+        return None
+    found = [name for name, v in (data.get("vrfs") or {}).items()
+             if any(r.get("directlyConnected") or r.get("routeType") == "connected"
+                    for r in (v.get("routes") or {}).values())]
+    return found[0] if len(found) == 1 else None
+
+
+def _eos_owns(ask, node: str, iface: str, dst: str) -> bool:
+    """Is ``dst`` one of the node's own addresses on ``iface`` (primary,
+    secondary or virtual, as an anycast gateway is)?"""
+    try:
+        data = json.loads(ask(node, f"show ip interface {iface} | json"))
+    except Exception:  # noqa: BLE001 - no answer: go on as for any address on the subnet
+        return False
+    found = set()
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            if isinstance(value.get("address"), str):
+                found.add(value["address"])
+            for key, inner in value.items():
+                if key in ("secondaryIps", "virtualSecondaryIps") and isinstance(inner, dict):
+                    found.update(inner)  # keyed by address
+                walk(inner)
+        elif isinstance(value, list):
+            for inner in value:
+                walk(inner)
+
+    for entry in (data.get("interfaces") or {}).values():
+        walk(entry.get("interfaceAddress"))
+        walk(entry.get("interfaceAddressBrief"))
+    return dst in found
+
+
 def _eos_lookup(ask, node: str, dst: str, vrf: Optional[str],
                 mac: Optional[str] = None) -> tuple[str, list, str, Optional[str]]:
     data = json.loads(ask(node, f"show ip route vrf all {dst} | json"))
@@ -136,6 +183,8 @@ def _eos_lookup(ask, node: str, dst: str, vrf: Optional[str],
         iface = (vias[0] if vias else {}).get("interface", "")
         if prefix.endswith("/32") or not iface:
             return "reached", [], text, vrf
+        if _eos_owns(ask, node, iface, dst):
+            return "reached", [], f"{text}: {dst} is {node}'s own address on {iface}", vrf
         if iface.lower().startswith("vlan"):
             hops = _eos_layer2(ask, node, dst, vrf, mac) or _eos_flood(ask, node, iface)
             return "next", hops, text, vrf
@@ -145,7 +194,7 @@ def _eos_lookup(ask, node: str, dst: str, vrf: Optional[str],
         if via.get("vtepAddr"):
             hops.append({"vtep": via["vtepAddr"], "vni": via.get("vni")})
         elif via.get("interface"):
-            hops.append({"iface": via["interface"]})
+            hops.append({"iface": via["interface"], "gw": via.get("nexthopAddr")})
     return ("next" if hops else "none"), hops, text, vrf
 
 
@@ -201,7 +250,7 @@ def _linux_lookup(ask, node: str, dst: str) -> tuple[str, list, str]:
     m = _LINUX_ROUTE.search(first)
     if not m:
         return "none", [], first or f"no route to {dst}"
-    hop = {"iface": m["dev"], "l2": not m["via"]}
+    hop = {"iface": m["dev"], "l2": not m["via"], "gw": m["via"]}
     if not m["via"]:  # same subnet: the host knows the address's MAC
         neigh = _LLADDR.search(ask(node, f"ip neigh show {dst}"))
         if neigh:
@@ -234,7 +283,7 @@ def _ios_lookup(ask, node: str, dst: str) -> tuple[str, list, str]:
         if "/32" in first or "255.255.255.255" in text:
             return "reached", [], first
         return "next", [{"iface": connected[1], "l2": True}], first
-    hops = [{"iface": m[2]} for m in _IOS_VIA.finditer(text)]
+    hops = [{"iface": m[2], "gw": m[1]} for m in _IOS_VIA.finditer(text)]
     return ("next" if hops else "none"), hops, first
 
 
@@ -249,16 +298,19 @@ def trace(lab: Lab, ask: Callable[[str, str], str], src: str, dst: str,
         raise TraceError(f"'{dst}' is not an IP address") from None
     hops, edges = [], []
     seen: set[tuple[str, Optional[str]]] = set()
-    # node, VRF, MAC to bridge (after an L2 VXLAN hop), MAC known for dst
-    queue = deque([(src, None, None, None)])
+    # node, VRF, MAC to bridge (after an L2 VXLAN hop), MAC known for dst,
+    # the address the hop before routed the traffic to (its next hop)
+    queue = deque([(src, None, None, None, None)])
     reached = False
     while queue and len(hops) < MAX_HOPS:
-        node, vrf, bridge, known_mac = queue.popleft()
+        node, vrf, bridge, known_mac, gateway = queue.popleft()
+        kind = lab.kinds.get(node, "")
+        eos, ios = family(kind) == "eos", family(kind) == "ios"
+        if eos and vrf is None and gateway:
+            vrf = _eos_ingress_vrf(ask, node, gateway)
         if (node, vrf) in seen:
             continue
         seen.add((node, vrf))
-        kind = lab.kinds.get(node, "")
-        eos, ios = family(kind) == "eos", family(kind) == "ios"
         hop = {"node": node, "vrf": vrf}
         hops.append(hop)
         if node == dst_node:
@@ -312,7 +364,7 @@ def trace(lab: Lab, ask: Callable[[str, str], str], src: str, dst: str,
                         continue  # never flooded back
                     edges.append({"a": node, "b": peer, "a_iface": "", "b_iface": "", "overlay": True,
                                   "vni": nxt.get("vni"), "flood": bool(nxt.get("flood"))})
-                    queue.append((peer, vrf, mac, mac))
+                    queue.append((peer, vrf, mac, mac, None))
                 continue
             # A bundle (EOS port-channel, Linux bond) leaves on its members:
             # each is a branch (the hash picks one per flow)
@@ -332,8 +384,9 @@ def trace(lab: Lab, ask: Callable[[str, str], str], src: str, dst: str,
                 peer, my_iface, peer_iface = behind
                 edges.append({"a": node, "b": peer, "a_iface": my_iface, "b_iface": peer_iface,
                               "overlay": False, "vni": None, "flood": False})
-                # Entering a host or a node at layer 2 starts its own lookup (new VRF)
-                queue.append((peer, None, None, nxt.get("mac")))
+                # Entering a host or a node at layer 2 starts its own lookup;
+                # routed to a node, it arrives in the VRF its next hop is in
+                queue.append((peer, None, None, nxt.get("mac"), nxt.get("gw")))
     unique = []
     for e in edges:
         if e not in unique:
