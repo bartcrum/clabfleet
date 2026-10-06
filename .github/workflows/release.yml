@@ -1,0 +1,51 @@
+name: release
+
+# Pushing a tag v<version> builds the package, publishes it to PyPI and
+# makes the GitHub release. See docs/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI trusted publishing: no API token is stored anywhere
+      contents: write   # the GitHub release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: The tag is the package's version, and the changelog has it
+        run: |
+          version=$(python -c "import clabfleet; print(clabfleet.__version__)")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but clabfleet/__init__.py says $version"
+            exit 1
+          fi
+          awk -v v="$version" '$0 == "## " v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no section '## $version'"
+            exit 1
+          fi
+          if grep -q '^Not released yet' notes.md; then
+            echo "::error::CHANGELOG.md still says $version is not released"
+            exit 1
+          fi
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build
+          twine check --strict dist/*
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md

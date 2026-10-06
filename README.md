@@ -9,7 +9,7 @@ Topology files are **standard containerlab files** (`*.clab.yml`). Anything
 containerlab accepts works here, and every file in `topologies/` still
 deploys with plain `containerlab deploy`.
 
-![The web GUI's rack view of the EVPN MLAG lab: one rack for the host, a device per node with its ports and link LEDs, and a cable per link coloured by its role](docs/images/rack-view.png)
+![The web GUI's rack view of the EVPN MLAG lab: one rack for the host, a device per node with its ports and link LEDs, and a cable per link coloured by its role](https://raw.githubusercontent.com/bartcrum/clabfleet/main/docs/images/rack-view.png)
 
 *The [web GUI](docs/gui.md)'s rack view of `topologies/evpn_mlag.clab.yml`,
 running on one host.*
@@ -59,11 +59,26 @@ running on one host.*
 - Node images (e.g. Cisco IOL, cEOS) are not public — build or import them on
   each host that will run those nodes.
 
+## Install
+
+```bash
+# The CLI and the web GUI, straight from GitHub
+pip install "clabfleet[gui] @ git+https://github.com/bartcrum/clabfleet"
+clabfleet --version
+
+# Or a checkout to work on
+git clone https://github.com/bartcrum/clabfleet && cd clabfleet
+pip install -e ".[gui,dev]"
+```
+
+`[gui]` adds the web GUI, `[ldap]` LDAP / Active Directory logins and
+`[napalm]` the import from a live network. Use a virtual environment, or
+`pipx install` with the same argument. [CHANGELOG.md](CHANGELOG.md) says
+what each release changed.
+
 ## Quick start
 
 ```bash
-pip install -e .
-
 # Deploy on this machine (runs containerlab against the file in place;
 # the lab directory clab-<name>/ is created next to it)
 clabfleet --sudo deploy topologies/three_router_triangle.clab.yml
@@ -100,6 +115,7 @@ refuses for lack of root ends with a line saying so.
 | [Import from live network](docs/import-live.md) | Device sources, kinds and images, interface names, sanitising configs, re-syncing |
 | [First-time setup and troubleshooting](docs/troubleshooting.md) | Root for containerlab without password prompts, failed deploys, a lab after a reboot, lost changes after Redeploy, lost admin password, directory logins |
 | [Development](docs/development.md) | Running the tests, project structure |
+| [Releasing](docs/releasing.md) | Cutting a release: version, changelog, tag, PyPI |
 
 ## Example topologies
 
