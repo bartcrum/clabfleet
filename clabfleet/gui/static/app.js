@@ -983,14 +983,41 @@ function renderLabStats(lab, st, isTopo) {
   $("#lab-stats").replaceChildren(...items.flatMap((el, i) => (i ? [h("span", { class: "sep", "aria-hidden": "true" }, "·"), el] : [el])));
 }
 
-async function copyLabPath() {
-  const path = $("#lab-path").dataset.path;
+// Put ``text`` on the clipboard and say so ("Copied <what>"); says whether
+// it worked. Browsers only offer the clipboard to pages served over HTTPS
+// or from localhost: elsewhere the older way, copying a selection, is
+// tried, and if the browser allows neither the text is shown, selected, to
+// copy by hand.
+async function copyText(text, what) {
+  let done = false;
   try {
-    await navigator.clipboard.writeText(path);
-    toast(`Copied ${path}`);
+    await navigator.clipboard.writeText(text);
+    done = true;
   } catch {
-    toast(path);  // no clipboard (plain http): show it to copy by hand
+    const box = h("textarea", { class: "copy-box", readonly: "", "aria-hidden": "true" });
+    box.value = text;
+    document.body.append(box);
+    box.select();
+    try { done = document.execCommand("copy"); } catch { /* not allowed either */ }
+    box.remove();
   }
+  if (done) {
+    toast(`Copied ${what}`);
+    return true;
+  }
+  const shown = h("pre", { class: "copy-text mono", tabindex: "0" }, text);
+  confirmDialog({
+    title: "Copy it by hand",
+    body: ["The browser did not allow this page to copy. The text is selected: press Ctrl+C.", shown],
+    ok: "Close",
+  });
+  getSelection().selectAllChildren(shown);
+  return false;
+}
+
+function copyLabPath() {
+  const path = $("#lab-path").dataset.path;
+  copyText(path, path);
 }
 
 function setupLabMenu() {

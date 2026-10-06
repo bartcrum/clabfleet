@@ -179,6 +179,7 @@ function setupDock() {
   document.querySelector('.dock-tab[data-pane="health"]').addEventListener("click", () => { activatePane("health"); renderHealth(); });
   document.querySelector('.dock-tab[data-pane="events"]').addEventListener("click", () => { activatePane("events"); refreshEvents(); });
   $("#health-source").addEventListener("change", (ev) => { healthFilter.source = ev.target.value; renderHealth(); });
+  $("#health-copy").addEventListener("click", copyHealth);
   renderHealth();
 
   const handle = $("#dock-resize");

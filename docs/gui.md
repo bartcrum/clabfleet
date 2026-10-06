@@ -230,6 +230,10 @@ an operator.
   open) sessions, adjacencies and tunnels down, drift and neighbours not
   in the startup config. Filter by severity or source; click a row to
   select its node, link or session. The header's problem count opens it.
+  To take a problem elsewhere (a ticket, a chat), the button at the end
+  of its row copies that line, and **Copy all** copies the list as it is
+  filtered, under a line naming the lab and the time. If the browser does
+  not let the page copy, the text is shown, selected, to copy by hand.
 - **Lab header:** under the lab's name a status strip shows the nodes
   running (or ready, while booting), the hosts used, and the OSPF and BGP
   sessions up once the Routing tab has read them in Live mode. Click a

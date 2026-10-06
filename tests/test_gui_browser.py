@@ -235,6 +235,43 @@ async def steps(page):
     # Health and a drift diff tab
     await page.js("openHealth()")
     await page.until("document.querySelector('#health-list').children.length > 0")
+    # Its problems can be copied out: one line, or all that are listed.
+    # (Two problems of our own, drawn and clicked in one go: the panel
+    # redraws itself with the lab's real ones every few seconds.)
+    problems = ("[{sev: 'error', source: 'hosts', tag: 'Hosts', msg: 'clab-2 cannot be reached: no answer'},"
+                " {sev: 'warn', source: 'routing', tag: 'BGP', msg: 'Leaf-1 has a one-sided session'}]")
+    await page.js("window._copied = []; "
+                  "navigator.clipboard.writeText = async (text) => { window._copied.push(text); }")
+    await page.js(f"renderHealth({problems}); "
+                  "document.querySelector('#health-list .health-copy-one').click()")
+    await page.until("window._copied.length === 1")
+    assert await page.js("window._copied[0]") == "ERROR  Hosts: clab-2 cannot be reached: no answer"
+    assert await page.js(f"renderHealth({problems}); document.querySelector('#health-copy').hidden") is False
+    await page.js(f"renderHealth({problems}); document.querySelector('#health-copy').click()")
+    await page.until("window._copied.length === 2")
+    copied = (await page.js("window._copied[1]")).split("\n")
+    assert copied[0].startswith("spine-leaf-fabric: 2 problems (1 error, 1 warning) at ")
+    assert copied[1:] == ["ERROR  Hosts: clab-2 cannot be reached: no answer",
+                          "WARN   BGP: Leaf-1 has a one-sided session"]
+    # Where the browser withholds the clipboard (plain HTTP on another
+    # machine), the selection is copied the older way
+    await page.js("navigator.clipboard.writeText = async () => { throw new Error('denied'); }; "
+                  "document.execCommand = (cmd) => { window._old = "
+                  "[cmd, document.activeElement.value]; return true; }")
+    await page.js(f"renderHealth({problems}); "
+                  "document.querySelectorAll('#health-list .health-copy-one')[1].click()")
+    await page.until("!!window._old")
+    assert await page.js("window._old") == ["copy", "WARN   BGP: Leaf-1 has a one-sided session"]
+    # Where it allows neither, the text is shown, selected, to copy by hand
+    await page.js("document.execCommand = () => false")
+    await page.js(f"renderHealth({problems}); document.querySelector('#health-copy').click()")
+    await page.until("document.querySelector('#confirm').open")
+    shown = await page.js("document.querySelector('#confirm .copy-text').textContent")
+    assert shown.split("\n")[1:] == copied[1:]
+    assert await page.js("getSelection().toString()") == shown
+    await page.js("document.querySelector('#confirm-ok').click()")
+    # With nothing listed there is nothing to copy
+    assert await page.js("renderHealth([]); document.querySelector('#health-copy').hidden") is True
     await page.js("openDiff('spine_leaf.clab.yml', 'Leaf-1', 'running')")
     await page.until("[...document.querySelectorAll('.pane.activity-pane pre')].some(p => p.textContent.includes('No drift'))")
     # Every dock tab that is always there shows its pane when clicked
