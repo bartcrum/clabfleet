@@ -81,6 +81,30 @@ can type it into a GUI job. Either sudo was never unlocked in that
 terminal, or it has locked again since (way C times out). Set up A or B
 to be rid of it, or stop the GUI, run `sudo -v` and start it again.
 
+### A lab host stopped answering
+
+The GUI asks every host for its labs every few seconds. A host that is
+switched off, unreachable, or so busy that it does not answer within 20
+seconds shows its error in the top bar and on the Hosts page ("no answer
+within 20 seconds", or SSH's own words), and its labs show as not known.
+The rest of the GUI carries on: the other hosts are asked at the same
+time, and a host that is down is not asked again on every refresh but
+tried in the background every 30 seconds until it answers, when it comes
+back by itself.
+
+An SSH connection to a host that goes away without a word (power,
+network) is noticed after about half a minute and made anew on the next
+use.
+
+A deploy that needs a host which does not answer fails while planning
+("Host ... unreachable: no answer in time"), after at most two minutes,
+and does not hold up deploys of other labs. A job that is stuck further
+on, waiting for a command on such a host, can be ended with **Cancel
+job** in the Activity panel: the GUI stops waiting and the lab is free
+for another job. Cancel undoes nothing. What containerlab had started is
+left as it is, and a command already running on a host may still finish
+there, so look at the lab afterwards and Destroy or Redeploy it.
+
 ### After a reboot the lab is half up
 
 After the lab host restarts, the GUI shows some nodes running and others

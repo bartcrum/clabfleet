@@ -130,7 +130,7 @@ function toast(msg, opts = {}) {
 // A finished job, success or not: say so, with a way to its output and lab
 function jobDone(j) {
   const ok = j.status === "ok";
-  toast(`${j.action} ${j.lab || j.topology} ${ok ? "finished" : "failed"}`, {
+  toast(`${j.action} ${j.lab || j.topology} ${JOB_ENDED[j.status] || "failed"}`, {
     ok,
     actions: [
       { label: "View", run: () => { activatePane("activity", true); trackJob(j.id, false); } },
@@ -139,6 +139,7 @@ function jobDone(j) {
   });
 }
 
+const JOB_ENDED = { ok: "finished", cancelled: "was cancelled" };  // anything else: failed
 const MODE_LABEL = { cli: "CLI", shell: "Shell", ssh: "SSH", logs: "Logs" };
 
 // Viewers are read-only (the server enforces it; this just hides controls)
@@ -353,6 +354,7 @@ function renderJobPicker() {
   sel.replaceChildren(...jobs.map((j) => h("option", { value: j.id }, jobLabel(j))));
   if (S.viewJob) sel.value = S.viewJob;
   renderJobMeta();
+  renderJobCancel();
 }
 
 function renderJobMeta() {
@@ -363,6 +365,29 @@ function renderJobMeta() {
   const hosts = Object.entries(j.host_times || {}).map(([hst, t]) => `${hst} ${fmtDuration(t)}`).join(", ");
   meta.textContent = `${j.status === "running" ? "running" : j.status} · ${fmtDuration(end - j.started)}` +
     (hosts ? ` · ${hosts}` : "") + (j.user ? ` · by ${j.user}` : "");
+}
+
+// Cancel is offered for the job on show while it runs (operators)
+function renderJobCancel() {
+  const j = (S.state?.jobs || []).find((x) => x.id === S.viewJob);
+  $("#job-cancel").hidden = !(j && j.status === "running" && canOperate());
+}
+
+async function cancelJob() {
+  const j = (S.state?.jobs || []).find((x) => x.id === S.viewJob);
+  if (!j || j.status !== "running") return;
+  if (!(await confirmDialog({
+    title: `Cancel ${j.action} of ${j.lab || j.topology}?`,
+    body: ["The GUI stops waiting for this job, and its lab and its place are free for other jobs.",
+           "Nothing is undone: what containerlab had started stays as it is, and a command already " +
+           "running on a host may still finish there. Look at the lab afterwards, then Destroy or Redeploy it."],
+    ok: "Cancel the job", danger: true,
+  }))) return;
+  try {
+    await api(`/api/jobs/${encodeURIComponent(j.id)}/cancel`, { method: "POST" });
+  } catch (e) {
+    toast(`Not cancelled: ${e.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,6 +1686,7 @@ function setup() {
   setupLabMenu();
   $("#lab-path").addEventListener("click", copyLabPath);
   $("#refresh").addEventListener("click", () => { refreshState(); refreshHosts(); });
+  $("#job-cancel").addEventListener("click", cancelJob);
   $("#topo-search").addEventListener("input", () => renderSidebar());
   const side = $("#sidebar"), toggle = $("#side-toggle");
   const setCollapsed = (on, persist = true) => {
@@ -1712,6 +1738,7 @@ function setup() {
   setInterval(() => {
     if (document.hidden) return;
     renderJobMeta();
+    renderJobCancel();
     renderFreshness();
     if (S.steps?.live && S.steps.status === "running") renderSteps();
   }, 1000);

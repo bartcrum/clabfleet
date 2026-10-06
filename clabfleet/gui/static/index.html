@@ -245,6 +245,8 @@
         <div class="activity-bar">
           <select id="job-select" class="small" aria-label="Job"></select>
           <span id="job-meta" class="muted small mono"></span>
+          <button id="job-cancel" class="btn small danger operator-only" type="button" hidden
+                  title="Stop waiting for this job and free its place. Nothing is undone.">Cancel job</button>
         </div>
         <!-- B5: each host's way through the job, above its raw output -->
         <div id="job-steps" class="job-steps" hidden></div>

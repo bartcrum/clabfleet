@@ -55,7 +55,7 @@ from .linkcheck import check_links, describe, failures, vxlan_pairs
 from .nodes import NO_SHELL_KINDS, inspect_all, parse_inspect, running_usage
 from .placement import NodePlacement, PlacementError, PlacementPlan, compute_placement
 from .readiness import check_ready, wait_until_ready
-from .runner import CommandError, OutputCallback, Runner
+from .runner import CommandError, OutputCallback, Runner, deadline
 from .topology import Topology, dump_yaml, load_topology, topology_from_dict
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,7 @@ _VNI_LINE = re.compile(r"^(?P<path>.+?):\s*vni:\s*(?P<vni>\d+)\s*$")
 # deploys once its files and containers exist on the hosts, so until its
 # deploy finishes it is registered here and planning counts it in.
 _PLAN_LOCK = threading.RLock()
+PLAN_TIMEOUT = 120  # seconds the hosts get, together, to answer a deploy's planning
 _IN_FLIGHT: dict[str, dict] = {}  # lab → {"vnis": set, "hosts": {host: (cpu, ram)}}
 
 
@@ -130,6 +131,13 @@ class LabDeployer:
         self.on_output = on_output
         self.interactive_sudo = interactive_sudo
         self._runners = RunnerPool(lambda host: create_runner(host), interactive_sudo)
+
+    def abort(self) -> None:
+        """Stop the job this deployer is doing (from another thread): the
+        command it waits for is given up and ``CommandCancelled`` ends the
+        job. What containerlab had done by then stays as it is, and a
+        command on a remote host or under sudo may still finish there."""
+        self._runners.abort()
 
     # ------------------------------------------------------------------
     # Public API
@@ -182,7 +190,10 @@ class LabDeployer:
 
         registered = False
         try:
-            with _PLAN_LOCK:
+            # Planning asks every host and holds the lock every deploy of
+            # this process plans under: a host that stopped answering must
+            # fail this plan, not hold all the others
+            with _PLAN_LOCK, deadline(PLAN_TIMEOUT):
                 plan = self._plan(topo, strategy)
                 vni_base = self.cluster.vni_base
                 needed = count_cross_host_links(topo, plan)
