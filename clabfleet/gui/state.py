@@ -242,11 +242,16 @@ class Workspace:
     def ask_host(self, host: HostInfo, ask: Callable[[Runner], Any]) -> Any:
         """``ask(runner)`` within HOST_POLL_TIMEOUT, for the GUI's polls.
 
-        A host that does not answer (unreachable, or too slow) is marked
-        down: its error is returned at once from then on, to everything that
-        wants its runner, and it is tried again in the background every
-        HOST_RETRY seconds until it answers. So a dead host costs one wait,
-        not one per poll."""
+        A remote host that does not answer (unreachable, or too slow) is
+        marked down: its error is returned at once from then on, to
+        everything that wants its runner, and it is tried again in the
+        background every HOST_RETRY seconds until it answers. So a dead host
+        costs one wait, not one per poll.
+
+        This machine is never marked down: there is no connection to it that
+        could be lost, and a slow answer (a busy Docker during a deploy)
+        means it is busy, not gone. A poll that runs out of time fails by
+        itself, and terminals, live state and the rest go on working."""
         down = self._down.get(host.name)
         if down:
             when, why, retrying = down
@@ -263,11 +268,17 @@ class Workspace:
         except InspectError:
             raise  # the host answered: containerlab had something to say
         except Exception as exc:
+            if host.is_local:
+                raise HostUnreachable(self._why(exc)) from exc
             raise HostUnreachable(self._mark_down(host, exc)) from exc
 
+    @staticmethod
+    def _why(exc: Exception) -> str:
+        return (f"no answer within {HOST_POLL_TIMEOUT} seconds" if isinstance(exc, CommandTimeout)
+                else str(exc) or type(exc).__name__)
+
     def _mark_down(self, host: HostInfo, exc: Exception) -> str:
-        why = (f"no answer within {HOST_POLL_TIMEOUT} seconds" if isinstance(exc, CommandTimeout)
-               else str(exc) or type(exc).__name__)
+        why = self._why(exc)
         logger.warning("Host %s does not answer (%s); trying again every %ds",
                        host.name, why, HOST_RETRY)
         self._down[host.name] = (time.monotonic(), why, False)
