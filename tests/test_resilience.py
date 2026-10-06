@@ -113,6 +113,36 @@ def test_host_status_asks_hosts_at_once_too(cluster_ws):
     assert status[1]["version"] == "0.79.0" and status[1]["cpus"] == 4
 
 
+def test_this_machine_is_never_marked_down(tmp_path, monkeypatch):
+    """A slow answer from the machine the GUI runs on (a busy Docker during
+    a deploy) fails that poll and nothing else: there is no connection to
+    lose, so terminals, live state and the next poll go on as usual."""
+    monkeypatch.setattr(state, "HOST_POLL_TIMEOUT", 1)
+    slow = [True]
+
+    def inspect_all(runner):
+        if slow[0]:
+            runner.run(["sleep", "30"])
+        return {}
+
+    monkeypatch.setattr(state, "inspect_all", inspect_all)
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
+    try:
+        started = time.monotonic()
+        (only,) = ws.runtime(max_age=0)
+        assert time.monotonic() - started < 2.5   # the poll itself still has its limit
+        assert not only.ok and only.error == "no answer within 1 seconds"
+        # Not down: its runner is still handed out, and still works
+        assert ws._down == {}
+        assert ws.runner(ws.host("localhost")).run(["echo", "fine"]).stdout == "fine\n"
+        # The next poll asks again, and gets its answer as soon as there is one
+        slow[0] = False
+        (only,) = ws.runtime(max_age=0)
+        assert only.ok
+    finally:
+        ws.close()
+
+
 def test_containerlab_saying_no_is_an_answer(cluster_ws, monkeypatch):
     """An error from containerlab is the host answering: it is not marked down."""
     ws = cluster_ws

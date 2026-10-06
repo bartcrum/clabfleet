@@ -92,6 +92,11 @@ time, and a host that is down is not asked again on every refresh but
 tried in the background every 30 seconds until it answers, when it comes
 back by itself.
 
+The machine the GUI itself runs on is never treated as down. If it is too
+busy to answer one of those checks in time (during a heavy deploy, say),
+that one refresh shows "no answer within 20 seconds" and the next one
+asks again; terminals and everything else keep working meanwhile.
+
 An SSH connection to a host that goes away without a word (power,
 network) is noticed after about half a minute and made anew on the next
 use.
