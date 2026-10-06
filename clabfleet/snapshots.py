@@ -105,6 +105,15 @@ class Snapshotter:
         self.on_output = on_output
         self.interactive_sudo = interactive_sudo
         self._runners = RunnerPool(lambda host: create_runner(host), interactive_sudo)
+        self._saving: Optional[LabDeployer] = None  # the save a snapshot starts with
+        self._aborted = False
+
+    def abort(self) -> None:
+        """Stop the snapshot being taken (``LabDeployer.abort``)."""
+        self._aborted = True
+        self._runners.abort()
+        if self._saving:
+            self._saving.abort()
 
     def take(
         self,
@@ -128,8 +137,10 @@ class Snapshotter:
 
         summary: dict = {"lab": topo.name, "hosts": {}}
         if save:
-            deployer = LabDeployer(self.cluster, on_output=self.on_output,
-                                   interactive_sudo=self.interactive_sudo)
+            deployer = self._saving = LabDeployer(self.cluster, on_output=self.on_output,
+                                                  interactive_sudo=self.interactive_sudo)
+            if self._aborted:
+                deployer.abort()
             summary["hosts"] = deployer.save(topology_file)["hosts"]
             failed = [h for h, r in summary["hosts"].items() if "error" in r]
             if failed:

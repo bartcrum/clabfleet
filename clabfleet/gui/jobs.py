@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..deployer import LabDeployer
+from ..runner import CommandCancelled
 from ..snapshots import Snapshotter
 from ..topology import load_topology
 from .editing import replace_file
@@ -33,7 +34,7 @@ class Job:
     action: str
     topology: str
     lab: str = ""
-    status: str = "running"  # running | ok | error | interrupted
+    status: str = "running"  # running | ok | error | cancelled | interrupted
     lines: list[str] = field(default_factory=list)
     started: float = field(default_factory=time.time)
     finished: Optional[float] = None
@@ -168,6 +169,8 @@ class JobManager:
         self.history = history
         self.jobs: dict[str, Job] = {j.id: j for j in history.load()}
         self._lock = threading.Lock()
+        self._abort: dict[str, Callable[[], None]] = {}   # running job -> how to stop it
+        self._cancelled_by: dict[str, str] = {}
         # Called (in the job's thread) when a job finishes, e.g. for the audit log
         self.on_finished: Optional[Callable[[Job], None]] = None
 
@@ -206,6 +209,27 @@ class JobManager:
         threading.Thread(target=self._run, args=(job, path), daemon=True).start()
         return job
 
+    def cancel(self, job_id: str, user: str = "") -> Job:
+        """Stop a running job: the command it waits for is given up and the
+        job ends as cancelled, which frees its place and its lab for other
+        jobs. Nothing is undone: what containerlab had started is left as it
+        is, and a command on a remote host or under sudo may still finish.
+        KeyError for an unknown job, ValueError for one that is not running."""
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise KeyError(f"No job '{job_id}'")
+            if job.status != "running":
+                raise ValueError(f"That job is not running any more ({job.status})")
+            first = job_id not in self._cancelled_by
+            self._cancelled_by.setdefault(job_id, user)
+            abort = self._abort.get(job_id)
+        if first:
+            job.add(f"✗ cancel requested{f' by {user}' if user else ''}")
+        if abort:
+            abort()
+        return job
+
     def _run(self, job: Job, path: Path) -> None:
         handler = _JobLogHandler(job, threading.get_ident())
         pkg_logger = logging.getLogger("clabfleet")
@@ -219,6 +243,14 @@ class JobManager:
                 on_output=job.add,
                 interactive_sudo=False,
             )
+            snapshotter = Snapshotter(copy.deepcopy(self.workspace.cluster), on_output=job.add,
+                                      interactive_sudo=False)
+            with self._lock:
+                self._abort[job.id] = lambda: (deployer.abort(), snapshotter.abort())
+                cancelled = job.id in self._cancelled_by
+            if cancelled:  # asked for before there was anything to stop
+                deployer.abort()
+                snapshotter.abort()
             job.add(f"$ {job.action} {job.topology}")
             if job.action in ("deploy", "redeploy"):
                 result = deployer.deploy(path, reconfigure=job.action == "redeploy",
@@ -228,8 +260,7 @@ class JobManager:
             elif job.action == "destroy":
                 result = deployer.destroy(path)
             elif job.action == "snapshot":
-                result = Snapshotter(copy.deepcopy(self.workspace.cluster), on_output=job.add,
-                                     interactive_sudo=False).take(path)
+                result = snapshotter.take(path)
                 job.add(f"» snapshot {result['snapshot']}: {result['path']}")
             else:
                 result = deployer.save(path)
@@ -239,17 +270,25 @@ class JobManager:
                 job.add(f"✗ {host}: {err}")
             job.add_outcome(result)
             job.status = "error" if errors else "ok"
+        except CommandCancelled:
+            job.add("✗ cancelled. Nothing was undone: what containerlab had started is left as "
+                    "it is, and a command already running on a host may still finish there. "
+                    "Look at the lab, then Destroy or Redeploy it.")
+            job.status = "cancelled"
         except Exception as exc:
             logger.exception("Job %s failed", job.id)
             job.add(f"✗ {exc}")
             job.status = "error"
         finally:
+            with self._lock:
+                self._abort.pop(job.id, None)
+                self._cancelled_by.pop(job.id, None)
             pkg_logger.removeHandler(handler)
             job.finished = time.time()
             times = job.host_times()
             if times:
                 job.add("» time per host: " + ", ".join(f"{h} {t:g}s" for h, t in times.items()))
-            job.add("✓ done" if job.status == "ok" else "✗ failed")
+            job.add({"ok": "✓ done", "cancelled": "✗ cancelled"}.get(job.status, "✗ failed"))
             self.workspace.invalidate_runtime()  # the lab's containers changed
             self.history.save(job)
             if self.on_finished:

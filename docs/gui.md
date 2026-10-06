@@ -257,7 +257,12 @@ an operator.
   one out. Commands are audited (`exec`). Different labs can run jobs at the
   same time, up to four, with one job per lab. Pick any job, running or
   past, from the Activity panel's list to see its output, how long it
-  took, and the time each host took. The last 50 jobs are kept in
+  took, and the time each host took. **Cancel job** (operators) ends a
+  running job that is stuck, for instance on a host that stopped
+  answering: the GUI stops waiting and the lab is free for another job.
+  Nothing is undone, so look at the lab afterwards
+  ([A lab host stopped answering](troubleshooting.md#a-lab-host-stopped-answering)).
+  The last 50 jobs are kept in
   `.clabfleet/jobs/` under the first workspace directory, so they survive
   a restart of the GUI.
 - **Drift:** problems that come from a running config differing from the
@@ -373,7 +378,7 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   minute after 5 failed logins), `logout`, `directory_login_ended` (an
   LDAP user is gone or has no role any more), `password_changed`,
   `password_change_failed`, the `user_*` events above, `denied`, `job_started`
-  (action, topology, options), `job_finished` (status, seconds),
+  (action, topology, options), `job_cancelled`, `job_finished` (status, seconds),
   `topology_saved`, `positions_saved`, `terminal_opened` and
   `terminal_closed` (lab, node, mode, host, seconds, exit code),
   `capture_started`, `capture_finished` and `session_revoked` (an open

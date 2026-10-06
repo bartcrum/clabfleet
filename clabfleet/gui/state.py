@@ -14,7 +14,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from ..capture import sweep_helpers
 from ..cluster import ClusterConfig, HostInfo, containerlab_version, create_runner, probe_host_resources
@@ -30,7 +30,7 @@ from ..validate import validate_text
 from . import annotations
 from .editing import EditConflict, apply_graph, set_positions, text_hash, write_if_unchanged
 from .events import EventLog, link_items, protocol_items
-from ..runner import Runner
+from ..runner import CommandTimeout, Runner, deadline
 from ..topology import (
     LABEL_HOST,
     LABEL_HOST_TAGS,
@@ -142,6 +142,14 @@ def topology_view(topo: Topology) -> dict:
 # What a read-only command on a node may consist of (``Workspace.node_command``)
 SAFE_COMMAND = re.compile(r"[A-Za-z0-9 _.:/|-]+")
 
+HOST_POLL_TIMEOUT = 20  # seconds a host gets to answer one of the GUI's polls
+HOST_RETRY = 30         # seconds before a host that did not answer is tried again
+
+
+class HostUnreachable(Exception):
+    """A host did not answer lately, and is not asked again just yet."""
+
+
 SKETCH_MAX_NODES = 60  # larger labs get no thumbnail: too small to read, too much to send
 
 
@@ -195,6 +203,11 @@ class Workspace:
         self.roots = roots
         self._runners: dict[str, Runner] = {}
         self._runner_lock = threading.Lock()
+        # Hosts that did not answer: name -> (when, why, a retry is under way).
+        # They are not dialled again on every poll, which would make each one
+        # wait for the connection to time out
+        self._down: dict[str, tuple[float, str, bool]] = {}
+        self._hosts_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hosts")
         self._topologies: dict[str, Path] = {}
         self.readiness = ReadinessCache()
         self._probes = ThreadPoolExecutor(max_workers=8, thread_name_prefix="readiness")
@@ -219,6 +232,60 @@ class Workspace:
         raise KeyError(f"Unknown host '{name}'")
 
     def runner(self, host: HostInfo) -> Runner:
+        """The host's runner. HostUnreachable while the host is known not
+        to answer (see ``ask_host``), so nothing waits on it in vain."""
+        down = self._down.get(host.name)
+        if down:
+            raise HostUnreachable(down[1])
+        return self._runner(host)
+
+    def ask_host(self, host: HostInfo, ask: Callable[[Runner], Any]) -> Any:
+        """``ask(runner)`` within HOST_POLL_TIMEOUT, for the GUI's polls.
+
+        A host that does not answer (unreachable, or too slow) is marked
+        down: its error is returned at once from then on, to everything that
+        wants its runner, and it is tried again in the background every
+        HOST_RETRY seconds until it answers. So a dead host costs one wait,
+        not one per poll."""
+        down = self._down.get(host.name)
+        if down:
+            when, why, retrying = down
+            if not retrying and time.monotonic() - when >= HOST_RETRY:
+                self._down[host.name] = (when, why, True)
+                try:
+                    self._hosts_pool.submit(self._retry_host, host)
+                except RuntimeError:  # shutting down
+                    pass
+            raise HostUnreachable(why)
+        try:
+            with deadline(HOST_POLL_TIMEOUT):
+                return ask(self.runner(host))
+        except InspectError:
+            raise  # the host answered: containerlab had something to say
+        except Exception as exc:
+            raise HostUnreachable(self._mark_down(host, exc)) from exc
+
+    def _mark_down(self, host: HostInfo, exc: Exception) -> str:
+        why = (f"no answer within {HOST_POLL_TIMEOUT} seconds" if isinstance(exc, CommandTimeout)
+               else str(exc) or type(exc).__name__)
+        logger.warning("Host %s does not answer (%s); trying again every %ds",
+                       host.name, why, HOST_RETRY)
+        self._down[host.name] = (time.monotonic(), why, False)
+        self.drop_runner(host)
+        return why
+
+    def _retry_host(self, host: HostInfo) -> None:
+        try:
+            with deadline(HOST_POLL_TIMEOUT):
+                self._runner(host).run(["true"], sudo=False)
+        except Exception as exc:  # noqa: BLE001 - still down
+            self._mark_down(host, exc)
+        else:
+            logger.info("Host %s answers again", host.name)
+            self._down.pop(host.name, None)
+            self.invalidate_runtime()
+
+    def _runner(self, host: HostInfo) -> Runner:
         with self._runner_lock:
             if host.name not in self._runners:
                 runner = create_runner(host)
@@ -235,6 +302,7 @@ class Workspace:
     def close(self) -> None:
         self._probes.shutdown(wait=False, cancel_futures=True)
         self._live_pool.shutdown(wait=False, cancel_futures=True)
+        self._hosts_pool.shutdown(wait=False, cancel_futures=True)
         with self._runner_lock:
             for runner in self._runners.values():
                 runner.close()
@@ -750,20 +818,23 @@ class Workspace:
             self._runtime_generation += 1
 
     def _inspect_runtime(self) -> list[HostState]:
-        states = []
-        live: set[tuple] = set()
-        for host in self.cluster.hosts:
+        """Every host at once, each within its time limit: the page waits
+        for the slowest host that answers, not for the sum of them all, and
+        not at all for one already known to be down."""
+        def inspect(host: HostInfo) -> HostState:
             state = HostState(host.name)
             try:
-                state.containers = parse_inspect(inspect_all(self.runner(host)), host.name)
+                state.containers = parse_inspect(self.ask_host(host, inspect_all), host.name)
                 state.ok = True
-            except InspectError as exc:
+            except Exception as exc:  # noqa: BLE001 - shown as the host's error
                 state.error = str(exc)
-            except Exception as exc:
-                state.error = str(exc)
-                self.drop_runner(host)  # reconnect next time
+            return state
+
+        hosts = self.cluster.hosts
+        states = [inspect(hosts[0])] if len(hosts) == 1 else list(self._hosts_pool.map(inspect, hosts))
+        live: set[tuple] = set()
+        for host, state in zip(hosts, states):
             self._annotate_ready(host, state.containers, live)
-            states.append(state)
         self.readiness.prune(live)
         return states
 
@@ -919,27 +990,32 @@ class Workspace:
         CPUs and memory, and what placement may use of them (``max_cpu``,
         ``max_ram``; ``max_ram_set`` when the inventory sets the RAM, which
         is when placement reserves running labs' RAM against it)."""
-        result = []
-        for host in copy.deepcopy(self.cluster.hosts):
+        def status(host: HostInfo) -> dict:
             entry = {"name": host.name, "host": host.host, "local": host.is_local}
             ram_set = host.max_ram > 0
-            try:
-                runner = self.runner(self.host(host.name))
+
+            def probe(runner: Runner) -> dict:
                 facts = probe_host_resources(runner, host)
-                entry.update(
-                    ok=True,
-                    version=containerlab_version(runner),
-                    cpus=facts.get("cpus"),
-                    mem_total_mb=facts.get("MemTotal_mb"),
-                    mem_available_mb=facts.get("MemAvailable_mb"),
-                    vtep=host.vtep,
-                    tags=host.tags,
-                    max_cpu=host.max_cpu,  # probed into the copy when the inventory has none
-                    max_ram=host.max_ram,
-                    max_ram_set=ram_set,
-                )
-            except Exception as exc:
+                return {**facts, "version": containerlab_version(runner)}
+
+            try:
+                facts = self.ask_host(self.host(host.name), probe)
+            except Exception as exc:  # noqa: BLE001 - shown as the host's error
                 entry.update(ok=False, error=str(exc))
-                self.drop_runner(self.host(host.name))
-            result.append(entry)
-        return result
+                return entry
+            entry.update(
+                ok=True,
+                version=facts["version"],
+                cpus=facts.get("cpus"),
+                mem_total_mb=facts.get("MemTotal_mb"),
+                mem_available_mb=facts.get("MemAvailable_mb"),
+                vtep=host.vtep,
+                tags=host.tags,
+                max_cpu=host.max_cpu,  # probed into the copy when the inventory has none
+                max_ram=host.max_ram,
+                max_ram_set=ram_set,
+            )
+            return entry
+
+        hosts = copy.deepcopy(self.cluster.hosts)
+        return [status(hosts[0])] if len(hosts) == 1 else list(self._hosts_pool.map(status, hosts))

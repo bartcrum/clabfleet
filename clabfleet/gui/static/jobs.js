@@ -7,7 +7,7 @@
 // arrived, so only for a job followed while it ran.
 //
 // Uses app.js globals: S, $, h, api, fmtDuration, naturalCmp,
-// renderJobPicker, renderJobMeta, jobDone, announce, refreshState,
+// renderJobPicker, renderJobMeta, renderJobCancel, JOB_ENDED, jobDone, announce, refreshState,
 // reloadDetail, refreshHosts; and from dock.js: activatePane.
 // ---------------------------------------------------------------------------
 
@@ -130,6 +130,7 @@ function trackJob(id, fromStart) {
     const known = (S.state?.jobs || []).find((j) => j.id === id);
     if (known) Object.assign(known, { status: job.status, finished: job.finished, host_times: job.host_times });
     renderJobMeta();
+    renderJobCancel();
     $("#activity-dot").className = `dot ${job.status === "running" ? "busy" : job.status === "ok" ? "running" : "error"}`;
     if (job.status === "running") {
       sawRunning = true;
@@ -139,7 +140,7 @@ function trackJob(id, fromStart) {
     S.jobPolling = null;
     if (!sawRunning) return;  // a finished job opened from history
     jobDone(job);
-    announce(`${job.action} ${job.lab || job.topology} ${job.status === "ok" ? "finished" : "failed"}`);
+    announce(`${job.action} ${job.lab || job.topology} ${JOB_ENDED[job.status] || "failed"}`);
     await refreshState();
     await reloadDetail();
     refreshHosts();

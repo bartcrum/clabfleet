@@ -211,6 +211,7 @@ class RunnerPool:
         self._factory = factory
         self._interactive_sudo = interactive_sudo
         self._runners: dict[str, Runner] = {}
+        self._aborted = False
 
     def __enter__(self):
         return self
@@ -224,8 +225,16 @@ class RunnerPool:
             runner = self._factory(host)
             if self._interactive_sudo is not None:
                 runner.interactive_sudo = self._interactive_sudo
+            runner.cancelled = self._aborted
             self._runners[host.name] = runner
         return self._runners[host.name]
+
+    def abort(self) -> None:
+        """Stop what runs through these runners and refuse anything more
+        (``Runner.abort``), also on hosts not asked yet."""
+        self._aborted = True
+        for runner in list(self._runners.values()):
+            runner.abort()
 
     def close(self) -> None:
         for runner in self._runners.values():

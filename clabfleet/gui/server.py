@@ -416,6 +416,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_get("/api/jobs", _jobs)
     app.router.add_post("/api/jobs", _start_job)
     app.router.add_get("/api/jobs/{id}", _job)
+    app.router.add_post("/api/jobs/{id}/cancel", _cancel_job)
     app.router.add_get("/api/capture", _capture_download)
     app.router.add_get("/ws/terminal", _terminal)
     app.router.add_get("/ws/capture", _capture_live)
@@ -1317,6 +1318,19 @@ async def _start_job(request):
     audit(request, "job_started", job=job.id, action=job.action, topology=job.topology,
           lab=job.lab, options=job.options)
     return web.json_response(job.view())
+
+
+async def _cancel_job(request):
+    """Stop a running job (operators). Nothing is undone; see ``JobManager.cancel``."""
+    try:
+        job = request.app[JOBS].cancel(request.match_info["id"], current_user(request).name)
+    except KeyError as exc:
+        raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Not found")
+    except ValueError as exc:
+        raise web.HTTPConflict(text=str(exc))
+    audit(request, "job_cancelled", job=job.id, action=job.action, topology=job.topology,
+          lab=job.lab)
+    return web.json_response(job.summary())
 
 
 async def _jobs(request):

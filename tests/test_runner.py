@@ -1,60 +1,148 @@
 import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
-from clabfleet.runner import CommandError, CommandResult, PrivilegeError, Runner, SSHRunner
+from clabfleet.runner import (
+    CommandCancelled, CommandError, CommandResult, CommandTimeout, LocalRunner, PrivilegeError,
+    Runner, SSHRunner, deadline, time_left,
+)
+
+sys.path.insert(0, str(Path(__file__).parent))  # ssh_server.py, next to this file
 
 
-class FakeChannel:
-    def __init__(self, exit_code):
-        self.exit_code = exit_code
+@pytest.fixture
+def ssh(tmp_path):
+    """(server, a runner connected to it): real SSH over a local socket."""
+    pytest.importorskip("paramiko")
+    from ssh_server import SSHServer
 
-    def set_combine_stderr(self, combine):
-        pass
-
-    def recv_exit_status(self):
-        return self.exit_code
-
-
-class FakeStdout:
-    def __init__(self, lines, exit_code):
-        self.lines = lines
-        self.channel = FakeChannel(exit_code)
-
-    def __iter__(self):
-        return iter(self.lines)
+    with SSHServer() as server:
+        runner = SSHRunner("127.0.0.1", port=server.port, username="lab", password="lab",
+                           name="h1", known_hosts=str(tmp_path / "known_hosts"))
+        yield server, runner
+        runner.close()
 
 
-class FakeClient:
-    def __init__(self, lines, exit_code):
-        self.lines, self.exit_code = lines, exit_code
-
-    def exec_command(self, cmd):
-        return None, FakeStdout(self.lines, self.exit_code), None
-
-
-def _runner(monkeypatch, lines, exit_code):
-    runner = SSHRunner("10.0.0.1", name="h1")
-    monkeypatch.setattr(runner, "_client", lambda: FakeClient(lines, exit_code))
-    return runner
-
-
-def test_ssh_streaming_run_returns_result(monkeypatch):
-    seen = []
-    runner = _runner(monkeypatch, ["one\n", "two\n"], 0)
-    result = runner.run(["containerlab", "deploy"], check=True, on_output=seen.append)
-    assert seen == ["one", "two"]
-    assert (result.exit_code, result.stdout) == (0, "one\ntwo\n")
-
-
-def test_ssh_streaming_run_checks_exit_code(monkeypatch):
-    runner = _runner(monkeypatch, ["boom\n"], 2)
+def test_ssh_run_returns_output_and_exit_code(ssh):
+    _, runner = ssh
+    result = runner.run(["sh", "-c", "echo out; echo err >&2; exit 3"], check=False)
+    assert (result.exit_code, result.stdout, result.stderr) == (3, "out\n", "err\n")
     with pytest.raises(CommandError) as exc:
-        runner.run(["containerlab", "deploy"], check=True, on_output=lambda line: None)
+        runner.run(["sh", "-c", "echo boom >&2; exit 2"])
+    assert exc.value.exit_code == 2 and "boom" in exc.value.stderr and "[h1]" in exc.value.command
+    assert runner.run(["pwd"], cwd="/tmp").stdout == "/tmp\n"
+
+
+def test_ssh_streaming_run_returns_result(ssh):
+    _, runner = ssh
+    seen = []
+    result = runner.run(["sh", "-c", "echo one; echo two >&2; sleep 0.3; printf three"],
+                        on_output=seen.append)
+    assert sorted(seen) == ["one", "three", "two"]  # both streams, line by line
+    assert result.exit_code == 0 and result.stdout == result.stderr
+    with pytest.raises(CommandError) as exc:
+        runner.run(["sh", "-c", "echo boom; exit 2"], on_output=lambda line: None)
     assert exc.value.exit_code == 2 and "boom" in exc.value.stderr
 
-    result = runner.run(["containerlab", "deploy"], check=False, on_output=lambda line: None)
-    assert result.exit_code == 2
+
+def test_ssh_long_output_on_both_streams_does_not_hang(ssh):
+    """More than the channel's window holds: waiting for the exit status
+    before reading, as the runner once did, never returns."""
+    _, runner = ssh
+    megabytes = "head -c 3000000 /dev/zero | tr '\\0' x"
+    with deadline(30):
+        result = runner.run(["sh", "-c", f"{megabytes}; {megabytes} >&2"])
+    assert (len(result.stdout), len(result.stderr)) == (3_000_000, 3_000_000)
+
+
+def test_ssh_command_past_its_deadline_is_given_up(ssh):
+    _, runner = ssh
+    started = time.monotonic()
+    with pytest.raises(CommandTimeout) as exc:
+        with deadline(1):
+            runner.run(["sleep", "30"])
+    assert time.monotonic() - started < 5 and "no answer in time from h1" in str(exc.value)
+    # Nothing starts once the time is up, and the runner works again after
+    with deadline(0.01):
+        time.sleep(0.02)
+        with pytest.raises(CommandTimeout):
+            runner.run(["true"])
+    assert runner.run(["echo", "still here"]).stdout == "still here\n"
+    # Without a deadline a command takes what it takes
+    assert runner.run(["sh", "-c", "sleep 1.2; echo done"]).stdout == "done\n"
+
+
+def test_ssh_abort_stops_a_running_command_and_refuses_more(ssh):
+    _, runner = ssh
+    threading.Timer(0.5, runner.abort).start()
+    started = time.monotonic()
+    with pytest.raises(CommandCancelled):
+        runner.run(["sleep", "30"], on_output=lambda line: None)
+    assert time.monotonic() - started < 5
+    with pytest.raises(CommandCancelled):
+        runner.run(["true"])
+    with pytest.raises(CommandCancelled):
+        runner.client()
+
+
+def test_ssh_lost_connection_fails_the_command_and_the_next_one_reconnects(ssh):
+    server, runner = ssh
+    assert runner.run(["echo", "hi"]).stdout == "hi\n"
+    threading.Timer(0.5, server.drop_connections).start()
+    started = time.monotonic()
+    with pytest.raises(Exception) as exc:  # CommandError, or paramiko's own word for it
+        runner.run(["sleep", "30"])
+    assert time.monotonic() - started < 10, exc.value
+    assert runner.run(["echo", "back"]).stdout == "back\n"
+    assert server.connections == 2
+
+
+def test_ssh_first_use_from_many_threads_makes_one_connection(ssh):
+    server, runner = ssh
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outputs = list(pool.map(lambda i: runner.run(["echo", str(i)]).stdout, range(8)))
+    assert outputs == [f"{i}\n" for i in range(8)]
+    assert server.connections == 1
+
+
+def test_local_run_deadline_and_abort():
+    runner = LocalRunner()
+    started = time.monotonic()
+    with pytest.raises(CommandTimeout):
+        with deadline(1):
+            runner.run(["sleep", "30"])
+    assert time.monotonic() - started < 5
+    result = runner.run(["sh", "-c", "echo out; echo err >&2; exit 3"], check=False)
+    assert (result.exit_code, result.stdout, result.stderr) == (3, "out\n", "err\n")
+    seen = []
+    assert runner.run(["sh", "-c", "printf 'a\\nb'"], on_output=seen.append).stdout == "a\nb\n"
+    assert seen == ["a", "b"]
+    assert runner.run(["no-such-program-here"], check=False).exit_code == 127
+
+    threading.Timer(0.5, runner.abort).start()
+    started = time.monotonic()
+    with pytest.raises(CommandCancelled):
+        runner.run(["sleep", "30"], on_output=lambda line: None)
+    assert time.monotonic() - started < 5
+    with pytest.raises(CommandCancelled):
+        runner.run(["true"])
+
+
+def test_deadlines_nest_to_the_nearest_end():
+    assert time_left() is None
+    with deadline(60):
+        assert 59 < time_left() <= 60
+        with deadline(5):
+            assert 4 < time_left() <= 5
+            with deadline(600):  # an outer deadline that ends sooner stays
+                assert time_left() <= 5
+        assert time_left() > 50
+    assert time_left() is None
 
 
 class RecordingClient:
@@ -82,6 +170,9 @@ class RecordingClient:
 
     def connect(self, **kwargs):
         self.connected = kwargs
+
+    def get_transport(self):
+        return None
 
     def _log(self, level, msg):  # used by paramiko's RejectPolicy
         pass

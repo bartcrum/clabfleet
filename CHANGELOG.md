@@ -19,6 +19,9 @@ Not released yet. The first release with a version tag and a package.
   between hosts, the topology itself (`clabfleet validate`).
 - `--wait` for nodes to boot, `--rollback` when a host fails, and a clear
   message when containerlab cannot get root.
+- A host that stops answering does not hang a deploy's planning or the
+  GUI: polls have a time limit, a dead SSH connection is noticed within
+  half a minute, and a running job can be cancelled.
 
 ### Working with a running lab
 
