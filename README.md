@@ -50,62 +50,141 @@ More screens: [a tour of the GUI](docs/screenshots.md).
   deploy/destroy with live output, and open CLI/shell/SSH terminals to nodes
   in the browser
 
-## Requirements
-
-- Python 3.11+
-- On every lab host: Docker and containerlab
-  (`bash -c "$(curl -sL https://get.containerlab.dev)"`)
-- Remote hosts: SSH access (key-based recommended). containerlab needs root,
-  so either set `sudo: true` (with passwordless sudo for containerlab) or
-  add the SSH user to the `clab_admins` group.
-- Node images (e.g. Cisco IOL, cEOS) are not public — build or import them on
-  each host that will run those nodes.
-
 ## Install
 
+clabfleet runs on Linux: on the machine that runs the labs, or on one that
+reaches the lab hosts over SSH. On Windows, use WSL 2
+([below](#on-windows-wsl-2)).
+
+**1. Docker and containerlab**, on every machine that will run labs:
+
 ```bash
-# The CLI and the web GUI, straight from GitHub
-pip install "clabfleet[gui] @ git+https://github.com/bartcrum/clabfleet"
+# Docker Engine: https://docs.docker.com/engine/install/
+sudo usermod -aG docker "$USER"     # then log out and back in
+bash -c "$(curl -sL https://get.containerlab.dev)"
+
+docker run --rm hello-world         # both must work without sudo
+containerlab version
+```
+
+**2. clabfleet.** It needs Python 3.11 or newer (`python3 --version`);
+Ubuntu 24.04 and Debian 12 have it.
+
+```bash
+pipx install "clabfleet[gui] @ git+https://github.com/bartcrum/clabfleet"
 clabfleet --version
-
-# Or a checkout to work on
-git clone https://github.com/bartcrum/clabfleet && cd clabfleet
-pip install -e ".[gui,dev]"
 ```
 
-`[gui]` adds the web GUI, `[ldap]` LDAP / Active Directory logins and
-`[napalm]` the import from a live network. Use a virtual environment, or
-`pipx install` with the same argument. [CHANGELOG.md](CHANGELOG.md) says
-what each release changed.
-
-## Quick start
+No pipx? `sudo apt install pipx && pipx ensurepath` on Debian and Ubuntu,
+then open a new terminal. Or use a virtual environment:
 
 ```bash
-# Deploy on this machine (runs containerlab against the file in place;
-# the lab directory clab-<name>/ is created next to it)
-clabfleet --sudo deploy topologies/three_router_triangle.clab.yml
-
-# What's running?
-clabfleet --sudo inspect topologies/three_router_triangle.clab.yml
-
-# Save running configs into the lab directory
-clabfleet --sudo save topologies/three_router_triangle.clab.yml
-
-# Stop it: save the configs and remove the containers; the next deploy
-# starts from the saved configs
-clabfleet --sudo stop topologies/three_router_triangle.clab.yml
-
-# Tear it down (add --keep-lab-dir to keep saved configs)
-clabfleet --sudo destroy topologies/three_router_triangle.clab.yml
+python3 -m venv ~/.venvs/clabfleet
+~/.venvs/clabfleet/bin/pip install "clabfleet[gui] @ git+https://github.com/bartcrum/clabfleet"
+echo 'export PATH="$HOME/.venvs/clabfleet/bin:$PATH"' >> ~/.bashrc    # then open a new terminal
 ```
+
+A plain `pip install` outside a virtual environment is refused on current
+Debian, Ubuntu and Arch ("externally-managed-environment"). `[gui]` is the
+web GUI; add `ldap` for LDAP / Active Directory logins and `napalm` for
+the import from a live network, as in `clabfleet[gui,ldap]`.
+
+**3. Root for containerlab.** containerlab needs root to wire a lab up.
+`--sudo` runs it through sudo, which must not ask for a password in the
+middle of a job: run `sudo -v` first, as below, or set it up once so that
+it never asks, see
+[First-time setup](docs/troubleshooting.md#first-time-setup-root-for-containerlab).
+
+**4. A first lab.** This one uses a public image, so there is nothing to
+import:
+
+```bash
+mkdir -p ~/labs && cd ~/labs
+clabfleet new ring --kind linux -o ring.clab.yml    # four Linux routers in a ring
+sudo -v && clabfleet --sudo deploy ring.clab.yml --pull --wait
+clabfleet --sudo inspect ring.clab.yml
+
+sudo -v && clabfleet --sudo gui     # http://localhost:8650; Ctrl+C stops it
+clabfleet --sudo destroy ring.clab.yml
+```
+
+The GUI prints its address and, the first time, a password for the user
+`admin`, which you change at the first login.
+
+Labs of Arista cEOS or Cisco IOL nodes need their images, which are not
+public: download or build them and load them into Docker on each lab
+host. clabfleet checks that a lab's images are there before it deploys
+([Node images](docs/cli.md#node-images)). The files in `topologies/` are
+such labs; get them with a clone of this repository.
+
+To work on clabfleet itself: `git clone https://github.com/bartcrum/clabfleet`,
+then `pip install -e ".[gui,dev]"` in a virtual environment.
+[CHANGELOG.md](CHANGELOG.md) says what each release changed.
+
+### On Windows (WSL 2)
+
+clabfleet runs inside a WSL 2 Linux distribution; you use the GUI from
+your Windows browser. These steps follow Microsoft's and containerlab's
+instructions and have not been tried by the maintainers on Windows yet:
+please report what does not match.
+
+1. **WSL 2 with Ubuntu 24.04.** In PowerShell as administrator:
+
+   ```powershell
+   wsl --install -d Ubuntu-24.04
+   wsl -l -v          # VERSION must be 2; WSL 1 cannot run Docker
+   ```
+
+2. **systemd**, which Docker's service needs. In Ubuntu, `systemctl
+   is-system-running` should answer `running` or `degraded`. If it does
+   not, put these two lines in `/etc/wsl.conf` and run `wsl --shutdown` in
+   PowerShell, then open Ubuntu again:
+
+   ```ini
+   [boot]
+   systemd=true
+   ```
+
+3. **Follow steps 1 to 4 above inside Ubuntu.** Install Docker Engine in
+   Ubuntu itself, as containerlab's guide for WSL recommends, rather than
+   using Docker Desktop.
+4. **Keep labs in the Linux home** (`~/labs`), not under `/mnt/c/...`:
+   Windows folders are slow and do not keep Linux file permissions.
+5. **The GUI:** start it with `clabfleet --sudo gui --no-browser` and open
+   `http://localhost:8650` in your Windows browser.
+6. **Memory:** WSL 2 gives Linux half of the machine's memory by default.
+   For bigger labs raise it in `%UserProfile%\.wslconfig`, then
+   `wsl --shutdown`:
+
+   ```ini
+   [wsl2]
+   memory=16GB
+   ```
+
+7. **After Windows restarts** or `wsl --shutdown`, a lab that was running
+   is half up and has to be recreated, see
+   [After a reboot the lab is half up](docs/troubleshooting.md#after-a-reboot-the-lab-is-half-up).
+   Node images you downloaded in Windows are under `/mnt/c/Users/<you>/Downloads`.
+
+## Everyday commands
+
+```bash
+clabfleet --sudo deploy lab.clab.yml      # runs containerlab against the file in place;
+                                          # the lab directory clab-<name>/ is created next to it
+clabfleet --sudo inspect lab.clab.yml     # what is running?
+clabfleet --sudo save lab.clab.yml        # save running configs into the lab directory
+clabfleet --sudo stop lab.clab.yml        # save the configs and remove the containers;
+                                          # the next deploy starts from the saved configs
+clabfleet --sudo destroy lab.clab.yml     # tear it down (--keep-lab-dir keeps saved configs)
+```
+
+Leave `--sudo` out where containerlab needs no sudo (way A of the
+First-time setup); clabfleet never uses sudo unless asked. For lab hosts
+reached over SSH and for clusters, see [Single remote host](docs/cli.md#single-remote-host)
+and [Multi-host cluster deployment](docs/cluster.md).
 
 These print a short summary; add `--json` for the full result, for scripts.
-
-containerlab needs root: set that up once, see
-[First-time setup](docs/troubleshooting.md#first-time-setup-root-for-containerlab).
-`--sudo` (or `CLAB_SUDO=1`) runs it through `sudo`;
-clabfleet never uses sudo unless asked. Without it, a command containerlab
-refuses for lack of root ends with a line saying so.
+`CLAB_SUDO=1` in the environment does what `--sudo` does.
 
 ## Documentation
 

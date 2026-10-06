@@ -1,7 +1,7 @@
 # Command line
 
 Everything `clabfleet` does on one host, beyond the deploy, inspect, save and
-destroy shown in the [README](../README.md#quick-start). For several hosts see
+destroy shown in the [README](../README.md#everyday-commands). For several hosts see
 [Multi-host cluster deployment](cluster.md); for the browser, the [Web GUI](gui.md).
 
 ## Wait for nodes to boot
