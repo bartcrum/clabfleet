@@ -283,6 +283,17 @@ async def steps(page):
     await page.js("document.querySelector('.dock-tab[data-pane=\"events\"]').click()")
     await page.until("document.querySelectorAll('#events-list .health-row').length === 1")
     assert await page.js("document.querySelectorAll('#events-strip .ev-mark.error').length") == 1
+    # The change can be copied out, by itself or with the rest of the list
+    await page.js("window._copied = []; "
+                  "navigator.clipboard.writeText = async (text) => { window._copied.push(text); }")
+    await page.js("document.querySelector('#events-list .health-copy-one').click()")
+    await page.until("window._copied.length === 1")
+    line = await page.js("window._copied[0]")
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC  Spine-1:eth1 ↔ Leaf-1:eth1: up → down", line)
+    assert await page.js("document.querySelector('#events-copy').hidden") is False
+    await page.js("document.querySelector('#events-copy').click()")
+    await page.until("window._copied.length === 2")
+    assert await page.js("window._copied[1]") == f"spine-leaf-fabric: 1 change, newest first\n{line}"
     # Export: both canvases build standalone SVG in both themes
     for svg, vp in (("diagram", "viewport"), ("routing", "rt-viewport")):
         await page.js(f"showView('{svg}')")

@@ -878,6 +878,7 @@ body.building #view-diagram .fresh { display: none; }
 .health-item:hover .health-copy-one, .health-copy-one:focus-visible { opacity: 1; }
 @media (hover: none) { .health-copy-one { opacity: 1; } }
 .health-pane .activity-bar #health-copy { flex: none; }
+.events-pane .activity-bar #events-copy { flex: none; margin-left: auto; }
 .copy-box { position: fixed; top: 0; left: -9999px; opacity: 0; }
 .copy-text {
   max-height: 40vh; overflow: auto; margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere;

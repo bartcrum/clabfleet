@@ -180,6 +180,7 @@ function setupDock() {
   document.querySelector('.dock-tab[data-pane="events"]').addEventListener("click", () => { activatePane("events"); refreshEvents(); });
   $("#health-source").addEventListener("change", (ev) => { healthFilter.source = ev.target.value; renderHealth(); });
   $("#health-copy").addEventListener("click", copyHealth);
+  $("#events-copy").addEventListener("click", copyEvents);
   renderHealth();
 
   const handle = $("#dock-resize");
