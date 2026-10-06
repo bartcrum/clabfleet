@@ -29,4 +29,43 @@ jobs:
         env:
           CLABFLEET_REQUIRE_BROWSER: "1"
           CLABFLEET_BROWSER: google-chrome
-        run: pytest -v
+        # -rs: say which tests were skipped, and why
+        run: pytest -v -rs
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - run: ruff check clabfleet tests
+
+  package:
+    name: build and install the package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build
+          twine check --strict dist/*
+      - name: Install the wheel somewhere else and use it
+        # Away from the checkout, so that what runs is what was packaged:
+        # the GUI's pages and scripts must have come along
+        run: |
+          python -m venv /tmp/installed
+          /tmp/installed/bin/pip install "$(ls dist/*.whl)[gui,ldap]"
+          packaged=$(find clabfleet/gui/static -type f | wc -l)
+          cd /tmp
+          /tmp/installed/bin/clabfleet --version
+          /tmp/installed/bin/clabfleet new --list
+          installed=$(/tmp/installed/bin/python -c "import pathlib, clabfleet.gui.server as s; print(sum(1 for p in pathlib.Path(s.STATIC_DIR).rglob('*') if p.is_file()))")
+          echo "GUI files: $packaged in the repository, $installed installed"
+          test "$packaged" = "$installed"

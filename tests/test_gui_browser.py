@@ -11,7 +11,6 @@ PATH). Without one the test is skipped, unless CLABFLEET_REQUIRE_BROWSER=1
 """
 
 import asyncio
-import json
 import os
 import re
 import shutil
@@ -127,7 +126,6 @@ def test_gui_pages_load_without_errors(tmp_path, monkeypatch):
     ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost")]), [tmp_path])
     _fake_lab(monkeypatch, ws)
     # A link that went down, for the Events tab
-    link = {"a": {"node": "Spine-1", "iface": "eth1"}, "b": {"node": "Leaf-1", "iface": "eth1"}}
     for state in ("up", "down"):
         ws.events.observe("spine_leaf.clab.yml", "links",
                           {"link:x": {"kind": "link", "id": "x", "state": state, "label": "Spine-1:eth1 ↔ Leaf-1:eth1"}},

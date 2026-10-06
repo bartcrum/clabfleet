@@ -5,7 +5,13 @@ Tests run automatically on every pull request (GitHub Actions, Python 3.11, 3.12
 ```bash
 pip install -e ".[dev]"
 pytest
+ruff check clabfleet tests
 ```
+
+The pull request checks also run `ruff` and build the package and install
+it somewhere else, so a file missing from the package shows up there.
+Dependabot proposes updates of the dependencies and of the workflow
+actions weekly. To cut a release, see [Releasing](releasing.md).
 
 # Project structure
 

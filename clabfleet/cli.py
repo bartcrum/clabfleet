@@ -50,6 +50,7 @@ from pathlib import Path
 
 import yaml
 
+from . import __version__
 from .capture import (
     DEFAULT_HELPER_IMAGE,
     Capture,
@@ -116,6 +117,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="clabfleet",
         description="Automate containerlab deployments on one or many hosts",
     )
+    parser.add_argument("--version", action="version", version=f"clabfleet {__version__}")
 
     # Single-host target options
     parser.add_argument("--host", default=os.environ.get("CLAB_HOST", "localhost"),

@@ -1,29 +1,70 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "clabfleet"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Automate containerlab lab deployment across one or many hosts"
+readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [{ name = "Bart Crum" }]
+keywords = ["containerlab", "network", "lab", "automation", "vxlan", "evpn"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Telecommunications Industry",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Networking",
+]
 dependencies = [
     "pyyaml>=6.0",
     "paramiko>=3.4",
 ]
 
+[project.urls]
+Homepage = "https://github.com/bartcrum/clabfleet"
+Documentation = "https://github.com/bartcrum/clabfleet/tree/main/docs"
+Changelog = "https://github.com/bartcrum/clabfleet/blob/main/CHANGELOG.md"
+Issues = "https://github.com/bartcrum/clabfleet/issues"
+
 [project.optional-dependencies]
 napalm = ["napalm>=4.0"]
 gui = ["aiohttp>=3.13.3", "ruamel.yaml>=0.17.21", "PyJWT[crypto]>=2.8"]
 ldap = ["ldap3>=2.9"]
-dev = ["pytest>=7.0", "aiohttp>=3.13.3", "ruamel.yaml>=0.17.21", "PyJWT[crypto]>=2.8", "ldap3>=2.9"]
+dev = [
+    "pytest>=7.0", "ruff>=0.8",
+    "aiohttp>=3.13.3", "ruamel.yaml>=0.17.21", "PyJWT[crypto]>=2.8", "ldap3>=2.9",
+]
 
 [project.scripts]
 clabfleet = "clabfleet.cli:main"
+
+[tool.setuptools.dynamic]
+# The one place the version is written: clabfleet/__init__.py
+version = { attr = "clabfleet.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["clabfleet*"]
 
 [tool.setuptools.package-data]
 "clabfleet.gui" = ["static/*", "static/vendor/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# What the code passes today: errors, pyflakes and warnings. Long lines
+# (E501) and single-letter names such as `l` for a link (E741) are left alone.
+select = ["E", "F", "W"]
+ignore = ["E501", "E741"]
