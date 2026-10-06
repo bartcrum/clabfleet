@@ -124,9 +124,13 @@ then `pip install -e ".[gui,dev]"` in a virtual environment.
 ### On Windows (WSL 2)
 
 clabfleet runs inside a WSL 2 Linux distribution; you use the GUI from
-your Windows browser. These steps follow Microsoft's and containerlab's
-instructions and have not been tried by the maintainers on Windows yet:
-please report what does not match.
+your Windows browser. containerlab has its own guide to this,
+[Containerlab on Windows](https://containerlab.dev/windows/), which the
+steps below lean on: its
+[manual WSL setup](https://containerlab.dev/windows/#manual-wsl-setup)
+covers Docker and containerlab in Ubuntu in full. The steps here have not
+been tried by the maintainers on Windows yet: please report what does not
+match.
 
 1. **WSL 2 with Ubuntu 24.04.** In PowerShell as administrator:
 
@@ -145,9 +149,12 @@ please report what does not match.
    systemd=true
    ```
 
-3. **Follow steps 1 to 4 above inside Ubuntu.** Install Docker Engine in
-   Ubuntu itself, as containerlab's guide for WSL recommends, rather than
-   using Docker Desktop.
+3. **Follow steps 1 to 4 above inside Ubuntu.** Docker Engine goes into
+   Ubuntu itself. If Docker Desktop is installed on Windows, turn its WSL
+   integration off for this distribution first, as
+   [containerlab's guide](https://containerlab.dev/windows/#manual-wsl-setup)
+   says: `sudo docker version` in a fresh Ubuntu should say that docker
+   is not found.
 4. **Keep labs in the Linux home** (`~/labs`), not under `/mnt/c/...`:
    Windows folders are slow and do not keep Linux file permissions.
 5. **The GUI:** start it with `clabfleet --sudo gui --no-browser` and open
