@@ -128,6 +128,21 @@ function focusEvent(e) {
   else window.Routing?.focus(e.kind, { type: "edge", id: e.id }, true);
 }
 
+// A change as a line of text, to paste somewhere, with its full time (UTC):
+// "2026-10-06 16:02:33 UTC  Spine-1:eth1 ↔ Leaf-1:eth1: up → down (no carrier)"
+function eventLine(e) {
+  const when = new Date(e.t * 1000).toISOString().slice(0, 19).replace("T", " ");
+  return `${when} UTC  ${e.label}: ${e.from} → ${e.to}${e.detail ? ` (${e.detail})` : ""}`;
+}
+
+// The changes on show as text, newest first, under a line saying which lab
+let eventsShown = [];
+function copyEvents() {
+  const n = eventsShown.length;
+  const what = `${n} change${n === 1 ? "" : "s"}`;
+  copyText([`${currentLabName()}: ${what}, newest first`, ...eventsShown.map(eventLine)].join("\n"), what);
+}
+
 function renderEvents() {
   const now = Date.now() / 1000;
   const events = eventsCache.id && eventsCache.id === S.selected?.id ? eventsCache.events : [];
@@ -146,16 +161,23 @@ function renderEvents() {
     s("text", { class: "ev-tick", x: 4, y: hgt - 2 }, "30 min ago"),
     s("text", { class: "ev-tick", x: w - 4, y: hgt - 2, "text-anchor": "end" }, "now"), ...marks);
   const list = $("#events-list");
+  eventsShown = [...events].reverse().slice(0, 200);
+  $("#events-copy").hidden = !eventsShown.length;
   if (!events.length) {
     list.replaceChildren(h("li", { class: "health-empty" },
       S.selected?.type === "topo" ? "No changes seen yet." : "Select a lab to see its changes."));
     return;
   }
-  list.replaceChildren(...[...events].reverse().slice(0, 200).map((e) => h("li", { class: "health-item" },
+  list.replaceChildren(...eventsShown.map((e) => h("li", { class: "health-item" },
     h("button", { class: `health-row ${eventSev(e)}`, onclick: () => focusEvent(e) },
       h("span", { class: `sev ${eventSev(e) === "ok" ? "info ok" : eventSev(e)}` }),
       h("span", { class: "tag mono" }, new Date(e.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })),
-      h("span", { class: "msg" }, `${e.label}: ${e.from} → `, h("b", {}, e.to), e.detail ? ` (${e.detail})` : "")))));
+      h("span", { class: "msg" }, `${e.label}: ${e.from} → `, h("b", {}, e.to), e.detail ? ` (${e.detail})` : "")),
+    h("button", {
+      class: "icon-btn health-copy-one", type: "button", title: "Copy this line",
+      "aria-label": `Copy: ${e.label}: ${e.from} to ${e.to}`,
+      onclick: () => copyText(eventLine(e), "the line"),
+    }, s("svg", { class: "ico", "aria-hidden": "true" }, s("use", { href: "#i-copy" }))))));
 }
 
 // Select a node on the Diagram (or the Nodes table for labs without a file)

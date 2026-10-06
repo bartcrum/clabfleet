@@ -84,7 +84,9 @@ an operator.
   recovered; a strip shows the last 30 minutes at a glance. Links are
   recorded while the Diagram reads them, sessions, adjacencies and tunnels
   while the Routing tab is Live or the Health panel is open. Click a row
-  to jump to it.
+  to jump to it. As in Health, the button at the end of a row copies its
+  line, with the full date and time in UTC, and **Copy all** copies the
+  list, newest first.
 - **Traffic:** links carrying traffic are drawn thicker (from 10 kb/s, by
   orders of magnitude), with the rate each way in the link's tooltip and
   inspector, from the interfaces' byte counters read with the link state.
