@@ -219,9 +219,17 @@ def _jobs(tmp_path, monkeypatch):
     return ws, JobManager(ws)
 
 
+LAST_LINES = ("✓ done", "✗ cancelled", "✗ failed")
+
+
 def _wait(job, seconds=8):
+    """The job's status once its thread has wound up: the status shows a
+    moment before the last line is written and the history saved."""
     end = time.monotonic() + seconds
-    while job.status == "running" and time.monotonic() < end:
+    while time.monotonic() < end:
+        if job.status != "running" and job.lines and job.lines[-1] in LAST_LINES:
+            time.sleep(0.1)  # the history file and the finished hook follow at once
+            break
         time.sleep(0.05)
     return job.status
 
@@ -294,6 +302,12 @@ def test_cancel_endpoint_is_for_operators_and_audited(tmp_path, monkeypatch):
                 await asyncio.sleep(0.05)
             assert view["status"] == "cancelled"
             assert (await client.post(url)).status == 409   # no longer running
+            # The job's thread writes its last audit line after the status
+            # shows: wait for it, so that the log below is complete
+            for _ in range(100):
+                if audit_path.exists() and '"job_finished"' in audit_path.read_text():
+                    break
+                await asyncio.sleep(0.05)
 
     asyncio.run(scenario())
     events = [json.loads(line) for line in audit_path.read_text().splitlines()]
