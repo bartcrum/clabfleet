@@ -4,7 +4,7 @@
 // Health: everything wrong with the open lab in one list, and Events: the
 // changes between live reads (feature 2).
 //
-// Uses app.js globals: S, $, h, s, api, topoPath, renderLabHead,
+// Uses app.js globals: S, $, h, s, api, topoPath, copyText, renderLabHead,
 // currentLabName, showView, labContainers, labStatus, nodeRuntime,
 // fmtDuration, liveData, downEnds, canOperate, runningJob, runAction,
 // selectNode, announce; and from capture.js: endpointLabel, selectLink; from
@@ -203,6 +203,22 @@ function announceHealth(items) {
 }
 
 // The Health tab, and the problem count for the header
+// A problem as a line of text, to paste somewhere: "ERROR  Hosts: h2 cannot be reached: ..."
+const HEALTH_SEV_TEXT = { error: "ERROR", warn: "WARN ", info: "NOTE " };
+function healthLine(i) {
+  return `${HEALTH_SEV_TEXT[i.sev] || i.sev}  ${i.tag}: ${i.msg}`;
+}
+
+// The problems on show as text, under a line saying which lab and when
+let healthShown = [];
+function copyHealth() {
+  const c = healthCounts(healthShown);
+  const count = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const head = `${currentLabName()}: ${count(healthShown.length, "problem")} ` +
+    `(${count(c.error, "error")}, ${count(c.warn, "warning")}) at ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  copyText([head, ...healthShown.map(healthLine)].join("\n"), count(healthShown.length, "problem"));
+}
+
 function renderHealth(items = healthItems()) {
   announceHealth(items);
   const c = healthCounts(items);
@@ -231,6 +247,8 @@ function renderHealth(items = healthItems()) {
 
   const shown = items.filter((i) => (healthFilter.sev === "all" || i.sev === healthFilter.sev) &&
     (healthFilter.source === "all" || i.source === healthFilter.source));
+  healthShown = currentLabName() ? shown : [];
+  $("#health-copy").hidden = !healthShown.length;
   const list = $("#health-list");
   if (!currentLabName()) {
     list.replaceChildren(h("li", { class: "health-empty" }, "Select a lab to check it."));
@@ -243,7 +261,11 @@ function renderHealth(items = healthItems()) {
         h("span", { class: `sev ${i.sev}`, "aria-label": { error: "Error", warn: "Warning", info: "Note" }[i.sev] }),
         h("span", { class: "tag" }, i.tag),
         h("span", { class: "msg" }, i.msg)),
-      i.drift ? driftActions(i.drift) : null)));
+      i.drift ? driftActions(i.drift) : null,
+      h("button", {
+        class: "icon-btn health-copy-one", type: "button", title: "Copy this line", "aria-label": `Copy: ${i.msg}`,
+        onclick: () => copyText(healthLine(i), "the line"),
+      }, s("svg", { class: "ico", "aria-hidden": "true" }, s("use", { href: "#i-copy" }))))));
   }
   return c;
 }

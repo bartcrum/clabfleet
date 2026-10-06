@@ -873,6 +873,16 @@ table.host-labs th { white-space: nowrap; }
 body.building #view-diagram .fresh { display: none; }
 .health-item { display: flex; align-items: center; gap: 8px; }
 .health-item .health-row { flex: 1; min-width: 0; }
+/* Copy a problem's line: quiet until the row is pointed at or it has focus */
+.health-copy-one { flex: none; opacity: 0; }
+.health-item:hover .health-copy-one, .health-copy-one:focus-visible { opacity: 1; }
+@media (hover: none) { .health-copy-one { opacity: 1; } }
+.health-pane .activity-bar #health-copy { flex: none; }
+.copy-box { position: fixed; top: 0; left: -9999px; opacity: 0; }
+.copy-text {
+  max-height: 40vh; overflow: auto; margin: 0; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; user-select: text;
+}
 .drift-actions { display: inline-flex; gap: 6px; flex: none; }
 .insp-card .drift-actions { margin: 4px 0 8px; }
 
