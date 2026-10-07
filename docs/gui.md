@@ -165,7 +165,11 @@ an operator.
     a kind that runs a VM inside its container, a port added since the
     node booted) and the cable is there at the next deploy.
 
-  In the rack view a spare port is an empty jack with a dashed outline.
+  In the rack view a spare port is an empty jack with a dashed outline,
+  and cabling is done by hand: drag from one empty jack to another. A
+  loose cable follows the pointer, the jacks it can go into light up, and
+  letting go over one asks to make the cable (Escape puts it down). It
+  does what the Cable button does.
   On Arista cEOS a spare port shows as `notconnect`, like a port with no
   cable, and goes to `connected` when it is cabled.
 

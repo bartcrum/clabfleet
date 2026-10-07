@@ -13,7 +13,12 @@
 // terminals, capture and export work unchanged. Positions here are computed,
 // never dragged: Save layout and Auto layout belong to the logical view.
 //
-// Uses app.js globals: S, $, s, announce, renderDiagram, nodeRuntime,
+// A spare port (spare.js) is an empty jack. Operators cable two of them by
+// dragging from one jack to the other: a loose cable follows the pointer,
+// the jacks it can go into light up, and letting go over one asks to make
+// the cable (window.Spare.cable).
+//
+// Uses app.js globals: S, $, s, announce, renderDiagram, selectNode, canOperate, nodeRuntime,
 // nodeState, nodeHost, statusGlyph, kindName, nodeRole, naturalCmp,
 // crossLinkVnis, liveData, linkLive, BUSY_BPS, fmtCpu, fmtBytes, fmtMem,
 // nodeLabel, truncate; and from canvas.js: tierOf; from capture.js:
@@ -38,6 +43,9 @@ let on = false;
 try { on = localStorage.getItem(KEY) === "racks"; } catch { /* private mode */ }
 let pos = {};             // node id -> centre of its faceplate (keys, fit)
 let box = null;           // bounds of the drawing
+let jackAt = {};          // "node|iface" of each spare port -> the middle of its jack
+let cabling = null;       // a cable being dragged: {from: key, line, moved, sx, sy}
+const SEP = "|";          // in no node or interface name
 
 function active() {
   return on && !window.Builder?.editing && !!S.detail && !S.detail.error;
@@ -158,6 +166,8 @@ function draw(g, model) {
   }
 
   const port = {};        // "node:iface" -> {x, y, rack, rx, led, ring}
+  jackAt = {};
+  const cable = canOperate() && S.selected?.type === "topo";
   racks.forEach((r, i) => {
     const rx = i * (RW + GAP), ry = top;
     const info = hostInfo(r);
@@ -204,11 +214,22 @@ function draw(g, model) {
         const px = x + FACE_W - 10 - (inRow - col) * pitch + 2, py = y + 12 + row * U;
         const led = s("rect", { class: "led", x: px, y: py - 6.5, width: 3, height: 3 });
         const spare = !nd.pseudo && nd.node.spare?.includes(iface);
-        el.append(s("rect", { class: `jack${spare ? " spare" : ""}`, x: px, y: py, width: 13, height: 11, rx: 1.5 },
-          spare ? s("title", {}, `${nd.id}:${iface} is a spare port: nothing is plugged in`) : null), led,
+        const key = `${nd.id}${SEP}${iface}`;
+        el.append(s("rect", {
+          class: `jack${spare ? " spare" : ""}${cabling?.from === key ? " cable-from" : ""}`,
+          x: px, y: py, width: 13, height: 11, rx: 1.5, ...(spare ? { "data-jack": key } : {}),
+        }), led,
           s("text", { class: "pnum", x: px + 4.5, y: py - 2.5 }, portLabel(iface)));
         const ring = s("rect", { class: "port-ring", x: px - 2, y: py - 10, width: pitch, height: 23, rx: 2.5 });
         rings.append(ring);
+        if (spare) {
+          // An empty jack has nothing to press: this is what the pointer finds
+          jackAt[key] = [px + 6.5, py + 5.5];
+          rings.append(s("rect", {
+            class: `jack-hit${cable ? " cable" : ""}`, x: px - 2, y: py - 10, width: pitch, height: 23, "data-spare": key,
+          }, s("title", {}, `${nd.id}:${iface} is a spare port: nothing is plugged in` +
+            (cable ? ". Drag to another spare port to cable them." : ""))));
+        }
         port[`${nd.id}:${iface}`] = { x: px + 6.5, y: py + 5.5, rack: sl.rack, rx, led, ring };
       });
       devices.append(el);
@@ -265,6 +286,80 @@ function draw(g, model) {
   }
 
   g.append(furniture, devices, cables, rings);
+  // A redraw (the live state comes in every few seconds) keeps a cable in hand
+  if (cabling) {
+    if (jackAt[cabling.from]) g.append(cabling.line);
+    else dropCable();
+  }
+}
+
+// --- cabling two spare ports by dragging from one jack to the other ---
+
+function viewPoint(ev) {
+  const r = $("#diagram").getBoundingClientRect();
+  return [(ev.clientX - r.left - S.view.x) / S.view.k, (ev.clientY - r.top - S.view.y) / S.view.k];
+}
+
+// The spare port under the pointer (the svg has the pointer captured, so
+// the event's own target is the canvas)
+function spareAt(ev) {
+  return document.elementFromPoint(ev.clientX, ev.clientY)?.closest?.("#diagram [data-spare]")?.dataset.spare || null;
+}
+
+// The drawn jack of a spare port (by comparing, not by a selector: the key
+// holds characters a selector would need escaped)
+function jackOf(key) {
+  return [...$("#diagram").querySelectorAll("[data-jack]")].find((el) => el.dataset.jack === key) || null;
+}
+
+function dropCable() {
+  cabling?.line.remove();
+  cabling = null;
+  const svg = $("#diagram");
+  svg.classList.remove("cabling");
+  for (const el of svg.querySelectorAll(".cable-from, .cable-target")) el.classList.remove("cable-from", "cable-target");
+}
+
+function setupCabling() {
+  const svg = $("#diagram");
+  // Capture phase: before the canvas takes the press for a pan
+  svg.addEventListener("pointerdown", (ev) => {
+    const from = active() && ev.button === 0 && ev.target.closest?.(".jack-hit.cable")?.dataset.spare;
+    if (!from || !jackAt[from]) return;
+    ev.stopImmediatePropagation();
+    ev.preventDefault();
+    try { svg.setPointerCapture(ev.pointerId); } catch { /* a pointer the browser no longer knows */ }
+    const [x, y] = jackAt[from];
+    const line = s("path", { class: "cable-draft", d: `M${x},${y} L${x},${y}` });
+    $("#viewport")?.append(line);
+    cabling = { from, line, moved: false, sx: ev.clientX, sy: ev.clientY };
+    svg.classList.add("cabling");
+    jackOf(from)?.classList.add("cable-from");
+  }, true);
+  svg.addEventListener("pointermove", (ev) => {
+    if (!cabling) return;
+    if (Math.abs(ev.clientX - cabling.sx) + Math.abs(ev.clientY - cabling.sy) > 3) cabling.moved = true;
+    const [x0, y0] = jackAt[cabling.from], [x, y] = viewPoint(ev);
+    // A loose cable sags
+    const sag = Math.min(40, Math.hypot(x - x0, y - y0) / 4);
+    cabling.line.setAttribute("d", `M${x0},${y0} Q${(x0 + x) / 2},${Math.max(y0, y) + sag} ${x},${y}`);
+    const over = spareAt(ev);
+    for (const el of svg.querySelectorAll(".cable-target")) el.classList.remove("cable-target");
+    if (over && over !== cabling.from) jackOf(over)?.classList.add("cable-target");
+  });
+  svg.addEventListener("pointerup", (ev) => {
+    if (!cabling) return;
+    const { from, moved } = cabling;
+    const to = spareAt(ev);
+    dropCable();
+    const [node, iface] = from.split(SEP);
+    if (!moved) { selectNode(node); return; }  // a click on the jack: its node
+    if (!to || to === from) return;
+    const [toNode, toIface] = to.split(SEP);
+    window.Spare?.cable(node, iface, toNode, toIface);
+  });
+  svg.addEventListener("pointercancel", dropCable);
+  document.addEventListener("keydown", (ev) => { if (cabling && ev.key === "Escape") dropCable(); });
 }
 
 function toggle() {
@@ -285,6 +380,7 @@ function sync() {
 
 function setup() {
   $("#racks-toggle").addEventListener("click", toggle);
+  setupCabling();
   sync();
 }
 

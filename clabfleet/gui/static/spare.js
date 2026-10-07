@@ -138,5 +138,13 @@ function section(node) {
   return out;
 }
 
-window.Spare = { section };
+window.Spare = {
+  section,
+  // Ask to cable two spare ports, given by name (the rack view's drag and drop)
+  cable(aNode, aIface, bNode, bIface) {
+    const node = S.detail?.nodes?.find((n) => n.name === aNode);
+    if (node && canOperate() && S.selected?.type === "topo") return cable(node, aIface, `${bNode}\u0000${bIface}`);
+    return null;
+  },
+};
 })();
