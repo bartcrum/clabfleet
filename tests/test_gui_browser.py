@@ -425,4 +425,16 @@ async def steps(page):
     await page.until(f"S.detail.links.length === {links + 2}")
     await page.until("document.querySelectorAll('#diagram .jack.spare').length === 0")
     await page.js("document.querySelector('#racks-toggle').click()")
+    # Unplug: the link's card pulls the cable, and its ports are spare ports again
+    await page.js(f"selectLink(S.detail.links.find(l => l.a.iface === '{second}' && "
+                  f"l.b.iface === '{second}').id)")
+    await page.until("[...document.querySelectorAll('#link-card button')].some(b => b.textContent === 'Unplug')")
+    await page.js("[...document.querySelectorAll('#link-card button')].find(b => b.textContent === 'Unplug').click()")
+    await page.until("document.querySelector('#confirm').open")
+    assert await page.js("document.querySelector('#confirm-title').textContent") == (
+        f"Unplug Leaf-1:{second} from Leaf-2:{second}?")
+    await page.js("document.querySelector('#confirm-ok').click()")
+    await page.until(f"S.detail.links.length === {links + 1}")
+    assert await page.js("S.detail.nodes.find(n => n.name === 'Leaf-1').spare") == [second]
+    assert await page.js("document.querySelector('#link-card').hidden") is True
     await asyncio.sleep(0.5)  # let late renders throw, if they would

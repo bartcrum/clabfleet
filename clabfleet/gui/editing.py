@@ -215,6 +215,36 @@ def cable_spare_ports(text: str, a: tuple[str, str], b: tuple[str, str]) -> str:
     return out.getvalue()
 
 
+def uncable_ports(text: str, a: tuple[str, str], b: tuple[str, str]) -> str:
+    """``text`` with the link between ``a`` and ``b`` (each (node,
+    interface)) replaced by two spare ports. Only for a plain link between
+    two lab nodes (``endpoints: ["n1:if", "n2:if"]``): one that carries more
+    (addresses, a type, variables) has things to lose, and is left to the
+    editor. ValueError if there is no such link."""
+    yaml = _yaml_for(text)
+    data = yaml.load(text)
+    links, CommentedMap, _ = _links_of(data)
+    wanted = {f"{a[0]}:{a[1]}", f"{b[0]}:{b[1]}"}
+    found = None
+    for i, link in enumerate(links):
+        ends = link.get("endpoints") if isinstance(link, dict) else None
+        if isinstance(ends, list) and len(ends) == 2 and {str(e) for e in ends} == wanted:
+            found = i
+            break
+    if found is None or len(wanted) != 2:
+        raise ValueError(f"There is no cable between {a[0]}:{a[1]} and {b[0]}:{b[1]}")
+    if _simple_link(links[found]) is None or set(links[found]) - {"endpoints"}:
+        raise ValueError(f"The link between {a[0]}:{a[1]} and {b[0]}:{b[1]} carries more than "
+                         "its two ends (see the YAML): edit the file to remove it")
+    del links[found]
+    out = io.StringIO()
+    yaml.dump(data, out)
+    text = out.getvalue()
+    for node, iface in (a, b):
+        text = add_spare_ports(text, node, [iface])
+    return text
+
+
 def apply_graph(text: str, graph: dict, default_images: Optional[dict] = None) -> str:
     """Return ``text`` changed to match a graph drawn in the GUI builder.
 

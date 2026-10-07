@@ -411,6 +411,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_put("/api/graph/{id:.+}", _save_graph)
     app.router.add_post("/api/ports/{id:.+}", _add_ports)
     app.router.add_post("/api/cable/{id:.+}", _cable)
+    app.router.add_post("/api/uncable/{id:.+}", _uncable)
     app.router.add_post("/api/topologies", _create_topology)
     app.router.add_get("/api/builder", _builder_info)
     app.router.add_post("/api/builder/configs", _builder_configs)
@@ -1150,6 +1151,21 @@ async def _cable(request):
     ws: Workspace = request.app[WORKSPACE]
     result = await _call(ws.cable, topo_id, a, b, str(body.get("base_hash", "")))
     audit(request, "cabled", topology=topo_id, a=f"{a[0]}:{a[1]}", b=f"{b[0]}:{b[1]}",
+          live=result["live"], **({"note": result["note"]} if result["note"] else {}))
+    return web.json_response(result)
+
+
+async def _uncable(request):
+    """``{"a": {node, iface}, "b": {node, iface}, "base_hash"}``: pull the
+    cable between two ports, which become spare ports again, in the file
+    and, where it can be done, on the running lab (``Workspace.uncable``)."""
+    topo_id = request.match_info["id"]
+    body = await _json_body(request)
+    a, b = _port(body.get("a")), _port(body.get("b"))
+    _refuse_while_busy(request, topo_id)
+    ws: Workspace = request.app[WORKSPACE]
+    result = await _call(ws.uncable, topo_id, a, b, str(body.get("base_hash", "")))
+    audit(request, "uncabled", topology=topo_id, a=f"{a[0]}:{a[1]}", b=f"{b[0]}:{b[1]}",
           live=result["live"], **({"note": result["note"]} if result["note"] else {}))
     return web.json_response(result)
 

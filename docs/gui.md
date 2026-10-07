@@ -165,6 +165,15 @@ an operator.
     a kind that runs a VM inside its container, a port added since the
     node booted) and the cable is there at the next deploy.
 
+  - **Unplug:** click a cable and use Unplug on its card. The link goes
+    from the file and its two ports become spare ports again. On a running
+    lab the cable is pulled on the spot under the same conditions as
+    cabling: both ends go to `notconnect`, what ran over the cable goes
+    down, and the nodes' configs are left as they are. The ports can be
+    cabled again at once, to anywhere. Only a plain link between two nodes
+    can be unplugged this way; one that carries addresses, an MTU or a
+    type in the file is the YAML editor's to remove.
+
   In the rack view a spare port is an empty jack with a dashed outline,
   and cabling is done by hand: drag from one empty jack to another. A
   loose cable follows the pointer, the jacks it can go into light up, and
@@ -183,9 +192,9 @@ an operator.
       labels: {lab.spare: "true"}
   ```
 
-  Spare ports cost no memory worth counting. Both actions are refused
+  Spare ports cost no memory worth counting. These actions are refused
   while a job runs for the lab or the YAML editor has unsaved text, and
-  go to the audit log (`ports_added`, `cabled`).
+  go to the audit log (`ports_added`, `cabled`, `uncabled`).
 - **Builder:** draw a lab instead of writing YAML. **+ New lab** in the
   sidebar starts one, blank (one node) or from a `clabfleet new` template.
   **Edit** on the Diagram tab (operators) opens a palette: drag a kind
@@ -426,8 +435,8 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   LDAP user is gone or has no role any more), `password_changed`,
   `password_change_failed`, the `user_*` events above, `denied`, `job_started`
   (action, topology, options), `job_cancelled`, `job_finished` (status, seconds),
-  `ports_added`, `cabled` (the two ports, and whether it was plugged in on
-  the running lab),
+  `ports_added`, `cabled` and `uncabled` (the two ports, and whether it was
+  done on the running lab),
   `topology_saved`, `positions_saved`, `terminal_opened` and
   `terminal_closed` (lab, node, mode, host, seconds, exit code),
   `capture_started`, `capture_finished` and `session_revoked` (an open

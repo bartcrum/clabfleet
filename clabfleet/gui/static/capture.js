@@ -99,7 +99,7 @@ function syncLinkCard(card, l) {
     ls?.rate ? ["Traffic", `${l.a.node || "a"} → ${l.b.node || "b"} ${fmtRate(ls.rate.ab)} · back ${fmtRate(ls.rate.ba)}`] : null,
   ].filter(Boolean);
   card.querySelector(".link-overview").replaceChildren(...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
-  card.querySelector(".whatif").replaceChildren(...linkWhatif(l, ls));
+  card.querySelector(".whatif").replaceChildren(...linkWhatif(l, ls), ...(window.Spare?.linkActions(l) || []));
   const sides = { a: captureSide(l.a), b: captureSide(l.b) };
   if (!sides[captureForm.side].ok) {
     const other = captureForm.side === "a" ? "b" : "a";
