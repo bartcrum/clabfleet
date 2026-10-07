@@ -32,6 +32,7 @@ clabfleet/
   snapshots.py     # Config snapshots and diffs (clabfleet snapshot/diff)
   capture.py       # tcpdump on node interfaces (clabfleet capture, GUI)
   nodes.py         # Per-kind CLI/SSH access, terminal commands, inspect parsing
+  spare.py         # Spare ports: naming new ones, the unplugged look, live cabling
   validate.py      # Topology checks (clabfleet validate)
   templates.py     # Lab templates (clabfleet new)
   linkcheck.py     # Ping and UDP checks between cluster hosts

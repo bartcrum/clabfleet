@@ -409,6 +409,8 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_put("/api/positions/{id:.+}", _save_positions)
     app.router.add_put("/api/annotations/{id:.+}", _save_annotations)
     app.router.add_put("/api/graph/{id:.+}", _save_graph)
+    app.router.add_post("/api/ports/{id:.+}", _add_ports)
+    app.router.add_post("/api/cable/{id:.+}", _cable)
     app.router.add_post("/api/topologies", _create_topology)
     app.router.add_get("/api/builder", _builder_info)
     app.router.add_post("/api/builder/configs", _builder_configs)
@@ -1111,6 +1113,44 @@ async def _save_graph(request):
     if not dry_run:
         audit(request, "topology_saved", topology=topo_id, hash=result["detail"].get("hash"),
               via="builder")
+    return web.json_response(result)
+
+
+def _port(value) -> tuple[str, str]:
+    """(node, interface) from ``{"node": ..., "iface": ...}``."""
+    if (not isinstance(value, dict) or not isinstance(value.get("node"), str)
+            or not isinstance(value.get("iface"), str) or not value["node"] or not value["iface"]):
+        raise web.HTTPBadRequest(text="A port is {node, iface}")
+    return value["node"], value["iface"]
+
+
+async def _add_ports(request):
+    """``{"node", "count", "base_hash"}``: give a node more spare ports, in
+    the file. They are there at the next deploy (see ``Workspace.add_ports``)."""
+    topo_id = request.match_info["id"]
+    body = await _json_body(request)
+    node, count = body.get("node"), body.get("count")
+    if not isinstance(node, str):
+        raise web.HTTPBadRequest(text="Expected a node")
+    _refuse_while_busy(request, topo_id)
+    ws: Workspace = request.app[WORKSPACE]
+    result = await _call(ws.add_ports, topo_id, node, count, str(body.get("base_hash", "")))
+    audit(request, "ports_added", topology=topo_id, node=node, ports=result["ports"])
+    return web.json_response(result)
+
+
+async def _cable(request):
+    """``{"a": {node, iface}, "b": {node, iface}, "base_hash"}``: cable two
+    spare ports, in the file and, where it can be done, on the running lab
+    (see ``Workspace.cable``)."""
+    topo_id = request.match_info["id"]
+    body = await _json_body(request)
+    a, b = _port(body.get("a")), _port(body.get("b"))
+    _refuse_while_busy(request, topo_id)
+    ws: Workspace = request.app[WORKSPACE]
+    result = await _call(ws.cable, topo_id, a, b, str(body.get("base_hash", "")))
+    audit(request, "cabled", topology=topo_id, a=f"{a[0]}:{a[1]}", b=f"{b[0]}:{b[1]}",
+          live=result["live"], **({"note": result["note"]} if result["note"] else {}))
     return web.json_response(result)
 
 

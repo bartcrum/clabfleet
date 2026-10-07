@@ -26,9 +26,13 @@ from ..execute import ssh_exec
 from ..routing import routing_view
 from ..routing.live import collect as collect_protocols, family as cli_family, overlay as protocol_overlay
 from ..snapshots import SAVED_CONFIG, diff_lab, startup_config, unified_diff
+from ..spare import cable_live, live_problem, next_ports, port_exists
 from ..validate import validate_text
 from . import annotations
-from .editing import EditConflict, apply_graph, set_positions, text_hash, write_if_unchanged
+from .editing import (
+    EditConflict, add_spare_ports, apply_graph, cable_spare_ports, set_positions, text_hash,
+    write_if_unchanged,
+)
 from .events import EventLog, link_items, protocol_items
 from ..runner import CommandTimeout, Runner, deadline
 from ..topology import (
@@ -93,6 +97,7 @@ def find_topologies(roots: list[Path]) -> dict[str, Path]:
 def topology_view(topo: Topology) -> dict:
     """Nodes and links in a shape the diagram can draw."""
     nodes = []
+    spare = topo.spare_ports()
     for name in topo.nodes:
         eff = topo.effective_node(name)
         labels = eff["labels"]
@@ -113,10 +118,16 @@ def topology_view(topo: Topology) -> dict:
             "pos": pos,
             "modes": access_modes(eff["kind"]),
             "config": bool(eff.get("startup-config") or eff.get("exec")),
+            # Ports with nothing plugged in (spare.py), and why one of this
+            # node's ports could not be cabled while the lab runs, if so
+            "spare": spare.get(name, []),
+            "cable_live": live_problem(topo, name) is None,
         })
 
     links = []
     for link in topo.links:
+        if link.is_spare:
+            continue  # shown as the node's empty ports
         raw = link.raw
         link_type = raw.get("type", "veth")
         ends: list[dict] = []
@@ -752,6 +763,82 @@ class Workspace:
         if dry_run:
             return {"yaml": new, "validation": self.validate_yaml(topo_id, new)}
         return self.save_yaml(topo_id, new, text_hash(text))
+
+    # --- spare ports (spare.py) ---
+
+    def add_ports(self, topo_id: str, node: str, count: int, base_hash: str = "") -> dict:
+        """Give ``node`` ``count`` more spare ports, in the file. A running
+        node does not see them: nodes learn their ports when they boot.
+        Returns {"detail", "ports": the new ports, "applies": "now" when the
+        lab is not deployed, else "next deploy"}."""
+        path = self.topology_path(topo_id)
+        text = path.read_text()
+        if base_hash and text_hash(text) != base_hash:
+            raise EditConflict(f"{path.name} changed on disk; reload it before adding ports")
+        topo = load_topology(path)
+        ports = next_ports(topo, node, count)
+        saved = self.save_yaml(topo_id, add_spare_ports(text, node, ports), text_hash(text))
+        deployed = any(c["lab"] == topo.name for hs in self._recent_runtime() for c in hs.containers)
+        return {**saved, "ports": ports, "applies": "next deploy" if deployed else "now"}
+
+    def cable(self, topo_id: str, a: tuple[str, str], b: tuple[str, str],
+              base_hash: str = "") -> dict:
+        """Cable the spare ports ``a`` and ``b`` (each (node, interface)).
+
+        The file gets a link in their place. If the lab runs with both nodes
+        on one host, and both are of a kind whose ports are plain interfaces,
+        the cable is also made on the spot (``spare.cable_live``). Returns
+        {"detail", "live": bool, "note": why not live, or what went wrong
+        making it}: the file is changed either way, so the next deploy has
+        the cable."""
+        path = self.topology_path(topo_id)
+        text = path.read_text()
+        if base_hash and text_hash(text) != base_hash:
+            raise EditConflict(f"{path.name} changed on disk; reload it before cabling")
+        topo = load_topology(path)
+        for node, _ in (a, b):
+            if node not in topo.nodes:
+                raise KeyError(f"No node '{node}' in {topo.name}")
+        new = cable_spare_ports(text, a, b)  # ValueError if either is not a spare port
+
+        # What the lab looks like now, before the file changes under it
+        running = {c["node"]: c for hs in self.runtime(max_age=0) for c in hs.containers
+                   if c["lab"] == topo.name}
+        ends = [running.get(node) for node, _ in (a, b)]
+        note = ""
+        if not running:
+            note = "the lab is not deployed: the cable is there at the next deploy"
+        elif not all(c and c["state"] == "running" for c in ends):
+            note = "a node of this cable is not running: the cable is there at the next deploy"
+        elif ends[0]["host"] != ends[1]["host"]:
+            note = ("the nodes are on different hosts, where a cable is a VXLAN link made at "
+                    "deploy: it is there after the next deploy")
+        else:
+            note = next((f"{why}: the cable is there after the next deploy" for why in
+                         (live_problem(topo, node) for node, _ in (a, b)) if why), "")
+
+        host = None
+        if not note:
+            # A port added since the node booted is in the file only
+            host = self.host(ends[0]["host"])
+            for (node, iface), c in zip((a, b), ends):
+                if not port_exists(self.runner(host), c["container"], iface, host.sudo):
+                    note = (f"{node}:{iface} was added after {node} booted, so the running node "
+                            "does not have it: the cable is there after the next deploy")
+                    break
+
+        saved = self.save_yaml(topo_id, new, text_hash(text))
+        if note:
+            return {**saved, "live": False, "note": note}
+        try:
+            cable_live(self.runner(host), (ends[0]["container"], a[1]),
+                       (ends[1]["container"], b[1]), host.sudo)
+        except Exception as exc:  # noqa: BLE001 - the file has the cable; say what happened
+            logger.warning("Live cable %s:%s - %s:%s failed: %s", *a, *b, exc)
+            return {**saved, "live": False,
+                    "note": f"saved, but it could not be made on the running lab ({exc}): "
+                            "it is there after the next deploy"}
+        return {**saved, "live": True, "note": ""}
 
     def create_topology(self, file_name: str, lab_name: str, kind: str,
                         template: Optional[str] = None, params: Optional[dict] = None) -> str:

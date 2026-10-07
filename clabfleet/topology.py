@@ -38,6 +38,14 @@ LABEL_HOST = "lab.host"
 LABEL_HOST_TAGS = "lab.host-tags"
 LABEL_CPU = "lab.cpu"
 LABEL_RAM = "lab.ram"
+# On a link: a spare port. A `type: dummy` link with this label is a port
+# the node has and nothing is plugged into yet:
+#     - type: dummy
+#       endpoint: {node: Leaf-1, interface: eth7}
+#       labels: {lab.spare: "true"}
+# It is plain containerlab (a dummy interface), so the node boots with the
+# port; clabfleet shows it as empty and cables it later (see spare.py).
+LABEL_SPARE = "lab.spare"
 
 # Pseudo-nodes allowed in brief link endpoints ("host:veth0", "macvlan:eno1")
 SPECIAL_ENDPOINT_NODES = {"host", "mgmt-net", "macvlan"}
@@ -133,6 +141,19 @@ class Link:
     def link_id(self) -> str:
         return f"link{self.index}"
 
+    @property
+    def is_spare(self) -> bool:
+        """A spare port: a dummy link labelled ``lab.spare`` (see LABEL_SPARE)."""
+        return is_spare_link(self.raw)
+
+
+def is_spare_link(raw) -> bool:
+    """Is this ``topology.links`` entry a spare port (see LABEL_SPARE)?"""
+    if not isinstance(raw, dict) or raw.get("type") != "dummy":
+        return False
+    labels = raw.get("labels")
+    return isinstance(labels, dict) and str(labels.get(LABEL_SPARE, "")).lower() == "true"
+
 
 @dataclass(frozen=True)
 class FileRef:
@@ -156,6 +177,15 @@ class Topology:
     @property
     def nodes(self) -> dict[str, dict]:
         return self.data["topology"]["nodes"]
+
+    def spare_ports(self) -> dict[str, list[str]]:
+        """Each node's spare ports (see LABEL_SPARE), in the file's order."""
+        ports: dict[str, list[str]] = {}
+        for link in self.links:
+            if link.is_spare:
+                ep = link.endpoints[0]
+                ports.setdefault(ep.node, []).append(ep.interface)
+        return ports
 
     def effective_node(self, name: str) -> dict:
         """Node definition with defaults → kinds → groups inheritance applied."""

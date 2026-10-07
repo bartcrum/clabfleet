@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from ..topology import LABEL_SPARE, is_spare_link
+
 POS_X, POS_Y = "graph-posX", "graph-posY"
 
 
@@ -144,6 +146,73 @@ def _rename_in_link(link, old: str, new: str) -> None:
     ep = link.get("endpoint") if isinstance(link, dict) else None
     if isinstance(ep, dict) and ep.get("node") == old:
         ep["node"] = new
+
+
+# --- Spare ports: ports with nothing plugged in, and cables between them ---
+
+def _links_of(data):
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+    topo = data.get("topology") if isinstance(data, dict) else None
+    if not isinstance(topo, dict):
+        raise ValueError("the file has no 'topology:' section")
+    if topo.get("links") is None:
+        topo["links"] = CommentedSeq()
+    return topo["links"], CommentedMap, CommentedSeq
+
+
+def _spare_index(links, node: str, iface: str) -> Optional[int]:
+    """Where the spare port ``node:iface`` is in ``links``, if it is one."""
+    for i, link in enumerate(links):
+        if is_spare_link(link):
+            ep = link.get("endpoint") or {}
+            if ep.get("node") == node and ep.get("interface") == iface:
+                return i
+    return None
+
+
+def add_spare_ports(text: str, node: str, ifaces: list[str]) -> str:
+    """``text`` with a spare port (a labelled dummy link) for each of
+    ``ifaces`` of ``node``, after the other links."""
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+
+    yaml = _yaml_for(text)
+    data = yaml.load(text)
+    links, CommentedMap, _ = _links_of(data)
+    for iface in ifaces:
+        endpoint = CommentedMap([("node", node), ("interface", iface)])
+        endpoint.fa.set_flow_style()
+        labels = CommentedMap([(LABEL_SPARE, DoubleQuotedScalarString("true"))])
+        labels.fa.set_flow_style()
+        links.append(CommentedMap([("type", "dummy"), ("endpoint", endpoint), ("labels", labels)]))
+    out = io.StringIO()
+    yaml.dump(data, out)
+    return out.getvalue()
+
+
+def cable_spare_ports(text: str, a: tuple[str, str], b: tuple[str, str]) -> str:
+    """``text`` with a link between the spare ports ``a`` and ``b`` (each
+    (node, interface)) in place of the two. ValueError if either is not a
+    spare port of the file."""
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+
+    if a == b:
+        raise ValueError("A port cannot be cabled to itself")
+    yaml = _yaml_for(text)
+    data = yaml.load(text)
+    links, CommentedMap, CommentedSeq = _links_of(data)
+    for node, iface in (a, b):
+        if _spare_index(links, node, iface) is None:
+            raise ValueError(f"{node}:{iface} is not a spare port")
+    for node, iface in (a, b):  # looked up again: the first removal moves the second
+        del links[_spare_index(links, node, iface)]
+    ends = CommentedSeq([DoubleQuotedScalarString(f"{a[0]}:{a[1]}"),
+                         DoubleQuotedScalarString(f"{b[0]}:{b[1]}")])
+    ends.fa.set_flow_style()
+    links.append(CommentedMap([("endpoints", ends)]))
+    out = io.StringIO()
+    yaml.dump(data, out)
+    return out.getvalue()
 
 
 def apply_graph(text: str, graph: dict, default_images: Optional[dict] = None) -> str:
