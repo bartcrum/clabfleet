@@ -10,7 +10,7 @@
 //
 // Uses app.js globals: S, $, h, api, toast, confirmDialog, canOperate,
 // topoPath, yamlDirty, runningJob, labStatus, naturalCmp, reloadDetail,
-// refreshState, refreshLive.
+// refreshState, refreshLive; and from capture.js: selectLink.
 // ---------------------------------------------------------------------------
 
 (() => {
@@ -88,6 +88,39 @@ async function addPorts(node, count) {
   });
 }
 
+async function unplug(l) {
+  const here = `${l.a.node}:${l.a.iface}`, there = `${l.b.node}:${l.b.iface}`;
+  const running = labStatus(S.detail.name, S.detail.nodes.length).deployed > 0;
+  const kinds = [l.a.node, l.b.node].map((name) => S.detail.nodes.find((n) => n.name === name));
+  const live = running && kinds.every((n) => n?.cable_live);
+  if (!(await confirmDialog({
+    title: `Unplug ${here} from ${there}?`,
+    body: [
+      "The topology file gets two spare ports in place of this link: the ports stay, with nothing plugged in.",
+      !running ? "The lab is not deployed: the cable is gone at the next deploy."
+        : live ? "The lab is running: the cable is also pulled now. What runs over it (sessions, traffic) goes down; the nodes' configs are not changed."
+          : `On this running lab the cable cannot be pulled now (a node's kind does not allow it): it is gone after the next deploy. ${NEXT_DEPLOY}`,
+    ],
+    ok: "Unplug it", danger: true,
+  }))) return;
+  await change("uncable", { a: { node: l.a.node, iface: l.a.iface }, b: { node: l.b.node, iface: l.b.iface } }, (r) => {
+    toast(r.live ? `Unplugged ${here} from ${there} on the running lab`
+      : `Unplugging ${here} from ${there} saved: ${r.note}.${running ? ` ${NEXT_DEPLOY}` : ""}`, { ok: true });
+    selectLink(null);  // the link is no more
+  });
+}
+
+// For the link card: pull this cable (a plain link between two nodes)
+function linkActions(l) {
+  if (!canOperate() || S.selected?.type !== "topo" || !l.a.node || !l.b.node || l.type !== "veth") return [];
+  return [h("h4", {}, "Cable"), h("span", { class: "open" },
+    h("button", {
+      class: "btn small danger", type: "button",
+      title: "Pull this cable: its two ports become spare ports, in the file and on the running lab",
+      onclick: () => unplug(l),
+    }, "Unplug"))];
+}
+
 // The inspector's section for a node of an open topology
 function section(node) {
   if (S.selected?.type !== "topo" || !S.detail || S.detail.error) return [];
@@ -140,6 +173,7 @@ function section(node) {
 
 window.Spare = {
   section,
+  linkActions,
   // Ask to cable two spare ports, given by name (the rack view's drag and drop)
   cable(aNode, aIface, bNode, bIface) {
     const node = S.detail?.nodes?.find((n) => n.name === aNode);

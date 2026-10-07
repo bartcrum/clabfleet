@@ -42,7 +42,9 @@ Not released yet. The first release with a version tag and a package.
 - Nodes can have spare ports: ports with nothing plugged in, kept in the
   topology file as labelled `dummy` links. The GUI adds them to a node
   and cables two of them, in the file and, for Arista cEOS and Linux
-  nodes on one host, on the running lab without a redeploy.
+  nodes on one host, on the running lab without a redeploy. A cable is
+  unplugged the same way, and in the rack view cables are made by
+  dragging from one empty jack to another.
 
 ### Web GUI
 

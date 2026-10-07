@@ -16,7 +16,7 @@ pytest.importorskip("aiohttp")
 pytest.importorskip("ruamel.yaml")
 
 from clabfleet.gui import state  # noqa: E402
-from clabfleet.gui.editing import add_spare_ports, cable_spare_ports  # noqa: E402
+from clabfleet.gui.editing import add_spare_ports, cable_spare_ports, uncable_ports  # noqa: E402
 from clabfleet.gui.state import HostState, Workspace, topology_view  # noqa: E402
 
 LAB = """\
@@ -115,6 +115,30 @@ def test_file_edits_keep_the_rest_of_the_file():
     assert "links:" in add_spare_ports(bare, "a", ["eth1"])
 
 
+def test_unplugging_turns_a_link_back_into_two_spare_ports():
+    text = uncable_ports(LAB, ("sw2", "eth1"), ("sw1", "eth1"))   # either way round
+    assert "endpoints" not in text and "# my lab" in text and "# a spine" in text
+    t = topology_from_dict(__import__("yaml").safe_load(text))
+    assert t.spare_ports() == {"sw2": ["eth1"], "sw1": ["eth1"]} and not any(l.is_p2p for l in t.links)
+    # ... which can be cabled again: the same file as before, give or take the order
+    again = cable_spare_ports(text, ("sw1", "eth1"), ("sw2", "eth1"))
+    assert '- endpoints: ["sw1:eth1", "sw2:eth1"]' in again and "lab.spare" not in again
+
+    with pytest.raises(ValueError, match="no cable between sw1:eth1 and sw2:eth9"):
+        uncable_ports(LAB, ("sw1", "eth1"), ("sw2", "eth9"))
+    with pytest.raises(ValueError, match="no cable between"):
+        uncable_ports(LAB, ("sw1", "eth1"), ("sw1", "eth1"))
+    # A link that carries more than its ends is the editor's to remove
+    for extra in ("\n      mtu: 9000", "\n      ipv4: [10.0.0.1/31, 10.0.0.0/31]"):
+        with pytest.raises(ValueError, match="carries more than its two ends"):
+            uncable_ports(LAB.replace("   # the uplink", extra), ("sw1", "eth1"), ("sw2", "eth1"))
+    typed = LAB.replace('- endpoints: ["sw1:eth1", "sw2:eth1"]   # the uplink', (
+        "- type: veth\n      endpoints:\n        - {node: sw1, interface: eth1}\n"
+        "        - {node: sw2, interface: eth1}"))
+    with pytest.raises(ValueError, match="no cable between"):
+        uncable_ports(typed, ("sw1", "eth1"), ("sw2", "eth1"))
+
+
 # ----------------------------------------------------------------------
 # On the hosts
 # ----------------------------------------------------------------------
@@ -164,6 +188,28 @@ def test_a_live_cable_replaces_both_placeholders_with_a_veth_pair():
         spare.cable_live(Recorder(fail=["tools veth create"]), ("a", "eth1"), ("b", "eth1"))
     assert spare.port_exists(Recorder(), "c", "eth1") and not spare.port_exists(
         Recorder(fail=["ip link show"]), "c", "eth1")
+
+
+def test_a_live_unplug_puts_both_placeholders_back():
+    runner = Recorder(fail=[("docker", "exec", "clab-t-sw2", "ip", "link", "del")])  # went with its other end
+    assert spare.unplug_live(runner, ("clab-t-sw1", "eth3"), ("clab-t-sw2", "eth2")) == []
+    assert [c[2:] for c in runner.calls] == [
+        ["clab-t-sw1", "ip", "link", "del", "eth3"],
+        ["clab-t-sw2", "ip", "link", "del", "eth2"],
+        ["clab-t-sw1", "ip", "link", "add", "eth3", "type", "dummy"],
+        ["clab-t-sw1", "ip", "link", "set", "eth3", "up"],
+        ["clab-t-sw1", "ip", "link", "set", "eth3", "carrier", "off"],
+        ["clab-t-sw2", "ip", "link", "add", "eth2", "type", "dummy"],
+        ["clab-t-sw2", "ip", "link", "set", "eth2", "up"],
+        ["clab-t-sw2", "ip", "link", "set", "eth2", "carrier", "off"]]
+    # No cable there to pull: said, and nothing is put in its place
+    gone = Recorder(fail=[("docker", "exec", "clab-t-sw1", "ip", "link", "del")])
+    with pytest.raises(CommandError):
+        spare.unplug_live(gone, ("clab-t-sw1", "eth3"), ("clab-t-sw2", "eth2"))
+    assert len(gone.calls) == 1
+    # A node whose `ip` cannot do it all (BusyBox): the cable is pulled all the same
+    assert spare.unplug_live(Recorder(fail=["carrier off"]), ("a", "eth1"), ("b", "eth1")) == [
+        "a:eth1", "b:eth1"]
 
 
 def _inspect(lab, *nodes):
@@ -308,6 +354,45 @@ def test_a_port_the_running_node_lacks_or_a_failed_cable_is_said(lab_ws):
     assert "it is there after the next deploy" in result["note"]
 
 
+def test_pulling_a_cable_in_the_file_and_on_the_running_lab(lab_ws):
+    ws = lab_ws
+    A, B = ("sw1", "eth1"), ("sw2", "eth1")
+
+    def spares():
+        return load_topology(ws.topology_path("t.clab.yml")).spare_ports()
+
+    # Not deployed: the file only
+    result = ws.uncable("t.clab.yml", A, B)
+    assert (result["live"], result["note"]) == (
+        False, "the lab is not deployed: the cable is gone at the next deploy")
+    assert spares() == {"sw1": ["eth1"], "sw2": ["eth1"]} and result["detail"]["links"] == []
+    assert ws.rec.calls == []
+    with pytest.raises(ValueError, match="no cable between"):
+        ws.uncable("t.clab.yml", A, B)
+
+    # Running, both on one host: pulled now, and the ports are spare ports again
+    ws.cable("t.clab.yml", A, B)
+    ws.running(sw1="localhost", sw2="localhost")
+    result = ws.uncable("t.clab.yml", A, B)
+    assert (result["live"], result["note"]) == (True, "")
+    assert ["clab-t-sw1", "ip", "link", "del", "eth1"] in [c[2:] for c in ws.rec.calls]
+    assert ws.rec.calls[-1][2:] == ["clab-t-sw2", "ip", "link", "set", "eth1", "carrier", "off"]
+    # ... so that it can be cabled again, to anywhere, on the spot
+    ws.rec.calls.clear()
+    assert ws.cable("t.clab.yml", A, B)["live"] is True
+
+    # Different hosts, or it could not be done: the file has it, with the reason
+    ws.running(sw1="localhost", sw2="h2")
+    result = ws.uncable("t.clab.yml", A, B)
+    assert not result["live"] and "different hosts" in result["note"]
+    ws.cable("t.clab.yml", A, B)
+    ws.running(sw1="localhost", sw2="localhost")
+    ws.rec = Recorder(fail=[("docker", "exec", "clab-t-sw1", "ip", "link", "del")])
+    result = ws.uncable("t.clab.yml", A, B)
+    assert not result["live"] and "could not be pulled on the running lab" in result["note"]
+    assert spares() == {"sw1": ["eth1"], "sw2": ["eth1"]}
+
+
 def test_ports_and_cable_endpoints(tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
 
@@ -328,6 +413,7 @@ def test_ports_and_cable_endpoints(tmp_path):
             await client.post("/login", json={"token": viewer})
             assert (await client.post("/api/ports/t.clab.yml", json={"node": "sw1", "count": 2})).status == 403
             assert (await client.post("/api/cable/t.clab.yml", json={})).status == 403
+            assert (await client.post("/api/uncable/t.clab.yml", json={})).status == 403
             # ... but a viewer sees the spare ports
             await client.post("/login", json={"token": operator, "switch": True})
             for node in ("sw1", "sw2"):
@@ -343,6 +429,13 @@ def test_ports_and_cable_endpoints(tmp_path):
             assert (await client.post("/api/cable/t.clab.yml", json=body)).status == 400   # taken
             for bad in ({}, {"a": "sw1:eth3", "b": "sw2:eth2"}, {"a": {"node": "sw1"}, "b": body["b"]}):
                 assert (await client.post("/api/cable/t.clab.yml", json=bad)).status == 400, bad
+            # ... and pulled again
+            resp = await client.post("/api/uncable/t.clab.yml", json=body)
+            result = await resp.json()
+            assert resp.status == 200 and result["live"] is False and "not deployed" in result["note"]
+            assert (await client.post("/api/uncable/t.clab.yml", json=body)).status == 400   # gone
+            assert (await client.post("/api/uncable/t.clab.yml", json={})).status == 400
+            assert (await client.post("/api/cable/t.clab.yml", json=body)).status == 200
             await client.post("/login", json={"token": viewer, "switch": True})
             detail = await (await client.get("/api/topologies/t.clab.yml")).json()
             assert next(n["spare"] for n in detail["nodes"] if n["name"] == "sw1") == ["eth3"]
@@ -352,5 +445,8 @@ def test_ports_and_cable_endpoints(tmp_path):
     events = [json.loads(line) for line in audit_path.read_text().splitlines()]
     added = [e["details"] for e in events if e["event"] == "ports_added"]
     assert added == [{"topology": "t.clab.yml", "node": n, "ports": ["eth2", "eth3"]} for n in ("sw1", "sw2")]
-    (cabled,) = [e["details"] for e in events if e["event"] == "cabled"]
-    assert (cabled["a"], cabled["b"], cabled["live"]) == ("sw1:eth2", "sw2:eth3", False)
+    cabled = [e["details"] for e in events if e["event"] == "cabled"]
+    assert len(cabled) == 2 and (cabled[0]["a"], cabled[0]["b"], cabled[0]["live"]) == (
+        "sw1:eth2", "sw2:eth3", False)
+    (pulled,) = [e["details"] for e in events if e["event"] == "uncabled"]
+    assert (pulled["a"], pulled["b"], pulled["live"]) == ("sw1:eth2", "sw2:eth3", False)

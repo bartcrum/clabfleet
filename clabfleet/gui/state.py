@@ -26,12 +26,12 @@ from ..execute import ssh_exec
 from ..routing import routing_view
 from ..routing.live import collect as collect_protocols, family as cli_family, overlay as protocol_overlay
 from ..snapshots import SAVED_CONFIG, diff_lab, startup_config, unified_diff
-from ..spare import cable_live, live_problem, next_ports, port_exists
+from ..spare import cable_live, live_problem, next_ports, port_exists, unplug_live
 from ..validate import validate_text
 from . import annotations
 from .editing import (
     EditConflict, add_spare_ports, apply_graph, cable_spare_ports, set_positions, text_hash,
-    write_if_unchanged,
+    uncable_ports, write_if_unchanged,
 )
 from .events import EventLog, link_items, protocol_items
 from ..runner import CommandTimeout, Runner, deadline
@@ -838,6 +838,51 @@ class Workspace:
             return {**saved, "live": False,
                     "note": f"saved, but it could not be made on the running lab ({exc}): "
                             "it is there after the next deploy"}
+        return {**saved, "live": True, "note": ""}
+
+    def uncable(self, topo_id: str, a: tuple[str, str], b: tuple[str, str],
+                base_hash: str = "") -> dict:
+        """Pull the cable between the ports ``a`` and ``b`` (each (node,
+        interface)): the file gets two spare ports in place of the link, and
+        where ``cable`` would have plugged it in on the running lab, it is
+        pulled there too (``spare.unplug_live``). Returns {"detail", "live",
+        "note"} as ``cable`` does."""
+        path = self.topology_path(topo_id)
+        text = path.read_text()
+        if base_hash and text_hash(text) != base_hash:
+            raise EditConflict(f"{path.name} changed on disk; reload it before unplugging")
+        topo = load_topology(path)
+        new = uncable_ports(text, a, b)  # ValueError if there is no such plain link
+
+        running = {c["node"]: c for hs in self.runtime(max_age=0) for c in hs.containers
+                   if c["lab"] == topo.name}
+        ends = [running.get(node) for node, _ in (a, b)]
+        note = ""
+        if not running:
+            note = "the lab is not deployed: the cable is gone at the next deploy"
+        elif not all(c and c["state"] == "running" for c in ends):
+            note = "a node of this cable is not running: the cable is gone at the next deploy"
+        elif ends[0]["host"] != ends[1]["host"]:
+            note = ("the nodes are on different hosts, where a cable is a VXLAN link made at "
+                    "deploy: it is gone after the next deploy")
+        else:
+            note = next((f"{why}: the cable is gone after the next deploy" for why in
+                         (live_problem(topo, node) for node, _ in (a, b)) if why), "")
+
+        saved = self.save_yaml(topo_id, new, text_hash(text))
+        if note:
+            return {**saved, "live": False, "note": note}
+        host = self.host(ends[0]["host"])
+        try:
+            odd = unplug_live(self.runner(host), (ends[0]["container"], a[1]),
+                              (ends[1]["container"], b[1]), host.sudo)
+        except Exception as exc:  # noqa: BLE001 - the file has it; say what happened
+            logger.warning("Live unplug %s:%s - %s:%s failed: %s", *a, *b, exc)
+            return {**saved, "live": False,
+                    "note": f"saved, but it could not be pulled on the running lab ({exc}): "
+                            "it is gone after the next deploy"}
+        if odd:
+            logger.info("Unplugged, but no placeholder could be put back on %s", ", ".join(odd))
         return {**saved, "live": True, "note": ""}
 
     def create_topology(self, file_name: str, lab_name: str, kind: str,

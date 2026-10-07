@@ -12,6 +12,10 @@ interface whoever deploys the file. Two things are done on top of that:
   creates a veth pair in their place. The node keeps the port through
   this; on Arista cEOS it goes to not connected and back. The file gets
   an ordinary link for it, so a later deploy makes the same cable.
+- A cable is pulled the other way round (``unplug_live``): the veth pair
+  goes and each end gets its dummy interface back, carrier off, so that
+  the two ports are spare ports again, as after a deploy of the file,
+  which has two spare ports in place of the link.
 
 A node only learns its ports when it boots: a port added to the file
 appears at the next deploy, not on a running node.
@@ -26,7 +30,7 @@ from typing import Optional
 
 from .ifmap import naming_for
 from .nodes import run_docker
-from .runner import Runner
+from .runner import CommandError, Runner
 from .topology import Topology, canonical_kind
 
 logger = logging.getLogger(__name__)
@@ -95,6 +99,31 @@ def port_exists(runner: Runner, container: str, iface: str, host_sudo: bool = Fa
     notice a cable plugged into it."""
     res = run_docker(runner, ["docker", "exec", container, "ip", "link", "show", iface], host_sudo)
     return res.exit_code == 0
+
+
+def unplug_live(runner: Runner, a: tuple[str, str], b: tuple[str, str],
+                host_sudo: bool = False) -> list[str]:
+    """Pull the cable between two ports of running containers on one host:
+    ``a`` and ``b`` are (container, interface). The veth pair is removed
+    (taking one end takes both) and each port gets a dummy interface with
+    its carrier off, as a spare port has after a deploy. CommandError if
+    the cable could not be removed. Returns the ports ("container:iface")
+    left without an interface or with their carrier on: there the node
+    shows the port as it likes, and a later live cable still works."""
+    res = run_docker(runner, ["docker", "exec", a[0], "ip", "link", "del", a[1]], host_sudo)
+    if res.exit_code != 0:
+        raise CommandError(f"ip link del {a[1]} in {a[0]}", res.exit_code,
+                           (res.stderr or res.stdout).strip() or "the interface is not there")
+    # Gone with its other end; if not (it was no veth pair), take that too
+    run_docker(runner, ["docker", "exec", b[0], "ip", "link", "del", b[1]], host_sudo)
+    odd = []
+    for container, iface in (a, b):
+        steps = (["ip", "link", "add", iface, "type", "dummy"], ["ip", "link", "set", iface, "up"],
+                 ["ip", "link", "set", iface, "carrier", "off"])
+        if any(run_docker(runner, ["docker", "exec", container, *step], host_sudo).exit_code != 0
+               for step in steps):
+            odd.append(f"{container}:{iface}")
+    return odd
 
 
 def cable_live(runner: Runner, a: tuple[str, str], b: tuple[str, str],
