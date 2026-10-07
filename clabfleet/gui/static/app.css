@@ -1141,6 +1141,16 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 .diagram .rack-dev rect.led { fill: var(--led-off); stroke: none; }
 /* A spare port: an empty jack */
 .diagram .rack-dev rect.jack.spare { fill: none; stroke-dasharray: 2 1.5; }
+/* ... which operators cable to another by dragging (racks.js) */
+.diagram rect.jack-hit { fill: none; stroke: none; pointer-events: all; }  /* found by the pointer though nothing is painted */
+.diagram .jack-hit.cable { cursor: grab; }
+.diagram.cabling, .diagram.cabling .jack-hit.cable { cursor: grabbing; }
+.diagram.cabling .rack-dev rect.jack.spare { stroke: var(--select); stroke-dasharray: none; }
+.diagram .rack-dev rect.jack.spare.cable-from { fill: var(--select); stroke: var(--select); stroke-dasharray: none; }
+.diagram .rack-dev rect.jack.spare.cable-target {
+  fill: color-mix(in srgb, var(--select) 45%, transparent); stroke: var(--select); stroke-width: 1.6; stroke-dasharray: none;
+}
+.diagram .cable-draft { fill: none; stroke: var(--select); stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 5 3; pointer-events: none; }
 .diagram .rack-dev rect.led.up { fill: var(--ok); }
 .diagram .rack-dev rect.led.down { fill: var(--danger); }
 .diagram .rack-dev .pnum { font: 7.5px var(--mono); fill: var(--rack-muted); }

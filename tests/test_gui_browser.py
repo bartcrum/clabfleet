@@ -392,5 +392,37 @@ async def steps(page):
     # The rack view shows what is left as empty jacks
     await page.js("document.querySelector('#racks-toggle').click()")
     await page.until("document.querySelectorAll('#diagram .jack.spare').length === 2")
+    # ... and a cable is made by dragging from one empty jack to another
+    centre = ("((key) => { const r = document.querySelector(`#diagram [data-spare=\"${key}\"]`)"
+              ".getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })")
+    pointer = ("((type, [x, y], el) => (el || document.querySelector('#diagram')).dispatchEvent("
+               "new PointerEvent(type, {bubbles: true, cancelable: true, clientX: x, clientY: y, "
+               "button: 0, pointerId: 1})))")
+    a, b = f"Leaf-1|{second}", f"Leaf-2|{second}"
+    await page.js(f"{pointer}('pointerdown', {centre}('{a}'), "
+                  f"document.querySelector('#diagram [data-spare=\"{a}\"]'))")
+    await page.js(f"{pointer}('pointermove', {centre}('{b}'))")
+    assert await page.js("document.querySelector('#diagram').classList.contains('cabling')")
+    assert await page.js("document.querySelector('#diagram .cable-from').dataset.jack") == a
+    assert await page.js("document.querySelector('#diagram .cable-target').dataset.jack") == b
+    assert await page.js("!!document.querySelector('#diagram .cable-draft')")
+    # Escape puts the cable down again
+    await page.key("Escape")
+    assert not await page.js("document.querySelector('#diagram').classList.contains('cabling')")
+    assert not await page.js("!!document.querySelector('#diagram .cable-draft')")
+    # Dropped where there is no jack, nothing happens; on a jack, it asks
+    await page.js(f"{pointer}('pointerdown', {centre}('{a}'), "
+                  f"document.querySelector('#diagram [data-spare=\"{a}\"]'))")
+    await page.js(f"{pointer}('pointermove', [5, 5]); {pointer}('pointerup', [5, 5])")
+    assert not await page.js("document.querySelector('#confirm').open")
+    await page.js(f"{pointer}('pointerdown', {centre}('{a}'), "
+                  f"document.querySelector('#diagram [data-spare=\"{a}\"]'))")
+    await page.js(f"{pointer}('pointermove', {centre}('{b}')); {pointer}('pointerup', {centre}('{b}'))")
+    await page.until("document.querySelector('#confirm').open")
+    assert await page.js("document.querySelector('#confirm-title').textContent") == (
+        f"Cable Leaf-1:{second} to Leaf-2:{second}?")
+    await page.js("document.querySelector('#confirm-ok').click()")
+    await page.until(f"S.detail.links.length === {links + 2}")
+    await page.until("document.querySelectorAll('#diagram .jack.spare').length === 0")
     await page.js("document.querySelector('#racks-toggle').click()")
     await asyncio.sleep(0.5)  # let late renders throw, if they would
