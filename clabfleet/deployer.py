@@ -56,6 +56,7 @@ from .nodes import NO_SHELL_KINDS, inspect_all, parse_inspect, running_usage
 from .placement import NodePlacement, PlacementError, PlacementPlan, compute_placement
 from .readiness import check_ready, wait_until_ready
 from .runner import CommandError, OutputCallback, Runner, deadline
+from .spare import unplug
 from .topology import Topology, dump_yaml, load_topology, topology_from_dict
 
 logger = logging.getLogger(__name__)
@@ -629,6 +630,7 @@ class LabDeployer:
                 host, ["deploy", "-t", topo.path.name, *extra],
                 cwd=str(topo.base_dir.resolve()), check=True, stream=True,
             )
+            self._unplug_spares(host, topo, nodes)
             return {"status": "deployed", "nodes": nodes,
                     "lab_dir": str(topo.base_dir.resolve() / f"clab-{topo.name}")}
 
@@ -644,7 +646,30 @@ class LabDeployer:
         logger.info("Running containerlab deploy on %s", host.name)
         self._run_clab(host, ["deploy", "-t", topo_file, *extra], cwd=lab_dir,
                        check=True, stream=True)
+        self._unplug_spares(host, topo, nodes)
         return {"status": "deployed", "nodes": nodes, "lab_dir": lab_dir}
+
+    def _unplug_spares(self, host: HostInfo, topo: Topology, nodes: list[str]) -> None:
+        """Make the spare ports of the nodes just deployed on ``host`` look
+        unplugged (``spare.unplug``). Never fails a deploy: a port that
+        cannot be changed shows as up."""
+        ports = {n: ifaces for n, ifaces in topo.spare_ports().items() if n in nodes}
+        if not ports:
+            return
+        runner = self._runners.get(host)
+        try:
+            containers = {c["node"]: c["container"]
+                          for c in parse_inspect(inspect_all(runner), host.name)
+                          if c["lab"] == topo.name}
+            failed = unplug(runner, containers, ports, host.sudo)
+        except Exception as exc:  # noqa: BLE001 - cosmetic: the ports work either way
+            logger.warning("Could not set the spare ports on %s to unplugged: %s", host.name, exc)
+            return
+        count = sum(map(len, ports.values()))
+        logger.info("%d spare port%s on %s", count, "" if count == 1 else "s", host.name)
+        if failed:
+            logger.info("Spare ports that show as up, not as unplugged (the node's `ip` cannot "
+                        "turn a carrier off): %s", ", ".join(failed))
 
     def _on_host(
         self,

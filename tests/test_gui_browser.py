@@ -363,4 +363,34 @@ async def steps(page):
     await page.until("document.querySelectorAll('#diagram .node').length === 10")
     await page.js("showView('routing')")
     await page.until("document.querySelectorAll('#routing .node').length > 0")
+    # Spare ports: add some to two nodes, then cable one to the other. The
+    # lab is not deployed, so all of it goes into the file.
+    await page.js("showView('diagram')")
+    links = await page.js("S.detail.links.length")
+    for node in ("Leaf-1", "Leaf-2"):
+        await page.js(f"selectNode('{node}')")
+        await page.until("!!document.querySelector('#node-card .spare-count')")
+        assert "null" not in await page.js("document.querySelector('#node-card').textContent")
+        await page.js("document.querySelector('#node-card .spare-count').value = '2'; "
+                      "document.querySelector('#node-card .spare-count').form.requestSubmit()")
+        await page.until(f"(S.detail.nodes.find(n => n.name === '{node}').spare || []).length === 2")
+    await page.js("selectNode('Leaf-1')")
+    await page.until("document.querySelectorAll('#node-card .spare-form select').length === 2")
+    spare = await page.js("document.querySelector('#node-card .spare-list').textContent")
+    first, second = spare.split()
+    assert await page.js("document.querySelectorAll('#node-card .spare-form select')[1]"
+                         ".selectedOptions[0].textContent") == f"Leaf-2:{first}"   # other nodes first
+    await page.js("document.querySelector('#node-card .spare-form').requestSubmit()")
+    await page.until("document.querySelector('#confirm').open")
+    assert await page.js("document.querySelector('#confirm-title').textContent") == (
+        f"Cable Leaf-1:{first} to Leaf-2:{first}?")
+    assert "at the next deploy" in await page.js("document.querySelector('#confirm-body').textContent")
+    await page.js("document.querySelector('#confirm-ok').click()")
+    await page.until(f"S.detail.links.length === {links + 1}")
+    assert await page.js("S.detail.nodes.find(n => n.name === 'Leaf-1').spare") == [second]
+    assert f'["Leaf-1:{first}", "Leaf-2:{first}"]' in await page.js("S.detail.yaml")
+    # The rack view shows what is left as empty jacks
+    await page.js("document.querySelector('#racks-toggle').click()")
+    await page.until("document.querySelectorAll('#diagram .jack.spare').length === 2")
+    await page.js("document.querySelector('#racks-toggle').click()")
     await asyncio.sleep(0.5)  # let late renders throw, if they would

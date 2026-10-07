@@ -37,6 +37,13 @@ Not released yet. The first release with a version tag and a package.
 - Import from a live network (`export-live`): NAPALM, NetBox, Nautobot and
   Ansible inventories, interface name mapping, config sanitising, re-sync.
 
+### Building labs: spare ports
+
+- Nodes can have spare ports: ports with nothing plugged in, kept in the
+  topology file as labelled `dummy` links. The GUI adds them to a node
+  and cables two of them, in the file and, for Arista cEOS and Linux
+  nodes on one host, on the running lab without a redeploy.
+
 ### Web GUI
 
 - Diagram and rack view with live link and node state, terminals, logs,

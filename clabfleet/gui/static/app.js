@@ -1470,7 +1470,9 @@ function renderNodeCard() {
     S.state?.multi_host ? ["Host", rt?.host || placedHost(node.name) || (node.host_pin && `${node.host_pin} (pinned)`) || (node.host_tags && `tags: ${node.host_tags}`)] : null,
   ].filter((r) => r && r[1]);
   const protos = window.Routing?.nodeSummary(node.name) || [];
-  card.replaceChildren(
+  // (filtered: a section that does not apply is null or false, which
+  // replaceChildren would write out as text)
+  card.replaceChildren(...[
     h("h3", {},
       h("span", { class: `dot ${nodeState(rt)}` }),
       node.name,
@@ -1478,6 +1480,7 @@ function renderNodeCard() {
     h("h4", {}, "Overview"),
     h("dl", {}, rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
     ...(nodeInterfaces(node.name, live) || []),
+    ...(window.Spare?.section(node) || []),
     protos.length ? h("h4", {}, "Protocols") : null,
     protos.length ? h("div", { class: "proto-list" }, protos.map((p) => h("button", {
       class: "proto-row", title: `Show ${node.name} in the Routing tab (${p.label})`, onclick: p.go,
@@ -1490,7 +1493,7 @@ function renderNodeCard() {
         title: `Diff ${node.name}'s config in the latest snapshot`,
         onclick: () => openDiff(S.selected.id, node.name),
       }, "Config diff")),
-    ...nodeWhatif(node, rt, live));
+    ...nodeWhatif(node, rt, live)].filter(Boolean));
   card.hidden = false;
   syncInspector();
 }

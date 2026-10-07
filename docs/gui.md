@@ -145,6 +145,43 @@ an operator.
   writes them into the topology file as `graph-posX`/`graph-posY` node
   labels, so the layout travels with the file. Only those labels change:
   comments, ordering, quoting and indentation are kept.
+- **Spare ports:** give a node ports with nothing plugged in, to cable
+  later without drawing the lab again. Select a node: the inspector's
+  **Spare ports** section lists them. Operators can:
+  - **Add ports:** a number (8 to begin with) and Add ports writes that
+    many more into the topology file, named as the node's kind names its
+    ports (`eth7`, `eth8`, ... or `Ethernet1/3`, ...). A node learns its
+    ports when it boots, so on a running lab the new ports are there after
+    its next deploy; the GUI says so. To get them without losing what was
+    configured on the nodes, **Stop** the lab and **Deploy** it again:
+    Stop saves the configs and the next deploy starts from them. Redeploy
+    would start the nodes from their startup configs.
+  - **Cable:** pick one of the node's spare ports and a spare port to
+    cable it to (another node's, or another of its own for a loop), and
+    Cable. The file gets a link in place of the two spare ports. On a
+    running lab the cable is also plugged in on the spot, with no
+    redeploy, when both nodes run on the same host and are Arista cEOS or
+    Linux nodes. Otherwise the GUI says why not (nodes on different hosts,
+    a kind that runs a VM inside its container, a port added since the
+    node booted) and the cable is there at the next deploy.
+
+  In the rack view a spare port is an empty jack with a dashed outline.
+  On Arista cEOS a spare port shows as `notconnect`, like a port with no
+  cable, and goes to `connected` when it is cabled.
+
+  In the file a spare port is a containerlab `dummy` link with a label,
+  so the file still deploys with plain `containerlab deploy`:
+
+  ```yaml
+  links:
+    - type: dummy
+      endpoint: {node: Leaf-1, interface: eth7}
+      labels: {lab.spare: "true"}
+  ```
+
+  Spare ports cost no memory worth counting. Both actions are refused
+  while a job runs for the lab or the YAML editor has unsaved text, and
+  go to the audit log (`ports_added`, `cabled`).
 - **Builder:** draw a lab instead of writing YAML. **+ New lab** in the
   sidebar starts one, blank (one node) or from a `clabfleet new` template.
   **Edit** on the Diagram tab (operators) opens a palette: drag a kind
@@ -385,6 +422,8 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   LDAP user is gone or has no role any more), `password_changed`,
   `password_change_failed`, the `user_*` events above, `denied`, `job_started`
   (action, topology, options), `job_cancelled`, `job_finished` (status, seconds),
+  `ports_added`, `cabled` (the two ports, and whether it was plugged in on
+  the running lab),
   `topology_saved`, `positions_saved`, `terminal_opened` and
   `terminal_closed` (lab, node, mode, host, seconds, exit code),
   `capture_started`, `capture_finished` and `session_revoked` (an open

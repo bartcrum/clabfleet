@@ -61,6 +61,10 @@ function portsOf(model) {
   for (const l of model.links) {
     for (const e of [l.a, l.b]) (ports[e.id] ||= []).push(e.iface);
   }
+  // Spare ports: jacks with no cable in them
+  for (const nd of model.nodes) {
+    if (!nd.pseudo && nd.node.spare?.length) (ports[nd.id] ||= []).push(...nd.node.spare);
+  }
   for (const id in ports) ports[id] = [...new Set(ports[id])].sort(naturalCmp);
   return ports;
 }
@@ -199,7 +203,9 @@ function draw(g, model) {
         const inRow = Math.min(perRow, list.length - row * perRow);
         const px = x + FACE_W - 10 - (inRow - col) * pitch + 2, py = y + 12 + row * U;
         const led = s("rect", { class: "led", x: px, y: py - 6.5, width: 3, height: 3 });
-        el.append(s("rect", { class: "jack", x: px, y: py, width: 13, height: 11, rx: 1.5 }), led,
+        const spare = !nd.pseudo && nd.node.spare?.includes(iface);
+        el.append(s("rect", { class: `jack${spare ? " spare" : ""}`, x: px, y: py, width: 13, height: 11, rx: 1.5 },
+          spare ? s("title", {}, `${nd.id}:${iface} is a spare port: nothing is plugged in`) : null), led,
           s("text", { class: "pnum", x: px + 4.5, y: py - 2.5 }, portLabel(iface)));
         const ring = s("rect", { class: "port-ring", x: px - 2, y: py - 10, width: pitch, height: 23, rx: 2.5 });
         rings.append(ring);
