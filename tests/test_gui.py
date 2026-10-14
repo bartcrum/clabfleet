@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import stat
 import threading
@@ -300,6 +301,72 @@ def test_job_manager_runs_labs_in_parallel_and_keeps_history(tmp_path, monkeypat
     assert ids[0] == job2.id and ids[-1] == "stuck"  # newest first
     assert reloaded.jobs[job.id].lines == job.lines
     assert reloaded.jobs["stuck"].status == "interrupted"
+
+
+def test_job_view_never_skips_a_line_added_meanwhile():
+    class GrowingLines(list):
+        """A job thread that adds a line between the slice and the length."""
+
+        def __getitem__(self, item):
+            part = super().__getitem__(item)
+            if isinstance(item, slice):
+                self.append("added meanwhile")
+            return part
+
+    job = Job("j", "deploy", "t", lines=GrowingLines(["one"]))
+    view = job.view(0)
+    assert view["lines"] == ["one"] and view["offset"] == view["line_count"] == 1
+    assert job.view(view["offset"])["lines"][0] == "added meanwhile"
+
+
+def test_job_manager_forgets_old_jobs_and_restores_logging(tmp_path, monkeypatch):
+    class FakeDeployer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def save(self, path):
+            return {"hosts": {}}
+
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", FakeDeployer)
+    pkg_logger = logging.getLogger("clabfleet")
+    monkeypatch.setattr(pkg_logger, "level", logging.WARNING)
+    ws = _workspace(tmp_path)
+    ws.topologies()
+    jobs = JobManager(ws, JobHistory(None, keep=3))
+    started = []
+    for _ in range(6):
+        job = jobs.start("save", "t.clab.yml")
+        _wait(job)
+        started.append(job.id)
+    assert [j.id for j in jobs.recent()] == started[:-5:-1]  # 3 finished + the newest
+    assert pkg_logger.level == logging.WARNING
+
+
+def test_host_down_retry_starts_once(tmp_path, monkeypatch):
+    ws = _workspace(tmp_path)
+    host = HostInfo("h1", "10.0.0.1")
+    submitted = []
+    monkeypatch.setattr(ws._hosts_pool, "submit", lambda fn, *a: submitted.append(a))
+    class SlowDict(dict):
+        def get(self, key, default=None):  # widen the gap between looking and marking
+            value = super().get(key, default)
+            time.sleep(0.01)
+            return value
+
+    ws._down = SlowDict(h1=(time.monotonic() - state.HOST_RETRY, "gone", False))
+    barrier = threading.Barrier(8)
+
+    def poll():
+        barrier.wait()
+        with pytest.raises(state.HostUnreachable):
+            ws.ask_host(host, lambda runner: None)
+
+    threads = [threading.Thread(target=poll) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(submitted) == 1
 
 
 def test_job_history_keeps_newest(tmp_path):

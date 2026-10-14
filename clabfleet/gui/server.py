@@ -1416,7 +1416,9 @@ async def _start_job(request):
     body = await _json_body(request)
     try:
         options = body.get("options") if isinstance(body.get("options"), dict) else None
-        job = request.app[JOBS].start(body.get("action", ""), body.get("topology", ""), options,
+        # In a thread: it reads the topology and writes the job's history file
+        job = await asyncio.to_thread(request.app[JOBS].start, body.get("action", ""),
+                                      body.get("topology", ""), options,
                                       user=current_user(request).name)
     except KeyError as exc:
         raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Not found")

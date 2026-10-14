@@ -218,6 +218,7 @@ class Workspace:
         # They are not dialled again on every poll, which would make each one
         # wait for the connection to time out
         self._down: dict[str, tuple[float, str, bool]] = {}
+        self._down_lock = threading.Lock()  # polls from several threads read and retry it
         self._hosts_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hosts")
         self._topologies: dict[str, Path] = {}
         self.readiness = ReadinessCache()
@@ -263,16 +264,18 @@ class Workspace:
         could be lost, and a slow answer (a busy Docker during a deploy)
         means it is busy, not gone. A poll that runs out of time fails by
         itself, and terminals, live state and the rest go on working."""
-        down = self._down.get(host.name)
+        with self._down_lock:  # so that only one poll starts the retry
+            down = self._down.get(host.name)
+            retry = bool(down) and not down[2] and time.monotonic() - down[0] >= HOST_RETRY
+            if retry:
+                self._down[host.name] = (down[0], down[1], True)
         if down:
-            when, why, retrying = down
-            if not retrying and time.monotonic() - when >= HOST_RETRY:
-                self._down[host.name] = (when, why, True)
+            if retry:
                 try:
                     self._hosts_pool.submit(self._retry_host, host)
                 except RuntimeError:  # shutting down
                     pass
-            raise HostUnreachable(why)
+            raise HostUnreachable(down[1])
         try:
             with deadline(HOST_POLL_TIMEOUT):
                 return ask(self.runner(host))

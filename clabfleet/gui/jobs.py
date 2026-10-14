@@ -75,8 +75,11 @@ class Job:
         }
 
     def view(self, offset: int = 0) -> dict:
-        return {**self.summary(), "lines": self.lines[offset:], "offset": len(self.lines),
-                "result": self.result}
+        # One length for both, so a line the job adds meanwhile is in the
+        # next view rather than skipped by a client that asks from "offset"
+        end = len(self.lines)
+        return {**self.summary(), "line_count": end, "lines": self.lines[offset:end],
+                "offset": end, "result": self.result}
 
     def to_dict(self) -> dict:
         return {**self.view(0), "lines": self.lines}
@@ -154,6 +157,26 @@ class _JobLogHandler(logging.Handler):
             self.job.add(f"» {record.getMessage()}")
 
 
+# The job log shows clabfleet's INFO messages: while any job runs, the
+# package logger lets them through, and afterwards it is put back as it was
+_info_lock = threading.Lock()
+_info_jobs = 0
+_info_saved_level = logging.NOTSET
+
+
+def _info_logging(change: int) -> None:
+    global _info_jobs, _info_saved_level
+    pkg_logger = logging.getLogger("clabfleet")
+    with _info_lock:
+        if change > 0 and _info_jobs == 0:
+            _info_saved_level = pkg_logger.level
+            if pkg_logger.getEffectiveLevel() > logging.INFO:
+                pkg_logger.setLevel(logging.INFO)
+        _info_jobs += change
+        if change < 0 and _info_jobs == 0:
+            pkg_logger.setLevel(_info_saved_level)
+
+
 class JobManager:
     # stop: save the configs, then destroy the containers but keep the lab
     # directory, so the next deploy starts from them
@@ -168,18 +191,30 @@ class JobManager:
             history = JobHistory(root / ".clabfleet" / "jobs" if root else None)
         self.history = history
         self.jobs: dict[str, Job] = {j.id: j for j in history.load()}
-        self._lock = threading.Lock()
+        # Reentrant: start() looks at running() while holding it
+        self._lock = threading.RLock()
         self._abort: dict[str, Callable[[], None]] = {}   # running job -> how to stop it
         self._cancelled_by: dict[str, str] = {}
         # Called (in the job's thread) when a job finishes, e.g. for the audit log
         self.on_finished: Optional[Callable[[Job], None]] = None
 
+    def _all(self) -> list[Job]:
+        with self._lock:  # start() adds jobs from another thread
+            return list(self.jobs.values())
+
     def running(self) -> list[Job]:
-        return [j for j in self.jobs.values() if j.status == "running"]
+        return [j for j in self._all() if j.status == "running"]
 
     def recent(self, limit: int = 30) -> list[Job]:
         """Newest first."""
-        return sorted(self.jobs.values(), key=lambda j: j.started, reverse=True)[:limit]
+        return sorted(self._all(), key=lambda j: j.started, reverse=True)[:limit]
+
+    def _forget_old(self) -> None:
+        """Keep as many finished jobs in memory as the history keeps on disk."""
+        done = sorted((j for j in self.jobs.values() if j.status != "running"),
+                      key=lambda j: j.started, reverse=True)
+        for job in done[max(self.history.keep, 1):]:
+            del self.jobs[job.id]
 
     def start(self, action: str, topo_id: str, options: Optional[dict] = None,
               user: str = "") -> Job:
@@ -205,6 +240,7 @@ class JobManager:
             job = Job(id=uuid.uuid4().hex[:12], action=action, topology=topo_id,
                       lab=lab, options=options, user=user)
             self.jobs[job.id] = job
+            self._forget_old()
         self.history.save(job)
         threading.Thread(target=self._run, args=(job, path), daemon=True).start()
         return job
@@ -234,8 +270,7 @@ class JobManager:
         handler = _JobLogHandler(job, threading.get_ident())
         pkg_logger = logging.getLogger("clabfleet")
         pkg_logger.addHandler(handler)
-        if pkg_logger.getEffectiveLevel() > logging.INFO:
-            pkg_logger.setLevel(logging.INFO)
+        _info_logging(+1)
         try:
             # Fresh copy: placement reserves resources on the HostInfo objects
             deployer = LabDeployer(
@@ -284,6 +319,7 @@ class JobManager:
                 self._abort.pop(job.id, None)
                 self._cancelled_by.pop(job.id, None)
             pkg_logger.removeHandler(handler)
+            _info_logging(-1)
             job.finished = time.time()
             times = job.host_times()
             if times:
