@@ -365,3 +365,37 @@ def test_deploys_in_flight_count_for_other_labs(monkeypatch):
         "t.clab.yml", dry_run=True, strategy="spread")
     assert summary["vni_range"] == [1000, 1000]  # free again once "other" finished
     assert deployer._IN_FLIGHT == {}
+
+
+class FileRunner(FakeRunner):
+    """Records file operations in order, as (op, path, ...)."""
+
+    def makedirs(self, path):
+        self.calls.append(("makedirs", path))
+
+    def put_file(self, local_path, remote_path):
+        self.calls.append(("put_file", remote_path))
+
+    def write_text(self, remote_path, text):
+        self.calls.append(("write_text", remote_path))
+
+    def chmod(self, path, mode):
+        self.calls.append(("chmod", path, mode))
+
+
+def test_remote_lab_files_are_kept_from_other_users(monkeypatch, tmp_path):
+    host = HostInfo("h1", "10.0.0.1")
+    runner = FileRunner()
+    lab = LabDeployer(ClusterConfig(hosts=[host]))
+    monkeypatch.setattr(lab._runners, "get", lambda h: runner)
+    monkeypatch.setattr(lab, "_in_place", lambda h, t: False)
+    monkeypatch.setattr(lab, "_run_clab", lambda *a, **k: None)
+    monkeypatch.setattr(lab, "_unplug_spares", lambda *a, **k: None)
+    topo = _topo()
+    lab._deploy_on_host(host, topo, {"name": "t", "topology": {"nodes": {"a": {"kind": "linux"}}}},
+                        False)
+    lab_dir = host.lab_dir("t")
+    ops = [c for c in runner.calls if isinstance(c, tuple)]
+    assert ops[:2] == [("makedirs", lab_dir), ("chmod", lab_dir, 0o700)]
+    assert ops[-2:] == [("write_text", f"{lab_dir}/t.clab.yml"),
+                        ("chmod", f"{lab_dir}/t.clab.yml", 0o600)]

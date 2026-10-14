@@ -256,6 +256,9 @@ class Runner:
     def write_text(self, remote_path: str, text: str) -> None:
         raise NotImplementedError
 
+    def chmod(self, path: str, mode: int) -> None:
+        self.run(["chmod", f"{mode:o}", "--", path], sudo=False)
+
     def exists(self, path: str) -> bool:
         return self.run(["test", "-e", path], check=False, sudo=False).exit_code == 0
 
@@ -360,6 +363,9 @@ class LocalRunner(Runner):
         dest = Path(remote_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text)
+
+    def chmod(self, path, mode):
+        os.chmod(path, mode)
 
 
 # How SSHRunner treats a lab host's SSH host key: "accept-new" trusts and
@@ -561,6 +567,9 @@ class SSHRunner(Runner):
         self.makedirs(posixpath.dirname(remote_path) or ".")
         with self._sftp_client().open(remote_path, "w") as fh:
             fh.write(text)
+
+    def chmod(self, path, mode):
+        self._sftp_client().chmod(path, mode)
 
     def close(self):
         self._drop()

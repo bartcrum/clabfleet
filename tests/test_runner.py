@@ -328,3 +328,19 @@ def test_gui_warns_at_start_when_deploys_would_fail(tmp_path, monkeypatch, capsy
     assert cli.main(base) == 0
     assert "WARNING" not in capsys.readouterr().err
     assert asked == [True, False]
+
+
+def test_local_chmod(tmp_path):
+    target = tmp_path / "lab"
+    LocalRunner().makedirs(str(target))
+    LocalRunner().chmod(str(target), 0o700)
+    assert target.stat().st_mode & 0o777 == 0o700
+
+
+def test_ssh_chmod_falls_back_to_the_command(ssh, tmp_path):
+    """The base implementation runs chmod as the SSH user (no sudo)."""
+    _, runner = ssh
+    target = tmp_path / "f"
+    target.write_text("x")
+    Runner.chmod(runner, str(target), 0o600)
+    assert target.stat().st_mode & 0o777 == 0o600
