@@ -215,6 +215,14 @@ LEAKS = [
     ("junos", 'set protocols ospf area 0 interface ge-0/0/0 authentication simple-password '
               '"$8$LEAK40"\n'),
     ("junos", 'set system services ssh "LEAK41\nstill LEAK41"  ## SECRET-DATA\n'),
+    ("eos", "daemon TerminAttr\n   exec /usr/bin/TerminAttr -cvaddr=10.0.0.5:9910 "
+            "-cvauth=key,LEAK42 -taillogs\n   no shutdown\n"),
+    ("eos", "event-handler backup\n   action bash curl -u admin:LEAK43 https://10.0.0.9/\n"),
+    ("eos", "event-handler notify\n   action bash curl -H \"Authorization: Bearer LEAK44\" "
+            "https://10.0.0.9/\n"),
+    ("ios", "ip sla 1\n http raw http://10.0.0.9\n http-raw-request\n"
+            "  Authorization: Basic LEAK45\n"),
+    ("ios", "interface Gi6\n description cust ACME pw:LEAK46\n"),
 ]
 
 
@@ -240,6 +248,10 @@ def test_replacements_keep_the_rest_of_the_line():
     assert f"sha1 {(hex_key * 3)[:40]}" in out           # still a valid 40-digit key
     out, _ = sanitise_config(_leak("LEAK03"), "eos", SanitiseOptions(user=""))
     assert "exec /usr/bin/agent --token lab-key --verbose" in out
+    out, _ = sanitise_config(_leak("LEAK42"), "eos", SanitiseOptions(user=""))
+    assert "-cvaddr=10.0.0.5:9910 -cvauth=key,lab-key -taillogs" in out
+    out, _ = sanitise_config(_leak("LEAK43"), "eos", SanitiseOptions(user=""))
+    assert "curl -u admin:lab-key https://10.0.0.9/" in out
     out, _ = sanitise_config(_leak("LEAK37"), "junos")       # single-line nested blocks
     assert out == ('protocols {\n    isis {\n        level 2 {\n'
                    '            authentication-key "lab-key";\n        }\n    }\n}\n')

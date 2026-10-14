@@ -200,16 +200,23 @@ _EZVPN_BLOCK = re.compile(r"^crypto (isakmp client configuration group|ipsec cli
                           re.IGNORECASE)
 _EZVPN_KEY = re.compile(rf"(?P<pre>^\s*(?:group\s+\S+\s+)?key){_OPT_TYPE}\s+\S+",
                         re.IGNORECASE)
-# Applied to every line: "tftp://user:PASS@host", "exec /bin/agent --token X"
+# Applied to every line: "tftp://user:PASS@host", "exec /bin/agent --token X",
+# "-cvauth=key,X" (TerminAttr), "curl -u user:X", "Authorization: Bearer X"
 _URL_CREDENTIALS = re.compile(r"(?P<pre>://[^\s/@:]+:)[^\s@]+@")
 _CLI_SECRET = re.compile(
-    r"(?P<pre>(?<!\S)--(?:token|password|passwd|secret|api-?key|apikey|key|auth-token)"
-    r"(?:=|\s+))(?P<val>[^\s=]+)", re.IGNORECASE)
+    r"(?P<pre>(?<!\S)--?[\w-]*(?:token|password|passwd|secret|api-?key|apikey|auth|key)"
+    r"(?:=|\s+)(?:key,)?)(?P<val>[^\s=]+)", re.IGNORECASE)
+_USER_PASS = re.compile(
+    r"(?P<pre>(?<!\S)(?:-u|--user)(?:=|\s+)['\"]?[^\s:'\"]+:)(?P<val>[^\s'\"]+)")
+_AUTH_HEADER = re.compile(
+    r"(?P<pre>\bAuthorization:\s*(?:Bearer|Basic|Token)\s+)(?P<val>[^\s'\"]+)",
+    re.IGNORECASE)
+_LINE_SECRETS = (_CLI_SECRET, _USER_PASS, _AUTH_HEADER)
 # Free text that mentions a secret loses its text
 _FREE_TEXT = re.compile(r"^(?P<pre>\s*(?:\d+\s+)?(?:description|remark)\s+)\S.*$",
                         re.IGNORECASE)
 _SECRET_WORDS = re.compile(
-    r"(?i)\b(pass(?:words?|wd|phrase)?|pwd|secrets?|keys?|community|psk|tokens?|credentials?)\b")
+    r"(?i)\b(pass(?:words?|wd|phrase)?|pwd|pw|secrets?|keys?|community|psk|tokens?|credentials?)\b")
 # Any other password/secret value: "password 7 0822455D0A16", "secret sha512 $6$..."
 _GENERIC = re.compile(
     r"(?<!\S)(password|secret|passwd)"
@@ -317,7 +324,8 @@ def _banner_end(lines: list[str], start: int) -> int:
 def _replace_secrets(line: str, context: list[str], opts: SanitiseOptions,
                      report: SanitiseReport) -> str:
     new = _URL_CREDENTIALS.sub(lambda m: f"{m.group('pre')}{opts.key}@", line)
-    new = _CLI_SECRET.sub(lambda m: f"{m.group('pre')}{opts.key}", new)
+    for rx in _LINE_SECRETS:
+        new = rx.sub(lambda m: f"{m.group('pre')}{opts.key}", new)
     if new != line:
         report.counts["other"] += 1
         line = new
@@ -793,9 +801,10 @@ def _residual_line(line: str, opts: SanitiseOptions) -> list[str]:
     for m in _RESIDUAL_URL.finditer(line):
         if m.group(1) not in placeholders:
             out.append("url-credentials")
-    for m in _CLI_SECRET.finditer(line):
-        if m.group("val") not in placeholders:
-            out.append("option-secret")
+    for rx in _LINE_SECRETS:
+        for m in rx.finditer(line):
+            if m.group("val") not in placeholders:
+                out.append("option-secret")
     if _RESIDUAL_HEX_LINE.search(line):
         for m in _RESIDUAL_HEX.finditer(line):
             if m.group(0) != _hex_key(opts, len(m.group(0))):
