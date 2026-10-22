@@ -25,7 +25,10 @@ repository's release workflow, and no API token is stored anywhere.
    once the first upload succeeds.
 2. On GitHub, under the repository's **Settings → Environments**, create
    an environment named `pypi`. Adding yourself as a required reviewer
-   there makes every publish wait for your approval.
+   there makes every publish wait for your approval. Under **Deployment
+   branches and tags**, allow only tags matching `v*`, and add a tag
+   ruleset for `v*` so that only you can push release tags: without these,
+   anyone who can push to the repository can publish to PyPI.
 
 After the first release, replace the `git+https` install line in the
 README with `pip install "clabfleet[gui]"`. Not before: until the package

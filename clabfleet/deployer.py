@@ -638,10 +638,14 @@ class LabDeployer:
         host_topo = topology_from_dict(data, base_dir=topo.base_dir)
         logger.info("Copying '%s' (%d nodes) to %s:%s", topo.name, len(nodes), host.name, lab_dir)
         runner.makedirs(lab_dir)
+        # Startup configs and inline configs can hold production secrets: keep
+        # them from other users on the host (containerlab runs as root or as us)
+        runner.chmod(lab_dir, 0o700)
         for rel in host_topo.referenced_files():
             runner.put_file(topo.base_dir / rel, f"{lab_dir}/{rel.as_posix()}")
         topo_file = f"{topo.name}.clab.yml"
         runner.write_text(f"{lab_dir}/{topo_file}", dump_yaml(data))
+        runner.chmod(f"{lab_dir}/{topo_file}", 0o600)
 
         logger.info("Running containerlab deploy on %s", host.name)
         self._run_clab(host, ["deploy", "-t", topo_file, *extra], cwd=lab_dir,

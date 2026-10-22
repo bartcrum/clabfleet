@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import stat
+import threading
 import time
 from urllib.parse import unquote
 
@@ -1166,3 +1167,87 @@ def test_the_last_operator_stays(tmp_path):
     users.set_role("root", "viewer")  # someone else is an operator now
     users.remove("vic")  # the CLI may still remove anyone
     assert set(users.users()) == {"root"}
+
+
+def _slow_password_checks(monkeypatch, users):
+    """Password checks that wait for the returned event; the names they got."""
+    release, calls = threading.Event(), []
+
+    def check(name, password):
+        calls.append(name)
+        release.wait(10)
+        return None
+    monkeypatch.setattr(users, "check_password", check)
+    return release, calls
+
+
+async def _until_done(tasks, count):
+    for _ in range(500):
+        if sum(t.done() for t in tasks) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"only {sum(t.done() for t in tasks)} of {count} answered")
+
+
+def test_guesses_sent_at_once_cannot_pass_the_limit(tmp_path, monkeypatch):
+    """Attempts count before scrypt runs, so a burst of guesses gets no more
+    checks than the limit (each check costs about 128 MiB)."""
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice", password=PASSWORD)
+    release, calls = _slow_password_checks(monkeypatch, users)
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users)
+        async with TestClient(TestServer(app)) as client:
+            tasks = [asyncio.create_task(client.post(
+                "/login", json={"username": "alice", "password": f"guess{i}"}))
+                for i in range(20)]
+            await _until_done(tasks, 20 - server.LOGIN_FAILURES)
+            release.set()
+            return sorted(r.status for r in await asyncio.gather(*tasks))
+
+    try:
+        statuses = asyncio.run(scenario())
+    finally:
+        release.set()
+    assert statuses == [401] * server.LOGIN_FAILURES + [429] * (20 - server.LOGIN_FAILURES)
+    assert len(calls) == server.LOGIN_FAILURES
+
+
+def test_too_many_password_checks_waiting_are_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "LOGIN_FAILURES", 100)
+    monkeypatch.setattr(server, "PASSWORD_QUEUE", 3)
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice", password=PASSWORD)
+    release, calls = _slow_password_checks(monkeypatch, users)
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users)
+        async with TestClient(TestServer(app)) as client:
+            tasks = [asyncio.create_task(client.post(
+                "/login", json={"username": f"user{i}", "password": "x"})) for i in range(6)]
+            await _until_done(tasks, 3)
+            release.set()
+            responses = await asyncio.gather(*tasks)
+            # Refusals for being busy are not failed logins
+            assert app[server.AUTH]._failures["127.0.0.1"].count == 3
+            return sorted(r.status for r in responses)
+
+    try:
+        assert asyncio.run(scenario()) == [401, 401, 401, 503, 503, 503]
+    finally:
+        release.set()
+    assert len(calls) == 3
+
+
+def test_login_bodies_are_small(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice", password=PASSWORD)
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users)
+        async with TestClient(TestServer(app)) as client:
+            big = {"username": "alice", "password": "x" * (server.LOGIN_MAX_BODY + 1)}
+            assert (await client.post("/login", json=big)).status == 413
+
+    asyncio.run(scenario())

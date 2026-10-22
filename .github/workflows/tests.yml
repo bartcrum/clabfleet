@@ -53,7 +53,7 @@ jobs:
           python-version: "3.13"
       - name: Build
         run: |
-          pip install build twine
+          pip install -r .github/requirements-release.txt
           python -m build
           twine check --strict dist/*
       - name: Install the wheel somewhere else and use it

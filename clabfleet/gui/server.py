@@ -79,6 +79,9 @@ SESSION_FILE = "gui-sessions-{instance}.json"  # next to the users file, or in ~
 SESSIONS_PER_USER = 20                # a further login ends that user's oldest session
 LOGIN_FAILURES = 5                    # failed logins allowed per remote address ...
 LOGIN_WINDOW = 60                     # ... in this many seconds; then 429 until it ends
+PASSWORD_CHECKS = 2                   # scrypt checks at a time (about 128 MiB each) ...
+PASSWORD_QUEUE = 16                   # ... and how many may wait for one; then 503
+LOGIN_MAX_BODY = 64 * 1024            # bytes: a login is a name and a password or token
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # The page (it shows the login form) and the logins
 OIDC_CALLBACK = "/login/oidc/callback"
@@ -162,6 +165,10 @@ class Auth:
             self._expire()
         self._saved = time.time()
         self._failures: dict[str, _Failures] = {}
+        # Password hashing has its own few threads, so a flood of logins
+        # cannot take all the memory or stall the GUI's other work
+        self._hashing = ThreadPoolExecutor(PASSWORD_CHECKS, thread_name_prefix="password")
+        self._hash_waiting = 0
 
     @property
     def multi_user(self) -> bool:
@@ -190,6 +197,20 @@ class Auth:
         if not self.multi_user or not isinstance(name, str) or not isinstance(password, str):
             return None
         return self.users.check_password(name, password)
+
+    async def run_hashing(self, fn, *args):
+        """``fn(*args)`` on the password threads; 503 when too many wait."""
+        if self._hash_waiting >= PASSWORD_QUEUE:
+            raise web.HTTPServiceUnavailable(text="too many logins at once; try again shortly",
+                                             headers={"Retry-After": "5"})
+        self._hash_waiting += 1
+        try:
+            return await asyncio.get_running_loop().run_in_executor(self._hashing, fn, *args)
+        finally:
+            self._hash_waiting -= 1
+
+    def close(self) -> None:
+        self._hashing.shutdown(wait=False, cancel_futures=True)
 
     @property
     def ldap(self):
@@ -331,6 +352,12 @@ class Auth:
 
     def login_failed(self, remote: str) -> None:
         self._window(remote).count += 1
+
+    def login_forgiven(self, remote: str) -> None:
+        """Take back a failure counted before the attempt finished."""
+        entry = self._failures.get(remote)
+        if entry and entry.count:
+            entry.count -= 1
 
     def _window(self, remote: str) -> _Failures:
         now = time.monotonic()
@@ -531,6 +558,7 @@ async def _on_shutdown(app):
 
 async def _on_cleanup(app):
     app[CAPTURE_POOL].shutdown(wait=False, cancel_futures=True)
+    app[AUTH].close()
     if app[AUTH].oidc:
         await app[AUTH].oidc.close()
 
@@ -657,6 +685,11 @@ async def _login(request):
         raise web.HTTPForbidden(text="cross-origin request refused")
     if request.content_type != "application/json":
         raise web.HTTPUnsupportedMediaType(text="expected JSON")
+    if request.content_length is None:
+        raise web.HTTPLengthRequired(text="expected a Content-Length")
+    if request.content_length > LOGIN_MAX_BODY:
+        raise web.HTTPRequestEntityTooLarge(max_size=LOGIN_MAX_BODY,
+                                            actual_size=request.content_length)
     body = await _json_body(request)
     username = body.get("username")
     by_password = "username" in body or "password" in body
@@ -672,18 +705,30 @@ async def _login(request):
                                           headers={"Retry-After": str(LOGIN_WINDOW)})
     method, extra = "password" if by_password else "token", {}
     if by_password:
-        password = body.get("password")
-        user = await asyncio.get_running_loop().run_in_executor(
-            None, auth.check_password, username, password)
-        if (not user and auth.ldap and isinstance(username, str) and isinstance(password, str)
-                and not auth.users.get(username)):
-            method = LDAP
-            user, extra = await _ldap_login(request, username, password)
-    else:
-        user = auth.check_token(body.get("token"))
-    if not user:
+        # Counted as failed until it succeeds, so guesses sent at the same
+        # time cannot all get past the limit while they are being checked
         for key in keys:
             auth.login_failed(key)
+        try:
+            password = body.get("password")
+            user = await auth.run_hashing(auth.check_password, username, password)
+            if (not user and auth.ldap and isinstance(username, str)
+                    and isinstance(password, str) and not auth.users.get(username)):
+                method = LDAP
+                user, extra = await _ldap_login(request, username, password)
+        except web.HTTPException:  # busy, no answer or no role: not a wrong password
+            for key in keys:
+                auth.login_forgiven(key)
+            raise
+        if user:
+            for key in keys:
+                auth.login_forgiven(key)
+    else:
+        user = auth.check_token(body.get("token"))
+        if not user:
+            for key in keys:
+                auth.login_failed(key)
+    if not user:
         what = "user name or password" if by_password else "token"
         details = {"username": username} if by_password and isinstance(username, str) else {}
         request.app[AUDIT].record("login_failed", None, remote, reason=f"invalid {what}",
@@ -967,10 +1012,18 @@ async def _change_password(request):
     if any(auth.throttled(k) for k in keys):
         raise web.HTTPTooManyRequests(text="too many failed logins; try again in a minute",
                                       headers={"Retry-After": str(LOGIN_WINDOW)})
-    loop = asyncio.get_running_loop()
-    if not await loop.run_in_executor(None, auth.check_password, user.name, current):
+    for key in keys:  # counted until it succeeds, as for logins
+        auth.login_failed(key)
+    try:
+        ok = await auth.run_hashing(auth.check_password, user.name, current)
+    except web.HTTPServiceUnavailable:
         for key in keys:
-            auth.login_failed(key)
+            auth.login_forgiven(key)
+        raise
+    if ok:
+        for key in keys:
+            auth.login_forgiven(key)
+    else:
         audit(request, "password_change_failed", reason="wrong current password")
         raise web.HTTPForbidden(text="The current password is wrong")
     if new == current:
@@ -979,7 +1032,7 @@ async def _change_password(request):
         check_new_password(new)
     except ValueError as exc:
         raise web.HTTPBadRequest(text=str(exc))
-    await loop.run_in_executor(None, auth.users.set_password, user.name, new)
+    await auth.run_hashing(auth.users.set_password, user.name, new)
     audit(request, "password_changed")
     auth.logout(request)
     user = auth.users.get(user.name)
@@ -1363,7 +1416,9 @@ async def _start_job(request):
     body = await _json_body(request)
     try:
         options = body.get("options") if isinstance(body.get("options"), dict) else None
-        job = request.app[JOBS].start(body.get("action", ""), body.get("topology", ""), options,
+        # In a thread: it reads the topology and writes the job's history file
+        job = await asyncio.to_thread(request.app[JOBS].start, body.get("action", ""),
+                                      body.get("topology", ""), options,
                                       user=current_user(request).name)
     except KeyError as exc:
         raise web.HTTPNotFound(text=str(exc.args[0]) if exc.args else "Not found")

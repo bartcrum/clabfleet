@@ -1,0 +1,4 @@
+# Tools that build the package, in CI and in the release workflow. Pinned:
+# they run in the job that can publish to PyPI. Dependabot keeps them current.
+build==1.6.0
+twine==6.2.0
