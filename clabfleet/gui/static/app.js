@@ -398,8 +398,8 @@ async function cancelJob() {
 function renderRootWarning(problems) {
   const el = $("#rootwarn");
   const text = problems.map((p) => `${p.host}: ${p.problem}`).join(" · ");
-  if (text && el.textContent !== `Deploys will fail. ${text}`) announce("Deploys will fail on this host");
-  el.textContent = text ? `Deploys will fail. ${text}` : "";
+  if (text && el.textContent !== text) announce("Deploys will fail on this host");
+  el.textContent = text;
   el.hidden = !text;
 }
 
@@ -952,11 +952,36 @@ function renderLabHead() {
   // Destroy also removes the kept lab directory of a stopped lab
   const destroyBtn = actions.querySelector('[data-action="destroy"]');
   destroyBtn.lastChild.textContent = saved ? "Discard saved configs…" : "Destroy lab…";
+  // Exited nodes cannot save their configs, so Save, Snapshot and Stop
+  // (which saves first) would fail: the banner offers the way back instead
+  const exited = labContainers(lab).filter((c) => c.state !== "running");
+  const needsSave = new Set(["save", "snapshot", "stop"]);
   for (const btn of actions.querySelectorAll("[data-action]")) {
     const a = btn.dataset.action;
     const enabled = a === "deploy" ? st.deployed === 0 : st.deployed > 0 || (a === "destroy" && !!saved);
-    btn.disabled = busy || !enabled || !!S.detail?.error;
+    const blocked = exited.length > 0 && needsSave.has(a);
+    btn.disabled = busy || !enabled || blocked || !!S.detail?.error;
+    if (needsSave.has(a)) {
+      btn.dataset.title ??= btn.title;
+      btn.title = blocked ? `${exited.length} node${exited.length === 1 ? " is" : "s are"} not running and cannot save ${exited.length === 1 ? "its config" : "their configs"}: recreate the lab first` : btn.dataset.title;
+    }
   }
+  renderHalfUp(isTopo ? exited : [], st, busy);
+}
+
+// Some of a deployed lab's containers exited. Seen after the host
+// restarted: Docker brings back the containers that restart by themselves,
+// but not the lab's links, so the running ones cannot reach anything either
+function renderHalfUp(exited, st, busy) {
+  const box = $("#lab-halfup");
+  box.hidden = !exited.length;
+  if (!exited.length) return;
+  const names = exited.map((c) => c.node);
+  const shown = names.length > 6 ? `${names.slice(0, 6).join(", ")} and ${names.length - 6} more` : names.join(", ");
+  $("#lab-halfup-text").textContent = `${exited.length} of ${st.deployed} nodes are not running (${shown}). `
+    + "This is what a lab looks like after its host restarted: the links between the nodes are gone too, "
+    + "so starting the stopped containers would not help. Recreate the lab to bring it back.";
+  for (const btn of box.querySelectorAll("[data-recover]")) btn.disabled = busy || !!S.detail?.error;
 }
 
 // "6/6 running · 2 hosts · 8/8 sessions up"; each stat opens its source
@@ -1618,6 +1643,15 @@ function actionImpact(action, lab) {
       ],
     };
   }
+  if (action === "recreate") {
+    return {
+      title: `Recreate ${lab}?`, ok: "Recreate lab", danger: true, typeToConfirm: big,
+      body: [
+        `Removes ${n}${where} and deploys the lab again, keeping the lab directory clab-${lab}/: nodes start from the configs last saved there (Save configs, Stop, or write memory on the node), the others from their startup configs.`,
+        "Changes on the nodes that were never saved are lost.",
+      ],
+    };
+  }
   if (action === "redeploy") {
     return {
       title: `Redeploy ${lab}?`, ok: "Redeploy lab", danger: true, typeToConfirm: big,
@@ -1636,7 +1670,7 @@ async function runAction(action) {
   const impact = actionImpact(action, lab);
   if (impact && !(await confirmDialog(impact))) return;
   try {
-    const options = action === "deploy" || action === "redeploy" ? { rollback: $("#opt-rollback").checked } : {};
+    const options = ["deploy", "redeploy", "recreate"].includes(action) ? { rollback: $("#opt-rollback").checked } : {};
     const job = await api("/api/jobs", { method: "POST", body: JSON.stringify({ action, topology: S.selected.id, options }) });
     S.state.jobs = [job, ...(S.state.jobs || [])];
     renderLabHead();
@@ -1719,6 +1753,9 @@ async function boot() {
 function setup() {
   for (const tab of document.querySelectorAll(".tab")) {
     tab.addEventListener("click", () => showView(tab.dataset.view));
+  }
+  for (const btn of document.querySelectorAll("#lab-halfup [data-recover]")) {
+    btn.addEventListener("click", () => runAction(btn.dataset.recover));
   }
   for (const btn of document.querySelectorAll("#lab-actions [data-action]")) {
     btn.addEventListener("click", () => runAction(btn.dataset.action));

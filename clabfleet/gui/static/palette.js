@@ -41,9 +41,10 @@ function buildCommands() {
     const st = labStatus(S.detail.name);
     const busy = !!runningJob(S.selected.id);
     if (op && !busy) {
-      const acts = st.deployed
-        ? [["redeploy", "Redeploy"], ["save", "Save configs"], ["snapshot", "Snapshot"], ["stop", "Stop"], ["destroy", "Destroy lab…"]]
-        : [["deploy", "Deploy"]];
+      const exited = labContainers(S.detail.name).some((c) => c.state !== "running");
+      const acts = !st.deployed ? [["deploy", "Deploy"]]
+        : exited ? [["recreate", "Recreate (keep saved configs)"], ["redeploy", "Redeploy"], ["destroy", "Destroy lab…"]]
+          : [["redeploy", "Redeploy"], ["save", "Save configs"], ["snapshot", "Snapshot"], ["stop", "Stop"], ["destroy", "Destroy lab…"]];
       for (const [a, label] of acts) add("Lab", `${label} ${S.detail.name}`, () => runAction(a));
     }
     if (op && window.Builder && !window.Builder.editing) add("Lab", "Edit the drawing", () => { showView("diagram"); $("#edit-topo").click(); });

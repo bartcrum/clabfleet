@@ -134,6 +134,12 @@ clabfleet --sudo destroy topologies/<lab>.clab.yml --keep-lab-dir
 clabfleet --sudo deploy topologies/<lab>.clab.yml --wait
 ```
 
+The GUI spots this state: a lab with nodes that are not running gets a
+banner saying so, with **Recreate, keeping saved configs** (the two
+commands above in one job) and **Redeploy from startup configs**. Save
+configs, Snapshot and Stop are greyed out meanwhile, as exited nodes
+cannot save.
+
 From the startup configs in the topology file: **Redeploy** in the GUI, or
 
 ```bash

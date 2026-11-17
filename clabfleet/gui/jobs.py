@@ -194,7 +194,9 @@ def _info_logging(change: int) -> None:
 class JobManager:
     # stop: save the configs, then destroy the containers but keep the lab
     # directory, so the next deploy starts from them
-    ACTIONS = {"deploy", "redeploy", "stop", "destroy", "save", "snapshot"}
+    # recreate: destroy keeping the lab directory, then deploy, so the nodes
+    # start from their last saved configs (a lab left half up by a reboot)
+    ACTIONS = {"deploy", "redeploy", "recreate", "stop", "destroy", "save", "snapshot"}
     OPTIONS = {"rollback"}  # deploy/redeploy only
     MAX_RUNNING = 4
 
@@ -323,6 +325,14 @@ class JobManager:
             if job.action in ("deploy", "redeploy"):
                 result = deployer.deploy(path, reconfigure=job.action == "redeploy",
                                          rollback=job.options.get("rollback", False))
+            elif job.action == "recreate":
+                result = deployer.destroy(path, cleanup=False)
+                if any("error" in r for r in result.get("hosts", {}).values()):
+                    job.add("✗ not deployed again: removing the old containers failed")
+                else:
+                    job.add("» old containers removed, lab directory kept; deploying from "
+                            "the saved configs")
+                    result = deployer.deploy(path)
             elif job.action == "stop":
                 result = deployer.stop(path)
             elif job.action == "destroy":

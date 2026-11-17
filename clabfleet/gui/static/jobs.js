@@ -43,7 +43,7 @@ function enterStep(st, host, step, t) {
 }
 
 function stepLine(st, line, t) {
-  if (!["deploy", "redeploy"].includes(st.action)) return;
+  if (!["deploy", "redeploy", "recreate"].includes(st.action)) return;
   const m = /^\[([^\]]+)\] (.*)$/.exec(line);
   let host = m ? m[1] : null;
   const text = m ? m[2] : line;

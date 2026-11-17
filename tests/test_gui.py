@@ -645,3 +645,37 @@ def test_a_running_jobs_output_is_saved_as_it_goes(tmp_path, monkeypatch):
     time.sleep(0.15)  # a periodic save must not overwrite the final one
     final = json.loads(saved.read_text())
     assert final["status"] == "ok" and final["lines"][-1] == "✓ done"
+
+
+def test_recreate_keeps_the_lab_directory_and_deploys_again(tmp_path, monkeypatch):
+    calls = []
+    fail_destroy = [False]
+
+    class FakeDeployer:
+        def __init__(self, *a, **kw):
+            pass
+
+        def destroy(self, path, cleanup=True):
+            calls.append(("destroy", cleanup))
+            if fail_destroy[0]:
+                return {"hosts": {"localhost": {"error": "boom"}}}
+            return {"hosts": {"localhost": {"status": "ok"}}}
+
+        def deploy(self, path, reconfigure=False, rollback=False):
+            calls.append(("deploy", reconfigure))
+            return {"hosts": {"localhost": {"status": "deployed"}}}
+
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", FakeDeployer)
+    ws = _workspace(tmp_path)
+    ws.topologies()
+    jobs = JobManager(ws, JobHistory(None))
+    job = jobs.start("recreate", "t.clab.yml")
+    _wait(job)
+    assert job.status == "ok"
+    assert calls == [("destroy", False), ("deploy", False)]  # kept, not reconfigured
+    calls.clear()
+    fail_destroy[0] = True
+    job = jobs.start("recreate", "t.clab.yml")
+    _wait(job)
+    assert job.status == "error" and calls == [("destroy", False)]
+    assert any("not deployed again" in line for line in job.lines)
