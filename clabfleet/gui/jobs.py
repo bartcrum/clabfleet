@@ -246,10 +246,12 @@ class JobManager:
         return job
 
     def cancel(self, job_id: str, user: str = "") -> Job:
-        """Stop a running job: the command it waits for is given up and the
+        """Stop a running job: the command it waits for is stopped and the
         job ends as cancelled, which frees its place and its lab for other
-        jobs. Nothing is undone: what containerlab had started is left as it
-        is, and a command on a remote host or under sudo may still finish.
+        jobs. A local containerlab under sudo that does not stop is waited
+        for first, so the lab stays busy until it ends. Nothing is undone:
+        what containerlab had started is left as it is, and a command on a
+        remote host may still finish there.
         KeyError for an unknown job, ValueError for one that is not running."""
         with self._lock:
             job = self.jobs.get(job_id)

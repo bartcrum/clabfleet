@@ -405,3 +405,59 @@ def test_ssh_chmod_falls_back_to_the_command(ssh, tmp_path):
     target.write_text("x")
     Runner.chmod(runner, str(target), 0o600)
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+class _Proc:
+    """A process that ignores SIGTERM (or may not be signalled at all)."""
+
+    def __init__(self, args, refuse_signals=False):
+        self.args, self.pid, self.refuse = args, 4242, refuse_signals
+        self.signals, self.waits = [], []
+
+    def terminate(self):
+        if self.refuse:
+            raise PermissionError
+        self.signals.append("TERM")
+
+    def kill(self):
+        self.signals.append("KILL")
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if timeout is not None and "KILL" not in self.signals:
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return 0
+
+
+def test_a_cancelled_command_under_sudo_is_waited_for_not_killed(monkeypatch):
+    from clabfleet import runner
+    monkeypatch.setattr(runner, "STOP_WAIT", 0.01)
+
+    # Without sudo: TERM, then KILL
+    proc = _Proc(["containerlab", "deploy"])
+    runner.LocalRunner._stop(proc, wait_for_end=True)
+    assert proc.signals == ["TERM", "KILL"]
+    # Under sudo: KILL would orphan containerlab; wait for it to end instead
+    proc = _Proc(["sudo", "-n", "containerlab", "deploy"])
+    runner.LocalRunner._stop(proc, wait_for_end=True)
+    assert proc.signals == ["TERM"] and proc.waits[-1] is None
+    # Not ours to signal: waited for too
+    proc = _Proc(["sudo", "-n", "containerlab", "deploy"], refuse_signals=True)
+    runner.LocalRunner._stop(proc, wait_for_end=True)
+    assert proc.signals == [] and proc.waits == [None]
+    # A timeout (a poll, not a cancelled job) leaves it to finish
+    proc = _Proc(["sudo", "-n", "containerlab", "inspect"])
+    runner.LocalRunner._stop(proc)
+    assert proc.signals == ["TERM"] and None not in proc.waits
+
+
+def test_cancel_stops_a_real_command():
+    import threading
+    from clabfleet.runner import CommandCancelled, LocalRunner
+
+    local = LocalRunner()
+    threading.Timer(0.3, local.abort).start()
+    started = time.monotonic()
+    with pytest.raises(CommandCancelled):
+        local.run(["sleep", "30"])
+    assert time.monotonic() - started < 5
