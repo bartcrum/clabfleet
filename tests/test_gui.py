@@ -593,3 +593,55 @@ def test_root_problem_shown_in_state_and_rechecked_before_each_job(tmp_path, mon
                                               "problem": "containerlab needs root here"}]
 
     asyncio.run(scenario())
+
+
+def test_job_output_is_capped_but_keeps_clabfleets_own_lines(monkeypatch):
+    from clabfleet.gui import jobs as jobs_mod
+    monkeypatch.setattr(jobs_mod, "MAX_LINES", 5)
+    job = Job("j", "deploy", "t.clab.yml")
+    for i in range(10):
+        job.add(f"noise {i}")
+    job.add("✗ localhost: boom")
+    job.add("✓ done")
+    assert job.lines[:5] == [f"noise {i}" for i in range(5)]
+    assert "left out" in job.lines[5]
+    assert job.lines[6:] == ["✗ localhost: boom", "✓ done"]
+    # Append-only: a client that read up to an offset still reads on from it
+    assert job.view(5)["lines"] == job.lines[5:]
+
+
+def test_a_running_jobs_output_is_saved_as_it_goes(tmp_path, monkeypatch):
+    from clabfleet.gui import jobs as jobs_mod
+    monkeypatch.setattr(jobs_mod, "SAVE_EVERY", 0.05)
+    release = threading.Event()
+
+    class SlowDeployer:
+        def __init__(self, cluster, on_output=None, interactive_sudo=True):
+            self.on_output = on_output
+
+        def deploy(self, path, reconfigure=False, rollback=False):
+            self.on_output("Creating container a")
+            release.wait(5)
+            return {"hosts": {"localhost": {"status": "deployed"}}}
+
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", SlowDeployer)
+    ws = _workspace(tmp_path)
+    ws.topologies()
+    jobs = JobManager(ws)
+    job = jobs.start("deploy", "t.clab.yml")
+    saved = tmp_path / ".clabfleet" / "jobs" / f"{job.id}.json"
+    for _ in range(100):
+        if "Creating container a" in json.loads(saved.read_text())["lines"]:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("output not saved while the job runs")
+    assert json.loads(saved.read_text())["status"] == "running"
+    # The GUI dies here: the next one shows the log so far, as interrupted
+    crashed = JobHistory(tmp_path / ".clabfleet" / "jobs").load()[0]
+    assert crashed.status == "interrupted" and "Creating container a" in crashed.lines
+    release.set()
+    _wait(job)
+    time.sleep(0.15)  # a periodic save must not overwrite the final one
+    final = json.loads(saved.read_text())
+    assert final["status"] == "ok" and final["lines"][-1] == "✓ done"

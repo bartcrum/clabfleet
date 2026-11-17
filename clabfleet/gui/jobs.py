@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 # ANSI escape sequences (colors, bold) in containerlab output
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# Output lines a job keeps; past that only clabfleet's own lines (outcome,
+# errors, warnings) are kept, so a runaway command cannot fill the memory
+# and the history file. Lines are only ever appended: clients read on from
+# an offset.
+MAX_LINES = 20_000
+OWN_LINE = ("$ ", "» ", "✗", "✓", "⚠", "↺")
+SAVE_EVERY = 5.0  # seconds between saves of a running job's output
 
 
 @dataclass
@@ -43,7 +50,14 @@ class Job:
     user: str = ""  # who started it (multi-user GUI)
 
     def add(self, line: str) -> None:
-        self.lines.append(ANSI_RE.sub("", line))
+        line = ANSI_RE.sub("", line)
+        if len(self.lines) < MAX_LINES:
+            self.lines.append(line)
+            if len(self.lines) == MAX_LINES:
+                self.lines.append(f"» output past {MAX_LINES} lines is left out; "
+                                  "clabfleet's own lines are still shown")
+        elif line.startswith(OWN_LINE):
+            self.lines.append(line)
 
     def add_outcome(self, result: dict) -> None:
         """Spell out a partial or rolled-back deploy."""
@@ -195,6 +209,7 @@ class JobManager:
         self._lock = threading.RLock()
         self._abort: dict[str, Callable[[], None]] = {}   # running job -> how to stop it
         self._cancelled_by: dict[str, str] = {}
+        self._save_lock = threading.Lock()  # periodic saves vs. the final one
         # Called (in the job's thread) when a job finishes, e.g. for the audit log
         self.on_finished: Optional[Callable[[Job], None]] = None
 
@@ -243,7 +258,20 @@ class JobManager:
             self._forget_old()
         self.history.save(job)
         threading.Thread(target=self._run, args=(job, path), daemon=True).start()
+        threading.Thread(target=self._save_while_running, args=(job,), daemon=True).start()
         return job
+
+    def _save_while_running(self, job: Job) -> None:
+        """Save a running job's output every few seconds, so a GUI that
+        dies in the middle of a deploy leaves its log behind."""
+        saved = 0  # start() saved it with no output yet
+        while job.status == "running":
+            time.sleep(SAVE_EVERY)
+            if job.status == "running" and len(job.lines) != saved:
+                saved = len(job.lines)
+                with self._save_lock:
+                    if job.status == "running":  # the job's own last save wins
+                        self.history.save(job)
 
     def cancel(self, job_id: str, user: str = "") -> Job:
         """Stop a running job: the command it waits for is stopped and the
@@ -331,7 +359,8 @@ class JobManager:
                 job.add("» time per host: " + ", ".join(f"{h} {t:g}s" for h, t in times.items()))
             job.add({"ok": "✓ done", "cancelled": "✗ cancelled"}.get(job.status, "✗ failed"))
             self.workspace.invalidate_runtime()  # the lab's containers changed
-            self.history.save(job)
+            with self._save_lock:
+                self.history.save(job)
             if self.on_finished:
                 try:
                     self.on_finished(job)
