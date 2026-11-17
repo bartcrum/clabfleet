@@ -1335,3 +1335,57 @@ def test_viewers_do_not_get_inline_configs(tmp_path):
     assert "topsecret" not in seen["vic"]["yaml"] and seen["vic"]["configs_hidden"]
     assert seen["root"]["yaml"] == SECRET_TOPO and "configs_hidden" not in seen["root"]
     assert seen["vic"]["hash"] == seen["root"]["hash"]
+
+
+def test_user_passwd_temporary(tmp_path, capsys):
+    users = str(tmp_path / "users.yaml")
+    store = UserStore(users)
+    store.add("alice", password=PASSWORD)
+    assert cli.main(["user", "passwd", "alice", "--temporary", "--users", users]) == 0
+    out = capsys.readouterr().out
+    password = out.split("\n\n")[1].strip()
+    user = UserStore(users).check_password("alice", password)
+    assert user and user.must_change
+    assert not UserStore(users).check_password("alice", PASSWORD)
+    assert cli.main(["user", "passwd", "alice", "--temporary", "--password-stdin",
+                     "--users", users]) == 1
+    assert "leave out --password-stdin" in capsys.readouterr().err
+
+
+def test_gui_session_lifetimes(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(auth, "DEFAULT_USERS_FILE", tmp_path / "home" / "users.yaml")
+    monkeypatch.setattr(server, "run", lambda *a, **kw: seen.update(kw))
+    base = ["gui", "--dir", str(tmp_path), "--no-browser"]
+    hours = lambda: (seen["session_idle"] / 3600, seen["session_max_age"] / 3600)  # noqa: E731
+    assert cli.main(base) == 0
+    assert hours() == cli.LOOPBACK_SESSION
+    assert cli.main([*base, "--bind", "0.0.0.0", "--insecure-http"]) == 0
+    assert hours() == cli.NETWORK_SESSION
+    assert cli.main([*base, "--session-idle", "1.5", "--session-max", "8"]) == 0
+    assert hours() == (1.5, 8)
+    assert cli.main([*base, "--session-max", "4"]) == 0  # the idle default fits under it
+    assert hours() == (4, 4)
+    assert cli.main([*base, "--session-idle", "9", "--session-max", "4"]) == 1
+    with pytest.raises(SystemExit):
+        cli.main([*base, "--session-idle", "0"])
+
+
+def test_session_lifetime_is_per_app(tmp_path, monkeypatch):
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice", password=PASSWORD)
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users,
+                                session_idle=60, session_max_age=600)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/login", json={"username": "alice", "password": PASSWORD})
+            assert "Max-Age=600" in resp.headers["Set-Cookie"]
+            clock[0] += 50
+            assert (await client.get("/api/me")).status == 200
+            clock[0] += 61
+            assert (await client.get("/api/state")).status == 401
+
+    asyncio.run(scenario())

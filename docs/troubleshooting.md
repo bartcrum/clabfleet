@@ -179,6 +179,13 @@ stdin instead, e.g. from a file only you can read:
 clabfleet user passwd admin --password-stdin < ~/new-password.txt
 ```
 
+Or have clabfleet make up a temporary password, which it prints once and
+which you replace with your own at the next login; it asks nothing:
+
+```bash
+clabfleet user passwd admin --temporary
+```
+
 ### The login page has no "Log in with ..." button, or my directory account is refused
 
 Directory logins only exist once `~/.clabfleet/directory.yaml` is there
