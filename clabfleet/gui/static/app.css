@@ -860,6 +860,9 @@ table.host-labs th { white-space: nowrap; }
   background: color-mix(in srgb, var(--danger) 18%, var(--panel)); border-bottom: 1px solid var(--danger);
 }
 .offline[hidden] { display: none; }
+.rootwarn {
+  background: color-mix(in srgb, var(--warn) 18%, var(--panel)); border-bottom-color: var(--warn);
+}
 .skeleton {
   list-style: none; height: 34px; margin: 4px 8px; border-radius: 6px;
   background: linear-gradient(90deg, var(--panel-2), var(--line), var(--panel-2));

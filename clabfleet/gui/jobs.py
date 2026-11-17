@@ -287,6 +287,9 @@ class JobManager:
                 deployer.abort()
                 snapshotter.abort()
             job.add(f"$ {job.action} {job.topology}")
+            # Asked afresh: an unlocked sudo may have run out since the last look
+            for host, problem in self.workspace.root_problems(max_age=0).items():
+                job.add(f"⚠ {host}: {problem}")
             if job.action in ("deploy", "redeploy"):
                 result = deployer.deploy(path, reconfigure=job.action == "redeploy",
                                          rollback=job.options.get("rollback", False))

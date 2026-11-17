@@ -58,7 +58,10 @@ host: a topology can mount any path or run privileged containers. The
 same holds for every operator of the GUI.
 
 `clabfleet gui` checks this when it starts and prints a warning if deploys
-would fail, so you find out before the first click:
+would fail, so you find out before the first click. The GUI also shows it as
+a banner at the top of the page, checked again every five minutes and at the
+start of every job (whose log then starts with the same warning), so a
+`sudo -v` unlock that runs out shows up there too:
 
 ```
 WARNING: containerlab needs root here, so deploys will fail. Start clabfleet with --sudo (or CLAB_SUDO=1)

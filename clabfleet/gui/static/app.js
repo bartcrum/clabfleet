@@ -394,6 +394,15 @@ async function cancelJob() {
 // Data refresh
 // ---------------------------------------------------------------------------
 
+// Jobs that change labs would fail on these hosts: say so before anyone clicks
+function renderRootWarning(problems) {
+  const el = $("#rootwarn");
+  const text = problems.map((p) => `${p.host}: ${p.problem}`).join(" · ");
+  if (text && el.textContent !== `Deploys will fail. ${text}`) announce("Deploys will fail on this host");
+  el.textContent = text ? `Deploys will fail. ${text}` : "";
+  el.hidden = !text;
+}
+
 async function refreshState() {
   const before = new Map((S.state?.jobs || []).map((j) => [j.id, j.status]));
   try {
@@ -408,6 +417,7 @@ async function refreshState() {
   if (!$("#offline").hidden) announce("Connected to the clabfleet server again");
   $("#offline").hidden = true;
   document.body.classList.remove("server-offline");
+  renderRootWarning(S.state.root_problems || []);
   // Jobs that finished in the background (the viewed one reports itself)
   for (const j of S.state.jobs) {
     if (before.get(j.id) === "running" && j.status !== "running" && j.id !== S.viewJob) {

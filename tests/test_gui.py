@@ -542,3 +542,54 @@ def test_stop_saves_first_and_keeps_the_lab_directory(tmp_path, monkeypatch):
     _wait(job)
     assert job.status == "error" and calls == ["save"]
     assert any("not stopped" in line for line in job.lines)
+
+
+def test_root_problem_shown_in_state_and_rechecked_before_each_job(tmp_path, monkeypatch):
+    from clabfleet.gui import state as state_mod
+
+    answers = ["sudo asks for a password here"]
+    asked = []
+    monkeypatch.setattr(state_mod, "local_root_problem",
+                        lambda sudo: asked.append(sudo) or answers[0])
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost", sudo=True),
+                                        HostInfo("lab-b", host="10.0.0.2")]), [tmp_path])
+    (tmp_path / "t.clab.yml").write_text(TOPO)
+    ws.topologies()
+    # Local hosts only, and kept between polls
+    assert ws.root_problems() == {"localhost": "sudo asks for a password here"}
+    assert ws.root_problems() == {"localhost": "sudo asks for a password here"}
+    assert asked == [True]
+
+    class FakeDeployer:
+        def __init__(self, *a, **kw):
+            pass
+
+        def save(self, path):
+            return {"hosts": {"localhost": {"status": "saved"}}}
+
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", FakeDeployer)
+    jobs = JobManager(ws, JobHistory(None))
+    job = jobs.start("save", "t.clab.yml")
+    _wait(job)
+    assert "⚠ localhost: sudo asks for a password here" in job.lines
+    assert asked == [True, True]  # asked afresh for the job
+    # Fixed in the meantime (e.g. `sudo -v`): the job says nothing, and the
+    # banner's answer is the job's fresh one
+    answers[0] = None
+    job = jobs.start("save", "t.clab.yml")
+    _wait(job)
+    assert not [line for line in job.lines if line.startswith("⚠")]
+    assert ws.root_problems() == {}
+
+    async def scenario():
+        answers[0] = "containerlab needs root here"
+        ws.root_problems(max_age=0)
+        monkeypatch.setattr(Workspace, "runtime", lambda self: [])
+        app = server.create_app(ws, "secret-token")
+        async with TestClient(TestServer(app)) as client:
+            await client.post("/login", json={"token": "secret-token"})
+            body = await (await client.get("/api/state")).json()
+            assert body["root_problems"] == [{"host": "localhost",
+                                              "problem": "containerlab needs root here"}]
+
+    asyncio.run(scenario())

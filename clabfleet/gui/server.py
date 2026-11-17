@@ -1068,9 +1068,12 @@ async def _state(request):
     ws: Workspace = request.app[WORKSPACE]
     topologies = await asyncio.to_thread(ws.topologies)
     runtime = await asyncio.to_thread(ws.runtime)
+    root_problems = await asyncio.to_thread(ws.root_problems)
     jobs: JobManager = request.app[JOBS]
     return web.json_response({
         "hosts": [{"name": h.name, "host": h.host, "local": h.is_local} for h in ws.cluster.hosts],
+        # Jobs (deploy, stop, ...) would fail on these hosts for want of root
+        "root_problems": [{"host": h, "problem": p} for h, p in root_problems.items()],
         "multi_host": ws.multi_host,
         "topologies": topologies,
         "runtime": [
