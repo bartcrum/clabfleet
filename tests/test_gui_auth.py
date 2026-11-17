@@ -1265,3 +1265,73 @@ def test_login_bodies_are_small(tmp_path):
             assert (await client.post("/login", json=big)).status == 413
 
     asyncio.run(scenario())
+
+
+SECRET_TOPO = """name: t
+topology:
+  kinds:
+    arista_ceos:
+      startup-config: |
+        username admin secret kindsecret
+  nodes:
+    a:
+      kind: arista_ceos
+      image: ceos:4.35
+      startup-config: |-
+        hostname a
+        username admin secret topsecret
+
+        interface Ethernet1
+      labels: {role: spine}
+    b:
+      kind: linux
+      image: alpine
+      startup-config: "line one\\nenable secret quoted\\n"
+    c:
+      kind: linux
+      image: alpine
+      startup-config: configs/c.cfg
+  links:
+    - endpoints: ["a:eth1", "b:eth1"]
+"""
+
+
+def test_hide_inline_configs_keeps_valid_yaml():
+    import yaml
+    from clabfleet.gui.state import HIDDEN_CONFIG, hide_inline_configs
+
+    hidden = hide_inline_configs(SECRET_TOPO)
+    assert "secret" not in hidden
+    data = yaml.safe_load(hidden)
+    nodes = data["topology"]["nodes"]
+    assert nodes["a"]["startup-config"] == HIDDEN_CONFIG
+    assert nodes["a"]["labels"] == {"role": "spine"}  # what follows the block survives
+    assert nodes["b"]["startup-config"] == HIDDEN_CONFIG
+    assert nodes["c"]["startup-config"] == "configs/c.cfg"  # a path is no secret
+    assert data["topology"]["kinds"]["arista_ceos"]["startup-config"] == HIDDEN_CONFIG
+    assert data["topology"]["links"] == yaml.safe_load(SECRET_TOPO)["topology"]["links"]
+    assert hide_inline_configs("name: x\n") == "name: x\n"
+
+
+def test_viewers_do_not_get_inline_configs(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("root", password=PASSWORD)
+    users.add("vic", "viewer", password=PASSWORD)
+    ws = _workspace(tmp_path)
+    (tmp_path / "t.clab.yml").write_text(SECRET_TOPO)
+
+    async def scenario():
+        seen = {}
+        for name in ("vic", "root"):
+            app = server.create_app(ws, users=users)
+            async with TestClient(TestServer(app)) as client:
+                await client.post("/login", json={"username": name, "password": PASSWORD})
+                resp = await client.get("/api/topologies/t.clab.yml")
+                assert resp.status == 200
+                seen[name] = await resp.json()
+        return seen
+
+    seen = asyncio.run(scenario())
+    assert "topsecret" not in seen["vic"]["yaml"] and seen["vic"]["configs_hidden"]
+    assert seen["root"]["yaml"] == SECRET_TOPO and "configs_hidden" not in seen["root"]
+    assert seen["vic"]["hash"] == seen["root"]["hash"]

@@ -417,7 +417,9 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
     and layout saves
   - `viewer`: topologies, diagrams, YAML, node state, job output and node
     logs (the Logs tab) of the labs defined by the workspace's topologies.
-    Viewers cannot see config diffs (configs hold password hashes), open
+    Viewers cannot see config diffs (configs hold password hashes) or
+    inline `startup-config` blocks in the YAML, which they see replaced by
+    a note (paths to config files are shown as they are), cannot open
     terminals or follow logs of other labs on the hosts, and topology
     files that are symlinks to somewhere outside the workspace are not
     shown at all. Controls they cannot use are hidden. The server

@@ -65,7 +65,7 @@ from .sessions import (
     CAPTURE, MAX_SESSIONS, MAX_USER_SESSIONS, TERMINAL, OpenSession, SessionLimitError,
     SessionRegistry,
 )
-from .state import UnloadableTopology, Workspace, topology_sketch
+from .state import UnloadableTopology, Workspace, hide_inline_configs, topology_sketch
 from .terminals import CaptureSession, LocalTerminal, SSHTerminal
 
 logger = logging.getLogger(__name__)
@@ -1092,7 +1092,12 @@ async def _hosts(request):
 
 async def _topology(request):
     ws: Workspace = request.app[WORKSPACE]
-    return web.json_response(await _call(ws.topology_detail, request.match_info["id"]))
+    detail = await _call(ws.topology_detail, request.match_info["id"])
+    if not current_user(request).is_operator:
+        # Inline startup-configs hold passwords and keys (see hide_inline_configs)
+        detail["yaml"] = hide_inline_configs(detail["yaml"])
+        detail["configs_hidden"] = True
+    return web.json_response(detail)
 
 
 async def _live(request):

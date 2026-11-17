@@ -207,6 +207,42 @@ class _Flight(Future):
         self.generation = generation
 
 
+# An inline startup-config: the key with a block scalar (``|``, ``>-`` ...)
+# or a quoted string with line breaks in it
+_INLINE_CONFIG = re.compile(
+    r'^(?P<indent>[ \t]*)(?P<key>startup-config:)[ \t]*'
+    r'(?:[|>][-+0-9]*[ \t]*(?:#.*)?$|(?P<quoted>"(?:[^"\\]|\\.)*\\n(?:[^"\\]|\\.)*")[ \t]*$)')
+HIDDEN_CONFIG = "(inline config hidden from viewers)"
+
+
+def hide_inline_configs(text: str) -> str:
+    """The topology file with every inline startup-config replaced by a
+    note, for viewers: such configs hold passwords and keys, which viewers
+    are not shown elsewhere either (config diffs are operator-only). Paths
+    to config files are left as they are; the result is still valid YAML."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _INLINE_CONFIG.match(lines[i].rstrip("\r\n"))
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        out.append(f'{m["indent"]}{m["key"]} "{HIDDEN_CONFIG}"\n')
+        i += 1
+        if m["quoted"]:
+            continue
+        # The block runs while lines are blank or indented deeper than the key
+        width = len(m["indent"].expandtabs())
+        while i < len(lines):
+            body = lines[i].rstrip("\r\n")
+            if body.strip() and len(body) - len(body.lstrip()) <= width:
+                break
+            i += 1
+    return "".join(out)
+
+
 class Workspace:
     """Hosts + topology roots the GUI manages, with cached runners."""
 
