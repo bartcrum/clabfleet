@@ -297,19 +297,49 @@ def test_local_root_problem(tmp_path, monkeypatch):
     assert runner.local_root_problem(True) is None
     sudo_answers(1, "sudo: a password is required\n")
     assert "sudo asks for a password here" in runner.local_root_problem(True)
-    # containerlab failing for a reason of its own is not sudo's doing
+    # Any other refusal counts too, whatever words sudo uses for it
+    sudo_answers(1, "Sorry, user bob is not allowed to execute '/usr/bin/containerlab "
+                    "version' as root on lab.\n")
+    problem = runner.local_root_problem(True)
+    assert "sudo will not run containerlab here (Sorry, user bob" in problem
+    sudo_answers(1, "bob is not in the sudoers file.\n")
+    assert "sudo will not run containerlab here" in runner.local_root_problem(True)
+    sudo_answers(1, "sudo: unbekannter Fehler\n")
+    assert "sudo will not run containerlab here" in runner.local_root_problem(True)
+    # ... and containerlab failing for a reason of its own still stops a deploy
     sudo_answers(1, "Error: something else\n")
-    assert runner.local_root_problem(True) is None
+    assert "failed (Error: something else)" in runner.local_root_problem(True)
+    sudo_answers(1)
+    assert "failed (exit code 1)" in runner.local_root_problem(True)
     # No --sudo: containerlab must be setuid to get root on its own
     binary.chmod(0o755)
     assert "Start clabfleet with --sudo" in runner.local_root_problem(False)
     binary.chmod(0o4755)
     assert runner.local_root_problem(False) is None
-    # Nothing to say without containerlab, or as root
-    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
-    assert runner.local_root_problem(False) is None
+    # Nothing to say as root
     monkeypatch.setattr(runner.os, "geteuid", lambda: 0)
     assert runner.local_root_problem(True) is None
+    # Without containerlab nothing deploys, root or not
+    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
+    assert "containerlab is not installed here" in runner.local_root_problem(False)
+    assert "containerlab is not installed here" in runner.local_root_problem(True)
+
+
+def test_local_root_problem_reads_sudo_in_english(tmp_path, monkeypatch):
+    from clabfleet import runner
+
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    monkeypatch.setattr(runner.shutil, "which", lambda name: "/usr/bin/containerlab")
+    monkeypatch.setattr(runner.os, "geteuid", lambda: 1000)
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    assert runner.local_root_problem(True) is None
+    assert seen["env"]["LC_ALL"] == "C" and seen["env"]["LANG"] == "de_DE.UTF-8"
+    assert seen["timeout"]
 
 
 def test_gui_warns_at_start_when_deploys_would_fail(tmp_path, monkeypatch, capsys):

@@ -54,6 +54,12 @@ Not released yet. The first release with a version tag and a package.
   host's capacity and labs.
 - Named users with operator and viewer roles, an audit log, TLS, and
   logins through OpenID Connect or LDAP / Active Directory.
+- `clabfleet gui` warns at start-up about every reason a deploy would not
+  get root: sudo asking for a password, a sudo rule that does not allow
+  containerlab (in any language sudo answers in), `containerlab version`
+  failing under sudo, and containerlab missing from PATH.
+- `clabfleet user passwd` and `user add` without a terminal to prompt in
+  say so and point to `--password-stdin`.
 
 ### Security
 

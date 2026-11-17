@@ -948,6 +948,20 @@ def test_user_cli_passwords(tmp_path, capsys, monkeypatch):
     assert UserStore(users).check_password("bob", PASSWORD).role == "viewer"
 
     assert run("passwd", "nobody", prompts=[]) == 1  # before asking anything
+    capsys.readouterr()
+
+    # No terminal to prompt in: say so, and how to give the password instead
+    def no_terminal(prompt=""):
+        import warnings
+        warnings.warn("Can not control echo on the terminal.", cli.getpass.GetPassWarning)
+        raise EOFError
+    for fails in (no_terminal, lambda prompt="": (_ for _ in ()).throw(EOFError())):
+        monkeypatch.setattr(cli.getpass, "getpass", fails)
+        assert cli.main(["user", "passwd", "alice", "--users", users]) == 1
+        err = capsys.readouterr().err
+        assert "No terminal to ask for the password in" in err
+        assert "clabfleet user passwd alice --password-stdin" in err
+    assert UserStore(users).check_password("alice", PASSWORD)  # unchanged
     assert run("passwd", "alice", "--password-stdin", stdin="another good password\n") == 0
     assert UserStore(users).check_password("alice", "another good password")
     capsys.readouterr()

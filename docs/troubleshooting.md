@@ -63,7 +63,12 @@ would fail, so you find out before the first click:
 ```
 WARNING: containerlab needs root here, so deploys will fail. Start clabfleet with --sudo (or CLAB_SUDO=1)
 WARNING: sudo asks for a password here, so deploys will fail. Unlock sudo first (...)
+WARNING: sudo will not run containerlab here (Sorry, user ... is not allowed ...), so deploys will fail. (...)
+WARNING: containerlab is not installed here (not found on PATH), so deploys will fail
 ```
+
+With `--sudo` it runs `sudo -n containerlab version` and warns on any
+failure, quoting the first line sudo or containerlab printed.
 
 ## Troubleshooting
 
@@ -161,6 +166,14 @@ on the machine the GUI runs on:
 
 ```bash
 clabfleet user passwd admin
+```
+
+It asks for the password in the terminal. Where there is no terminal to
+ask in (a script, or a tool that runs the command for you), give it on
+stdin instead, e.g. from a file only you can read:
+
+```bash
+clabfleet user passwd admin --password-stdin < ~/new-password.txt
 ```
 
 ### The login page has no "Log in with ..." button, or my directory account is refused
