@@ -277,6 +277,37 @@ def test_containerlab_says_what_to_do_when_sudo_wants_a_password():
         _LockedSudo().containerlab(["deploy", "-t", "x.clab.yml"])
 
 
+def test_inspect_tries_without_sudo_first():
+    from clabfleet.nodes import inspect_all
+
+    class Host(Runner):
+        name = "lab-a"
+
+        def __init__(self, unprivileged_ok, **kw):
+            super().__init__(**kw)
+            self.unprivileged_ok = unprivileged_ok
+            self.calls = []
+
+        def run(self, args, cwd=None, check=True, sudo=None, on_output=None):
+            use_sudo = self.sudo if sudo is None else sudo
+            self.calls.append(use_sudo)
+            if use_sudo or self.unprivileged_ok:
+                return CommandResult(0, '{"lab": []}', "")
+            return CommandResult(1, "", "permission denied while trying to connect to docker")
+
+    # Docker is open to the user: no sudo, poll after poll
+    host = Host(True, sudo=True)
+    assert inspect_all(host) == {"lab": []} and inspect_all(host) == {"lab": []}
+    assert host.calls == [False, False]
+    # It is not: sudo, and only one try without it
+    host = Host(False, sudo=True)
+    assert inspect_all(host) == {"lab": []} and inspect_all(host) == {"lab": []}
+    assert host.calls == [False, True, True]
+    # Without --sudo nothing changes
+    host = Host(True)
+    assert inspect_all(host) == {"lab": []} and host.calls == [False]
+
+
 def test_local_root_problem(tmp_path, monkeypatch):
     from clabfleet import runner
 

@@ -195,6 +195,8 @@ class Runner:
         # False: use `sudo -n` so a missing NOPASSWD rule fails fast instead
         # of waiting on a password prompt nobody can see (e.g. the GUI)
         self.interactive_sudo = True
+        # Set by nodes.inspect_all once `containerlab inspect` failed without sudo
+        self.inspect_needs_sudo = False
 
     def __enter__(self):
         return self
