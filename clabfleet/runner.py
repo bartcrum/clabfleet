@@ -140,23 +140,37 @@ def local_root_problem(sudo: bool) -> Optional[str]:
     """Why containerlab will not get root on this machine, or None if it
     should: what a deploy would run into, known before anyone tries one.
 
-    With ``sudo``: sudo would ask for a password, which a GUI job cannot
-    type. It is asked about containerlab itself, as a sudo rule may allow
-    that one command without a password and nothing else. Without:
+    No containerlab at all: nothing can deploy. With ``sudo``: sudo has to
+    run containerlab without asking, as a GUI job cannot type a password.
+    It is asked about containerlab itself, as a sudo rule may allow that
+    one command without a password and nothing else; any failure counts,
+    as the words sudo uses depend on its version and language. Without:
     containerlab is not installed setuid (where its own ``clab_admins``
     group decides), so it needs sudo."""
     path = shutil.which("containerlab")
-    if os.geteuid() == 0 or not path:
+    if not path:
+        return "containerlab is not installed here (not found on PATH), so deploys will fail"
+    if os.geteuid() == 0:
         return None
     if sudo:
         try:
             res = subprocess.run(["sudo", "-n", "containerlab", "version"],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True,
+                                 env={**os.environ, "LC_ALL": "C"}, timeout=30)
         except OSError:
             return "--sudo was given, but there is no sudo on this machine"
-        if res.returncode != 0 and any(t in res.stderr + res.stdout for t in SUDO_NEEDS_PASSWORD):
+        except subprocess.TimeoutExpired:
+            return "`sudo containerlab version` did not answer in 30 s, so deploys may hang"
+        if res.returncode == 0:
+            return None
+        said = (res.stderr.strip() or res.stdout.strip()).splitlines()
+        said = said[0] if said else f"exit code {res.returncode}"
+        if any(t in res.stderr + res.stdout for t in SUDO_NEEDS_PASSWORD):
             return f"sudo asks for a password here, so deploys will fail. {SUDO_HELP}"
-        return None
+        if said.startswith(("sudo:", "Sorry, user")) or "sudoers" in said:
+            return (f"sudo will not run containerlab here ({said}), so deploys will fail. "
+                    "Let sudo run containerlab without a password (see docs/troubleshooting.md)")
+        return f"`sudo containerlab version` failed ({said}), so deploys will likely fail"
     if os.stat(path).st_mode & stat.S_ISUID:
         return None
     return ("containerlab needs root here, so deploys will fail. Start clabfleet with --sudo "

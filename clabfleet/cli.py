@@ -46,6 +46,7 @@ import re
 import signal
 import socket
 import sys
+import warnings
 from pathlib import Path
 
 import yaml
@@ -973,8 +974,19 @@ def _new_password(args: argparse.Namespace) -> str:
     if args.password_stdin:
         password = sys.stdin.readline().rstrip("\r\n")
     else:
-        password = getpass.getpass(f"Password for {args.name}: ")
-        if getpass.getpass("Again: ") != password:
+        # Without a terminal getpass would warn, fall back to stdin and end in
+        # an EOFError with no message: say what to do instead
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            try:
+                password = getpass.getpass(f"Password for {args.name}: ")
+                again = getpass.getpass("Again: ")
+            except (getpass.GetPassWarning, EOFError):
+                raise ValueError(
+                    "No terminal to ask for the password in. Run this in a terminal, or "
+                    "give the password on stdin: "
+                    f"clabfleet user {args.user_command} {args.name} --password-stdin") from None
+        if again != password:
             raise ValueError("The passwords do not match")
     check_new_password(password)
     return password
