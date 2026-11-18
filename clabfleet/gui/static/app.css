@@ -1174,3 +1174,28 @@ kbd { font: var(--fs-xs) var(--mono); padding: 1px 5px; border: 1px solid var(--
 /* What only the logical view offers */
 body.racks-view .logical-only { display: none !important; }
 body.building #racks-toggle { display: none; }
+
+/* Import configs (importcfg.js) */
+.side-actions { display: flex; gap: 2px; }
+.importcfg-dlg { width: min(560px, calc(100vw - 32px)); }
+.importcfg-dlg .newlab .newlab { padding: 0; }
+.newlab label.check { display: flex; align-items: flex-start; gap: 8px; color: var(--text); }
+.newlab label.check[hidden] { display: none; }
+.newlab label.check input { width: auto; margin-top: 2px; }
+.dropzone {
+  border: 1px dashed var(--node-line); border-radius: 8px; padding: 12px;
+  text-align: center; font-size: var(--fs-sm); color: var(--muted);
+}
+.dropzone.over { border-color: var(--select); background: color-mix(in srgb, var(--select) 10%, transparent); }
+.importcfg-files {
+  list-style: none; margin: 8px 0 0; padding: 0; max-height: 132px; overflow: auto;
+  text-align: left; font-family: var(--mono); font-size: var(--fs-sm); color: var(--text);
+}
+.importcfg-files:empty { display: none; }
+.importcfg-files li { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+.importcfg-files button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 4px; }
+.importcfg-files button:hover { color: var(--danger); }
+.importcfg-result p { margin: 0 0 6px; }
+.importcfg-warnings { margin: 0; padding-left: 18px; max-height: 220px; overflow: auto; color: var(--warn); }
+.importcfg-warnings:empty { display: none; }
+.importcfg-error { white-space: pre-wrap; max-height: 180px; overflow: auto; }

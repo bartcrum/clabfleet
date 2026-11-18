@@ -195,6 +195,10 @@ an operator.
   Spare ports cost no memory worth counting. These actions are refused
   while a job runs for the lab or the YAML editor has unsaved text, and
   go to the audit log (`ports_added`, `cabled`, `uncabled`).
+- **Import:** build a lab from device configs. **Import** in the sidebar
+  takes the EOS config files Arista AVD generates (drop them, or a folder
+  of them, on the dialog) and writes a lab of cEOS nodes with the links
+  the configs describe. See [Import from config files](import-configs.md).
 - **Builder:** draw a lab instead of writing YAML. **+ New lab** in the
   sidebar starts one, blank (one node) or from a `clabfleet new` template.
   **Edit** on the Diagram tab (operators) opens a palette: drag a kind

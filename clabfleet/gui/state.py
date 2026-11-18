@@ -922,6 +922,41 @@ class Workspace:
                 return topo_id
         raise KeyError(f"{path} is not in the workspace")  # e.g. a hidden directory
 
+    def import_configs(self, lab_name: str, files: dict[str, str], image: str = "",
+                       sanitise: bool = True, allow_residual: bool = False) -> dict:
+        """A new lab from uploaded device configs (``clabfleet.cfgimport``):
+        ``<lab>/<lab>.clab.yml`` in the first workspace directory, with the
+        configs in ``<lab>/configs/``. A folder of its own, since two imports
+        may hold a device of the same name. Never overwrites: an existing
+        folder is refused. Returns the new topology's id, node and link
+        counts and the import's warnings."""
+        from ..cfgimport import import_configs
+        from ..exporter import ExportOptions, write_result
+        from ..sanitise import SanitiseOptions
+        from ..templates import KINDS
+
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,60}", lab_name or ""):
+            raise ValueError("Lab names are letters, digits, '_' and '-'")
+        if image and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,200}", image):
+            raise ValueError("That does not look like an image name")
+        folder = self.roots[0] / lab_name
+        if folder.exists() or folder.is_symlink():
+            raise FileExistsError(str(folder))
+        options = ExportOptions(lab_name=lab_name, allow_residual=allow_residual,
+                                sanitise=SanitiseOptions() if sanitise else None)
+        result = import_configs(files, options, image=image or KINDS["arista_ceos"].image)
+        topology_from_dict(result.topology)  # checks the lab name
+        folder.mkdir()  # refuses an existing folder, even one just created
+        path = folder / f"{lab_name}.clab.yml"
+        write_result(result, path, origin="config files", command="import-configs")
+        self._topologies = find_topologies(self.roots)
+        topo = result.topology["topology"]
+        for topo_id, p in self._topologies.items():
+            if p.resolve() == path.resolve():
+                return {"id": topo_id, "nodes": len(topo["nodes"]), "links": len(topo["links"]),
+                        "warnings": result.warnings, "sanitised": sanitise}
+        raise KeyError(f"{path} is not in the workspace")  # e.g. a hidden directory
+
     # --- runtime ---
 
     def runtime(self, max_age: float = RUNTIME_TTL) -> list[HostState]:

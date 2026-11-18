@@ -24,6 +24,7 @@ clabfleet/
   deployer.py      # Deploy/destroy/save/inspect; split topology per host
   runner.py        # Run commands locally or over SSH
   exporter.py      # Build a topology from live devices (NAPALM)
+  cfgimport.py     # Build a topology from config files (Arista AVD): links from descriptions
   inventory.py     # Device lists: YAML, NetBox, Nautobot, Ansible; kind/image rules
   ifmap.py         # Map device interface names to each kind's naming
   sanitise.py      # Strip secrets and management addressing from configs

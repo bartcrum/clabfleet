@@ -523,26 +523,28 @@ def write_configs(result: ImportResult, base_dir: Path, nodes=None) -> None:
         write_private(cfg_dir / f"{name}.cfg", text)
 
 
-def write_report(result: ImportResult, output_file: str | Path) -> Path:
+def write_report(result: ImportResult, output_file: str | Path,
+                 command: str = "export-live") -> Path:
     path = report_path(output_file)
     write_private(path,
-                  "# Written by clabfleet export-live: interface renames (original: "
+                  f"# Written by clabfleet {command}: interface renames (original: "
                   "endpoint),\n# image choice and sanitising per node. Re-syncs reuse the "
                   "interface map.\n" + dump_yaml(result.report))
     return path
 
 
-def write_result(result: ImportResult, output_file: str | Path) -> None:
+def write_result(result: ImportResult, output_file: str | Path,
+                 origin: str = "live network", command: str = "export-live") -> None:
     """Write the topology, its configs and the import report."""
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_configs(result, output_path.parent)
     n_nodes = len(result.topology["topology"]["nodes"])
     header = (
-        f"# Imported from live network ({n_nodes} nodes) by clabfleet.\n"
+        f"# Imported from {origin} ({n_nodes} nodes) by clabfleet.\n"
         f"# Interface renames are listed in {report_path(output_path).name}.\n"
     )
     # 0600 too: with inline configs, or unsanitised ones, it holds secrets
     write_private(output_path, header + dump_yaml(result.topology))
-    write_report(result, output_path)
-    logger.info("Live network topology exported to %s", output_path)
+    write_report(result, output_path, command)
+    logger.info("Topology imported from %s written to %s", origin, output_path)

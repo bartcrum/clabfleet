@@ -29,6 +29,10 @@ More screens: [a tour of the GUI](docs/screenshots.md).
   neighbours, and writes a matching containerlab topology: interface names
   mapped per kind, images from rules, optional config sanitising, and
   re-syncs that report changes instead of overwriting
+- **Import from config files** — drop the EOS configs Arista AVD generates
+  on the GUI (or point `import-configs` at the folder) and get the lab they
+  describe: links worked out from the interface descriptions and checked
+  against the link addresses, configs sanitised
 - **Image pre-flight** — fail before anything is created when a node's
   image is missing on its host, or pull it with `--pull`
 - **Dry-run** — see the placement plan and the per-host topology files
@@ -202,6 +206,7 @@ These print a short summary; add `--json` for the full result, for scripts.
 | [Web GUI](docs/gui.md) | The diagram and rack view, terminals, captures, editing topologies, users and roles, OIDC and LDAP / Active Directory logins, sessions |
 | [Multi-host cluster deployment](docs/cluster.md) | The cluster inventory, checking hosts, placement strategies and pinning, how links between hosts work |
 | [Import from live network](docs/import-live.md) | Device sources, kinds and images, interface names, sanitising configs, re-syncing |
+| [Import from config files](docs/import-configs.md) | A lab from Arista AVD's generated configs: how links are found, what is changed in the configs, limits |
 | [First-time setup and troubleshooting](docs/troubleshooting.md) | Root for containerlab without password prompts, failed deploys, a host that stopped answering, a lab after a reboot, lost changes after Redeploy, lost admin password, directory logins |
 | [Development](docs/development.md) | Running the tests, project structure |
 | [Releasing](docs/releasing.md) | Cutting a release: version, changelog, tag, PyPI |

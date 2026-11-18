@@ -24,6 +24,8 @@ Usage:
                           | --ansible FILE] [--filter KEY=VALUE] [--allowed-network CIDR]
                           [--sanitise [--allow-residual] | --no-sanitise]
                           [--include-neighbours] [--apply [--prune] | --overwrite] [--json]
+    clabfleet import-configs <file.cfg|dir>... [-o output.clab.yml] [--lab-name NAME]
+                             [--image IMAGE] [--no-sanitise | --allow-residual] [--force]
     clabfleet new <template> [--spines N ...] [--kind KIND] [--image IMAGE] [-o FILE] [--force]
     clabfleet new --list
     clabfleet gui [--cluster <cluster.yaml>] [--dir DIR ...] [--port 8650]
@@ -423,6 +425,43 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Replace the existing topology with a fresh import")
     sync.add_argument("--json", action="store_true", help="Print the change report as JSON")
 
+    # --- import-configs ---
+    p_cfg = sub.add_parser(
+        "import-configs", help="Build a topology from device config files (e.g. Arista AVD)",
+        description="Build a containerlab topology from EOS config files, such as the "
+                    "intended/configs/*.cfg Arista AVD writes: one cEOS node per file, "
+                    "with links worked out from the interface descriptions and checked "
+                    "against the link addresses. No device is contacted. Configs are "
+                    "sanitised unless --no-sanitise is given.")
+    p_cfg.add_argument("configs", nargs="+", metavar="file.cfg|dir",
+                       help="Config files, or directories of *.cfg, *.conf and *.txt files")
+    p_cfg.add_argument("-o", "--output", help="Output topology file (configs are written "
+                       "to configs/ next to it, plus an <name>.import-report.yaml); "
+                       "without it the topology is printed with the configs inline")
+    p_cfg.add_argument("--lab-name", default="imported-configs",
+                       help="Name for the generated lab")
+    p_cfg.add_argument("--image", default=KINDS["arista_ceos"].image, metavar="IMAGE",
+                       help=f"cEOS image for the nodes (default: {KINDS['arista_ceos'].image})")
+    p_cfg.add_argument("--force", action="store_true",
+                       help="Overwrite the output file if it exists")
+    p_cfg.add_argument("--keep-interface-names", action="store_true",
+                       help="Use the configs' interface names as they are in the links")
+    p_cfg.add_argument("--keep-management-name", action="store_true",
+                       help="Leave the management interface as it is (by default it is "
+                            "renamed Management0, the one a cEOS node has)")
+    p_cfg.add_argument("--no-sanitise", "--no-sanitize", action="store_true",
+                       help="Save configs as they are, with their password hashes and keys")
+    p_cfg.add_argument("--allow-residual", action="store_true",
+                       help="Write sanitised configs even if they still look like they "
+                            "hold secrets")
+    p_cfg.add_argument("--mgmt-address", choices=["remove", "dhcp", "keep"], default="remove",
+                       help="What sanitising does with management interface addresses "
+                            "(default: remove)")
+    p_cfg.add_argument("--lab-user", default="admin",
+                       help="Placeholder login sanitising adds to configs (default: admin)")
+    p_cfg.add_argument("--lab-password", default="admin",
+                       help="Its password (default: admin)")
+
     # --- new ---
     p_new = sub.add_parser("new", help="Generate a topology from a lab template",
                            description="Generate a ready-to-deploy topology "
@@ -597,6 +636,8 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     if cmd == "export-live":
         return _export_live(args)
+    if cmd == "import-configs":
+        return _import_configs(args)
 
     if cmd == "validate":
         return _validate(args)
@@ -1341,6 +1382,61 @@ def _export_live(args: argparse.Namespace) -> int:
         skipped = len(diff.removed_nodes) + len(diff.removed_links)
         if skipped and not args.prune:
             print(f"  ({skipped} removed nodes/links kept; use --prune to delete them)")
+    return 0
+
+
+def _import_configs(args: argparse.Namespace) -> int:
+    from .cfgimport import CONFIG_SUFFIXES, import_configs
+
+    output = Path(args.output) if args.output else None
+    if output is not None and output.exists() and not args.force:
+        raise ValueError(f"{output} exists: use --force to overwrite it")
+    if args.no_sanitise and args.allow_residual:
+        raise ValueError("--allow-residual is for sanitised configs: drop --no-sanitise")
+    paths: list[Path] = []
+    for item in args.configs:
+        path = Path(item)
+        if path.is_dir():
+            found = sorted(p for p in path.iterdir()
+                           if p.is_file() and p.name.lower().endswith(CONFIG_SUFFIXES))
+            if not found:
+                raise ValueError(f"no {', '.join('*' + s for s in CONFIG_SUFFIXES)} "
+                                 f"files in {path}")
+            paths += found
+        elif path.is_file():
+            paths.append(path)
+        else:
+            raise ValueError(f"no such file or directory: {path}")
+    files: dict[str, str] = {}
+    for path in paths:
+        try:
+            files[str(path)] = path.read_text()
+        except UnicodeDecodeError:
+            raise ValueError(f"{path} is not a text file")
+
+    options = ExportOptions(
+        lab_name=args.lab_name,
+        map_interfaces=not args.keep_interface_names,
+        sanitise=None if args.no_sanitise else SanitiseOptions(
+            mgmt=args.mgmt_address, user=args.lab_user, password=args.lab_password),
+        allow_residual=args.allow_residual,
+        inline_configs=output is None,
+    )
+    result = import_configs(files, options, image=args.image,
+                            rename_management=not args.keep_management_name)
+    for msg in result.warnings:
+        print(f"warning: {printable(msg)}", file=sys.stderr)
+    if args.no_sanitise:
+        print("WARNING: --no-sanitise: the configs are saved as they are, with their "
+              "password hashes and keys. Files are written readable by you only; do not "
+              "share or commit them.", file=sys.stderr)
+    if output is None:
+        print(dump_yaml(result.topology))
+        return 0
+    write_result(result, output, origin="config files", command="import-configs")
+    topo = result.topology["topology"]
+    print(f"Wrote {output} ({len(topo['nodes'])} nodes, {len(topo['links'])} links); "
+          f"report in {report_path(output)}")
     return 0
 
 

@@ -46,6 +46,7 @@ from aiohttp.abc import AbstractAccessLogger
 from yarl import URL
 
 from ..capture import GUI_MAX_BYTES, CaptureError
+from ..inventory import printable
 from ..nodes import access_modes, run_docker, terminal_command, terminal_stop_command
 from ..snapshots import SnapshotError
 from ..topology import TopologyError
@@ -440,6 +441,7 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app.router.add_post("/api/cable/{id:.+}", _cable)
     app.router.add_post("/api/uncable/{id:.+}", _uncable)
     app.router.add_post("/api/topologies", _create_topology)
+    app.router.add_post("/api/import-configs", _import_configs)
     app.router.add_get("/api/builder", _builder_info)
     app.router.add_post("/api/builder/configs", _builder_configs)
     app.router.add_get("/api/diff/{id:.+}", _node_diff)
@@ -1240,6 +1242,46 @@ async def _create_topology(request):
         raise web.HTTPBadRequest(text=str(exc.args[0]) if exc.args else str(exc))
     audit(request, "topology_created", topology=topo_id, template=body.get("template"))
     return web.json_response({"id": topo_id})
+
+
+async def _import_configs(request):
+    """A new lab from uploaded device configs: ``{"name", "files": [{"name",
+    "text"}], "image"?, "sanitise"? (default true), "allow_residual"?}``.
+    Answers ``{"id", "nodes", "links", "warnings", "sanitised"}``."""
+    from ..exporter import ExportError, ResidualSecretsError
+
+    body = await _json_body(request)
+    uploads = body.get("files")
+    if not isinstance(uploads, list) or not uploads:
+        raise web.HTTPBadRequest(text="Choose at least one config file")
+    files: dict[str, str] = {}
+    for item in uploads:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) \
+                or not isinstance(item.get("text"), str):
+            raise web.HTTPBadRequest(text="Each file needs a name and its text")
+        if item["name"] in files:
+            raise web.HTTPBadRequest(text=f"{printable(item['name'])} is there twice")
+        files[item["name"]] = item["text"]
+    sanitise = body.get("sanitise", True) is not False
+    ws: Workspace = request.app[WORKSPACE]
+    try:
+        result = await asyncio.to_thread(
+            ws.import_configs, str(body.get("name", "")), files, str(body.get("image") or ""),
+            sanitise, body.get("allow_residual") is True)
+    except FileExistsError:
+        raise web.HTTPConflict(text="A lab folder with that name exists already")
+    except ResidualSecretsError as exc:
+        lines = [printable(f"{node}: line {n} ({category})")
+                 for node, found in exc.findings.items() for n, category in found]
+        raise web.HTTPUnprocessableEntity(
+            text="The sanitised configs still look like they hold secrets (values not "
+                 "shown):\n" + "\n".join(lines) + "\nNothing was written. Check those "
+                 "lines, or tick \"Import anyway\".")
+    except (ValueError, ExportError, TopologyError, KeyError) as exc:
+        raise web.HTTPBadRequest(text=str(exc.args[0]) if exc.args else str(exc))
+    audit(request, "configs_imported", topology=result["id"], files=len(files),
+          nodes=result["nodes"], links=result["links"], sanitised=sanitise)
+    return web.json_response(result)
 
 
 async def _builder_info(request):
