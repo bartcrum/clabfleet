@@ -202,6 +202,14 @@ body.viewer .operator-only { display: none !important; }
 }
 .lab-title { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; min-width: 0; flex: 1 1 240px; }
 .lab-title h1 { font-size: 18px; margin: 0; }
+/* A lab with exited nodes: why, and how to bring it back */
+.halfup {
+  flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+  padding: 8px 12px; border: 1px solid var(--warn); border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 12%, var(--panel)); font-size: var(--fs-md);
+}
+.halfup[hidden] { display: none; }
+.halfup p { margin: 0; flex: 1 1 320px; }
 .icon-btn {
   border: 0; background: none; color: var(--muted); cursor: pointer; padding: 2px 4px; border-radius: 4px; line-height: 1;
 }
@@ -860,6 +868,9 @@ table.host-labs th { white-space: nowrap; }
   background: color-mix(in srgb, var(--danger) 18%, var(--panel)); border-bottom: 1px solid var(--danger);
 }
 .offline[hidden] { display: none; }
+.rootwarn {
+  background: color-mix(in srgb, var(--warn) 18%, var(--panel)); border-bottom-color: var(--warn);
+}
 .skeleton {
   list-style: none; height: 34px; margin: 4px 8px; border-radius: 6px;
   background: linear-gradient(90deg, var(--panel-2), var(--line), var(--panel-2));

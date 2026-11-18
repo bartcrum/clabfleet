@@ -184,8 +184,20 @@ def parse_inspect(data: dict, host_name: str) -> list[dict]:
 
 
 def inspect_all(runner) -> dict:
-    """Raw `containerlab inspect --all --details` JSON for a host ({} if no labs)."""
-    result = runner.containerlab(INSPECT_ARGS, check=False)
+    """Raw `containerlab inspect --all --details` JSON for a host ({} if no labs).
+
+    Looking needs no root where the user may use Docker, so on a host that
+    runs containerlab through sudo it is tried without first: the GUI polls
+    this every few seconds, and each sudo would be a line in the auth log.
+    A host where that fails is asked through sudo from then on."""
+    result = None
+    if runner.sudo and not runner.inspect_needs_sudo:
+        result = runner.run(["containerlab", *INSPECT_ARGS], check=False, sudo=False)
+        if result.exit_code != 0:
+            runner.inspect_needs_sudo = True
+            result = None
+    if result is None:
+        result = runner.containerlab(INSPECT_ARGS, check=False)
     if result.exit_code != 0:
         raise InspectError((result.stderr or result.stdout).strip()[-500:])
     out = result.stdout.strip()

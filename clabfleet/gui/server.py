@@ -65,7 +65,7 @@ from .sessions import (
     CAPTURE, MAX_SESSIONS, MAX_USER_SESSIONS, TERMINAL, OpenSession, SessionLimitError,
     SessionRegistry,
 )
-from .state import UnloadableTopology, Workspace, topology_sketch
+from .state import UnloadableTopology, Workspace, hide_inline_configs, topology_sketch
 from .terminals import CaptureSession, LocalTerminal, SSHTerminal
 
 logger = logging.getLogger(__name__)
@@ -143,13 +143,16 @@ class Auth:
     def __init__(self, token: Optional[str] = None, users: Optional[UserStore] = None,
                  public_url: Optional[str] = None, *, instance: Optional[str] = None,
                  session_file: Optional[SessionFile] = None,
-                 directory: Optional[Directory] = None):
+                 directory: Optional[Directory] = None,
+                 session_idle: float = SESSION_IDLE, session_max_age: float = SESSION_MAX_AGE):
         if not token and not users:
             raise ValueError("Need a token or a users file")
         if directory and not users:
             raise ValueError("A directory needs named users (not --single-token)")
         self.token = token
         self.users = users
+        self.session_idle = session_idle  # seconds without a request before a session ends
+        self.session_max_age = session_max_age  # seconds after login it ends regardless
         self.public_url = public_url
         self.directory = directory
         self.oidc = OidcClient(directory.oidc) if directory and directory.oidc else None
@@ -321,10 +324,9 @@ class Auth:
         sid = request.cookies.get(self.cookie_name(_cookie_secure(request)), "")
         return hash_token(sid) if sid else ""
 
-    @staticmethod
-    def _expired(session: _Session, now: float) -> bool:
-        return (now - session.last_seen > SESSION_IDLE
-                or now - session.created > SESSION_MAX_AGE
+    def _expired(self, session: _Session, now: float) -> bool:
+        return (now - session.last_seen > self.session_idle
+                or now - session.created > self.session_max_age
                 or 0 < session.expires < now)
 
     def _expire(self) -> None:
@@ -384,7 +386,9 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
                public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
                max_user_sessions: int = MAX_USER_SESSIONS, instance: Optional[str] = None,
                session_file: Optional[SessionFile] = None,
-               directory: Optional[Directory] = None) -> web.Application:
+               directory: Optional[Directory] = None,
+               session_idle: float = SESSION_IDLE,
+               session_max_age: float = SESSION_MAX_AGE) -> web.Application:
     """The GUI app. Pass ``token`` for single-token mode or ``users`` for
     named users, with a ``directory`` for OIDC and LDAP logins next to
     them; ``public_url`` is the address browsers use when it differs
@@ -397,7 +401,8 @@ def create_app(workspace: Workspace, token: Optional[str] = None, *,
     app[WORKSPACE] = workspace
     app[JOBS] = JobManager(workspace)
     app[AUTH] = Auth(token, users, public_url, instance=instance, session_file=session_file,
-                     directory=directory)
+                     directory=directory, session_idle=session_idle,
+                     session_max_age=session_max_age)
     app[AUDIT] = audit_log = audit or AuditLog(None)
     app[JOBS].on_finished = lambda job: _audit_job_finished(audit_log, job)
     app.on_response_prepare.append(_security_headers)
@@ -461,14 +466,16 @@ def run(workspace: Workspace, host: str = "127.0.0.1", port: int = 8650,
         audit: Optional[AuditLog] = None, ssl_context: Optional[ssl.SSLContext] = None,
         public_url: Optional[str] = None, max_sessions: int = MAX_SESSIONS,
         max_user_sessions: int = MAX_USER_SESSIONS,
-        directory: Optional[Directory] = None) -> None:
+        directory: Optional[Directory] = None,
+        session_idle: float = SESSION_IDLE, session_max_age: float = SESSION_MAX_AGE) -> None:
     token = None if users else secrets.token_urlsafe(24)
     # Logins are kept per port: a restart on the same port keeps them
     state_dir = users.path.parent if users else DEFAULT_USERS_FILE.expanduser().parent
     session_file = SessionFile(state_dir / SESSION_FILE.format(instance=port))
     app = create_app(workspace, token, users=users, audit=audit, public_url=public_url,
                      max_sessions=max_sessions, max_user_sessions=max_user_sessions,
-                     instance=str(port), session_file=session_file, directory=directory)
+                     instance=str(port), session_file=session_file, directory=directory,
+                     session_idle=session_idle, session_max_age=session_max_age)
     base = public_url.rstrip("/") if public_url else _base_url(host, port, ssl_context is not None)
 
     async def _announce(_app):
@@ -744,7 +751,7 @@ async def _login(request):
     resp = web.json_response({"user": user.name or None, "role": user.role})
     # Max-Age: the login outlives the browser window, up to the session's end
     resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
-                    max_age=SESSION_MAX_AGE, httponly=True, samesite="Strict",
+                    max_age=int(auth.session_max_age), httponly=True, samesite="Strict",
                     secure=secure or None)
     request.app[AUDIT].record("login", user, remote, method=method, **extra)
     return resp
@@ -848,7 +855,7 @@ async def _oidc_callback(request):
     resp = _oidc_redirect(request, "/")
     secure = _cookie_secure(request)
     resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
-                    max_age=SESSION_MAX_AGE, httponly=True, samesite="Strict",
+                    max_age=int(auth.session_max_age), httponly=True, samesite="Strict",
                     secure=secure or None)
     request.app[AUDIT].record("login", user, request.remote, method=OIDC,
                               groups=list(who.groups), subject=who.subject)
@@ -1039,7 +1046,7 @@ async def _change_password(request):
     secure = _cookie_secure(request)
     resp = web.json_response({"user": user.name, "role": user.role})
     resp.set_cookie(auth.cookie_name(secure), auth.start_session(user), path="/",
-                    max_age=SESSION_MAX_AGE, httponly=True, samesite="Strict",
+                    max_age=int(auth.session_max_age), httponly=True, samesite="Strict",
                     secure=secure or None)
     return resp
 
@@ -1068,9 +1075,12 @@ async def _state(request):
     ws: Workspace = request.app[WORKSPACE]
     topologies = await asyncio.to_thread(ws.topologies)
     runtime = await asyncio.to_thread(ws.runtime)
+    root_problems = await asyncio.to_thread(ws.root_problems)
     jobs: JobManager = request.app[JOBS]
     return web.json_response({
         "hosts": [{"name": h.name, "host": h.host, "local": h.is_local} for h in ws.cluster.hosts],
+        # Jobs (deploy, stop, ...) would fail on these hosts for want of root
+        "root_problems": [{"host": h, "problem": p} for h, p in root_problems.items()],
         "multi_host": ws.multi_host,
         "topologies": topologies,
         "runtime": [
@@ -1089,7 +1099,12 @@ async def _hosts(request):
 
 async def _topology(request):
     ws: Workspace = request.app[WORKSPACE]
-    return web.json_response(await _call(ws.topology_detail, request.match_info["id"]))
+    detail = await _call(ws.topology_detail, request.match_info["id"])
+    if not current_user(request).is_operator:
+        # Inline startup-configs hold passwords and keys (see hide_inline_configs)
+        detail["yaml"] = hide_inline_configs(detail["yaml"])
+        detail["configs_hidden"] = True
+    return web.json_response(detail)
 
 
 async def _live(request):

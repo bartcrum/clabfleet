@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 
 # ANSI escape sequences (colors, bold) in containerlab output
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# Output lines a job keeps; past that only clabfleet's own lines (outcome,
+# errors, warnings) are kept, so a runaway command cannot fill the memory
+# and the history file. Lines are only ever appended: clients read on from
+# an offset.
+MAX_LINES = 20_000
+OWN_LINE = ("$ ", "» ", "✗", "✓", "⚠", "↺")
+SAVE_EVERY = 5.0  # seconds between saves of a running job's output
 
 
 @dataclass
@@ -43,7 +50,14 @@ class Job:
     user: str = ""  # who started it (multi-user GUI)
 
     def add(self, line: str) -> None:
-        self.lines.append(ANSI_RE.sub("", line))
+        line = ANSI_RE.sub("", line)
+        if len(self.lines) < MAX_LINES:
+            self.lines.append(line)
+            if len(self.lines) == MAX_LINES:
+                self.lines.append(f"» output past {MAX_LINES} lines is left out; "
+                                  "clabfleet's own lines are still shown")
+        elif line.startswith(OWN_LINE):
+            self.lines.append(line)
 
     def add_outcome(self, result: dict) -> None:
         """Spell out a partial or rolled-back deploy."""
@@ -180,7 +194,9 @@ def _info_logging(change: int) -> None:
 class JobManager:
     # stop: save the configs, then destroy the containers but keep the lab
     # directory, so the next deploy starts from them
-    ACTIONS = {"deploy", "redeploy", "stop", "destroy", "save", "snapshot"}
+    # recreate: destroy keeping the lab directory, then deploy, so the nodes
+    # start from their last saved configs (a lab left half up by a reboot)
+    ACTIONS = {"deploy", "redeploy", "recreate", "stop", "destroy", "save", "snapshot"}
     OPTIONS = {"rollback"}  # deploy/redeploy only
     MAX_RUNNING = 4
 
@@ -195,6 +211,7 @@ class JobManager:
         self._lock = threading.RLock()
         self._abort: dict[str, Callable[[], None]] = {}   # running job -> how to stop it
         self._cancelled_by: dict[str, str] = {}
+        self._save_lock = threading.Lock()  # periodic saves vs. the final one
         # Called (in the job's thread) when a job finishes, e.g. for the audit log
         self.on_finished: Optional[Callable[[Job], None]] = None
 
@@ -243,13 +260,28 @@ class JobManager:
             self._forget_old()
         self.history.save(job)
         threading.Thread(target=self._run, args=(job, path), daemon=True).start()
+        threading.Thread(target=self._save_while_running, args=(job,), daemon=True).start()
         return job
 
+    def _save_while_running(self, job: Job) -> None:
+        """Save a running job's output every few seconds, so a GUI that
+        dies in the middle of a deploy leaves its log behind."""
+        saved = 0  # start() saved it with no output yet
+        while job.status == "running":
+            time.sleep(SAVE_EVERY)
+            if job.status == "running" and len(job.lines) != saved:
+                saved = len(job.lines)
+                with self._save_lock:
+                    if job.status == "running":  # the job's own last save wins
+                        self.history.save(job)
+
     def cancel(self, job_id: str, user: str = "") -> Job:
-        """Stop a running job: the command it waits for is given up and the
+        """Stop a running job: the command it waits for is stopped and the
         job ends as cancelled, which frees its place and its lab for other
-        jobs. Nothing is undone: what containerlab had started is left as it
-        is, and a command on a remote host or under sudo may still finish.
+        jobs. A local containerlab under sudo that does not stop is waited
+        for first, so the lab stays busy until it ends. Nothing is undone:
+        what containerlab had started is left as it is, and a command on a
+        remote host may still finish there.
         KeyError for an unknown job, ValueError for one that is not running."""
         with self._lock:
             job = self.jobs.get(job_id)
@@ -287,9 +319,20 @@ class JobManager:
                 deployer.abort()
                 snapshotter.abort()
             job.add(f"$ {job.action} {job.topology}")
+            # Asked afresh: an unlocked sudo may have run out since the last look
+            for host, problem in self.workspace.root_problems(max_age=0).items():
+                job.add(f"⚠ {host}: {problem}")
             if job.action in ("deploy", "redeploy"):
                 result = deployer.deploy(path, reconfigure=job.action == "redeploy",
                                          rollback=job.options.get("rollback", False))
+            elif job.action == "recreate":
+                result = deployer.destroy(path, cleanup=False)
+                if any("error" in r for r in result.get("hosts", {}).values()):
+                    job.add("✗ not deployed again: removing the old containers failed")
+                else:
+                    job.add("» old containers removed, lab directory kept; deploying from "
+                            "the saved configs")
+                    result = deployer.deploy(path)
             elif job.action == "stop":
                 result = deployer.stop(path)
             elif job.action == "destroy":
@@ -326,7 +369,8 @@ class JobManager:
                 job.add("» time per host: " + ", ".join(f"{h} {t:g}s" for h, t in times.items()))
             job.add({"ok": "✓ done", "cancelled": "✗ cancelled"}.get(job.status, "✗ failed"))
             self.workspace.invalidate_runtime()  # the lab's containers changed
-            self.history.save(job)
+            with self._save_lock:
+                self.history.save(job)
             if self.on_finished:
                 try:
                     self.on_finished(job)

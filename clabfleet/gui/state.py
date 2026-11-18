@@ -34,7 +34,7 @@ from .editing import (
     uncable_ports, write_if_unchanged,
 )
 from .events import EventLog, link_items, protocol_items
-from ..runner import CommandTimeout, Runner, deadline
+from ..runner import CommandTimeout, Runner, deadline, local_root_problem
 from ..topology import (
     LABEL_HOST,
     LABEL_HOST_TAGS,
@@ -153,6 +153,7 @@ def topology_view(topo: Topology) -> dict:
 # What a read-only command on a node may consist of (``Workspace.node_command``)
 SAFE_COMMAND = re.compile(r"[A-Za-z0-9 _.:/|-]+")
 
+ROOT_CHECK_TTL = 300  # seconds between checks that containerlab gets root
 HOST_POLL_TIMEOUT = 20  # seconds a host gets to answer one of the GUI's polls
 HOST_RETRY = 30         # seconds before a host that did not answer is tried again
 
@@ -206,6 +207,42 @@ class _Flight(Future):
         self.generation = generation
 
 
+# An inline startup-config: the key with a block scalar (``|``, ``>-`` ...)
+# or a quoted string with line breaks in it
+_INLINE_CONFIG = re.compile(
+    r'^(?P<indent>[ \t]*)(?P<key>startup-config:)[ \t]*'
+    r'(?:[|>][-+0-9]*[ \t]*(?:#.*)?$|(?P<quoted>"(?:[^"\\]|\\.)*\\n(?:[^"\\]|\\.)*")[ \t]*$)')
+HIDDEN_CONFIG = "(inline config hidden from viewers)"
+
+
+def hide_inline_configs(text: str) -> str:
+    """The topology file with every inline startup-config replaced by a
+    note, for viewers: such configs hold passwords and keys, which viewers
+    are not shown elsewhere either (config diffs are operator-only). Paths
+    to config files are left as they are; the result is still valid YAML."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = _INLINE_CONFIG.match(lines[i].rstrip("\r\n"))
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        out.append(f'{m["indent"]}{m["key"]} "{HIDDEN_CONFIG}"\n')
+        i += 1
+        if m["quoted"]:
+            continue
+        # The block runs while lines are blank or indented deeper than the key
+        width = len(m["indent"].expandtabs())
+        while i < len(lines):
+            body = lines[i].rstrip("\r\n")
+            if body.strip() and len(body) - len(body.lstrip()) <= width:
+                break
+            i += 1
+    return "".join(out)
+
+
 class Workspace:
     """Hosts + topology roots the GUI manages, with cached runners."""
 
@@ -232,6 +269,8 @@ class Workspace:
         self._runtime_lock = threading.Lock()
         self._runtime_flight: Optional[_Flight] = None  # the inspect running now
         self._runtime_generation = 0
+        self._root_checked: Optional[tuple[float, dict[str, str]]] = None
+        self._root_lock = threading.Lock()
 
     @property
     def multi_host(self) -> bool:
@@ -921,6 +960,29 @@ class Workspace:
             if p.resolve() == path.resolve():
                 return topo_id
         raise KeyError(f"{path} is not in the workspace")  # e.g. a hidden directory
+
+    # --- root for containerlab ---
+
+    def root_problems(self, max_age: float = ROOT_CHECK_TTL) -> dict[str, str]:
+        """host name → why containerlab will not get root there, for the
+        hosts this machine is (remote hosts are found out by their jobs).
+
+        The answer is kept ``max_age`` seconds: each check runs sudo once,
+        and an unlocked sudo (`sudo -v`) runs out on its own, so it is
+        asked again now and then and before every job."""
+        with self._root_lock:
+            last = self._root_checked
+            if last and max_age > 0 and time.monotonic() - last[0] < max_age:
+                return last[1]
+        problems = {}
+        for host in self.cluster.hosts:
+            if host.is_local:
+                problem = local_root_problem(host.sudo)
+                if problem:
+                    problems[host.name] = problem
+        with self._root_lock:
+            self._root_checked = (time.monotonic(), problems)
+        return problems
 
     # --- runtime ---
 

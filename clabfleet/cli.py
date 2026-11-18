@@ -103,6 +103,23 @@ from .topology import dump_yaml, load_topology
 from .validate import validate_topology
 
 
+# GUI login lifetimes in hours (idle, max). Logins open shells on lab
+# nodes, so a GUI on the network keeps them shorter than one only this
+# machine can reach
+LOOPBACK_SESSION = (7 * 24, 30 * 24)
+NETWORK_SESSION = (12, 7 * 24)
+
+
+def _positive_hours(text: str) -> float:
+    try:
+        hours = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of hours: {text!r}") from None
+    if not 0 < hours < 10 * 365 * 24:
+        raise argparse.ArgumentTypeError(f"must be more than 0 hours: {text!r}")
+    return hours
+
+
 def _positive_int(text: str) -> int:
     try:
         value = int(text)
@@ -493,6 +510,14 @@ def _build_parser() -> argparse.ArgumentParser:
                             "(default: 64)")
     p_gui.add_argument("--max-user-sessions", type=_positive_int, default=16, metavar="N",
                        help="Open terminal tabs allowed per user (default: 16)")
+    p_gui.add_argument("--session-idle", type=_positive_hours, metavar="HOURS",
+                       help="A login ends after this many hours without use (default: "
+                            f"{LOOPBACK_SESSION[0]:g} listening on this machine only, "
+                            f"{NETWORK_SESSION[0]:g} with --bind to a network address)")
+    p_gui.add_argument("--session-max", type=_positive_hours, metavar="HOURS",
+                       help="A login ends this many hours after it began, used or not "
+                            f"(default: {LOOPBACK_SESSION[1]:g} on this machine only, "
+                            f"{NETWORK_SESSION[1]:g} on the network)")
 
     # --- user ---
     p_user = sub.add_parser("user", help="Manage named GUI users and their logins")
@@ -525,6 +550,9 @@ def _build_parser() -> argparse.ArgumentParser:
     u_passwd = user_sub.add_parser("passwd", help="Set a user's password (ends their sessions)")
     u_passwd.add_argument("name")
     add_password_arg(u_passwd)
+    u_passwd.add_argument("--temporary", action="store_true",
+                          help="Set a random password, print it once, and have the user "
+                               "choose their own at the next login (asks nothing)")
     add_users_arg(u_passwd)
     u_list = user_sub.add_parser("list", help="List users")
     add_users_arg(u_list)
@@ -830,8 +858,18 @@ def _gui(args: argparse.Namespace, cluster: ClusterConfig) -> int:
         open_browser=not args.no_browser, users=users, audit=AuditLog(audit_path),
         ssl_context=ssl_context, public_url=args.public_url,
         max_sessions=args.max_sessions, max_user_sessions=args.max_user_sessions,
-        directory=directory)
+        directory=directory, **_session_lifetimes(args))
     return 0
+
+
+def _session_lifetimes(args: argparse.Namespace) -> dict:
+    """How long GUI logins last, in seconds: as given, or by where it listens."""
+    idle, most = LOOPBACK_SESSION if _is_loopback(args.bind) else NETWORK_SESSION
+    most = args.session_max or most
+    idle = args.session_idle or min(idle, most)
+    if idle > most:
+        raise ValueError(f"--session-idle ({idle:g} h) is longer than --session-max ({most:g} h)")
+    return {"session_idle": idle * 3600, "session_max_age": most * 3600}
 
 
 def _is_loopback(host: str) -> bool:
@@ -942,6 +980,16 @@ def _user(args: argparse.Namespace) -> int:
     if cmd == "passwd":
         if args.name not in (store.validate() if store.path.exists() else {}):
             raise KeyError(f"No user '{args.name}'")  # before asking for a password
+        if args.temporary:
+            if args.password_stdin:
+                raise ValueError("--temporary makes up the password: leave out --password-stdin")
+            from .gui.auth import temporary_password
+            password = temporary_password()
+            store.set_password(args.name, password, must_change=True)
+            print(f"Temporary password for '{args.name}' (shown only once; they choose "
+                  f"their own at the next login; their sessions have ended):\n\n"
+                  f"    {password}\n")
+            return 0
         store.set_password(args.name, _new_password(args))
         print(f"Password set for '{args.name}'; their sessions have ended")
         return 0

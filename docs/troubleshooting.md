@@ -58,7 +58,10 @@ host: a topology can mount any path or run privileged containers. The
 same holds for every operator of the GUI.
 
 `clabfleet gui` checks this when it starts and prints a warning if deploys
-would fail, so you find out before the first click:
+would fail, so you find out before the first click. The GUI also shows it as
+a banner at the top of the page, checked again every five minutes and at the
+start of every job (whose log then starts with the same warning), so a
+`sudo -v` unlock that runs out shows up there too:
 
 ```
 WARNING: containerlab needs root here, so deploys will fail. Start clabfleet with --sudo (or CLAB_SUDO=1)
@@ -131,6 +134,12 @@ clabfleet --sudo destroy topologies/<lab>.clab.yml --keep-lab-dir
 clabfleet --sudo deploy topologies/<lab>.clab.yml --wait
 ```
 
+The GUI spots this state: a lab with nodes that are not running gets a
+banner saying so, with **Recreate, keeping saved configs** (the two
+commands above in one job) and **Redeploy from startup configs**. Save
+configs, Snapshot and Stop are greyed out meanwhile, as exited nodes
+cannot save.
+
 From the startup configs in the topology file: **Redeploy** in the GUI, or
 
 ```bash
@@ -174,6 +183,13 @@ stdin instead, e.g. from a file only you can read:
 
 ```bash
 clabfleet user passwd admin --password-stdin < ~/new-password.txt
+```
+
+Or have clabfleet make up a temporary password, which it prints once and
+which you replace with your own at the next login; it asks nothing:
+
+```bash
+clabfleet user passwd admin --temporary
 ```
 
 ### The login page has no "Log in with ..." button, or my directory account is refused

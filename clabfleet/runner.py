@@ -195,6 +195,8 @@ class Runner:
         # False: use `sudo -n` so a missing NOPASSWD rule fails fast instead
         # of waiting on a password prompt nobody can see (e.g. the GUI)
         self.interactive_sudo = True
+        # Set by nodes.inspect_all once `containerlab inspect` failed without sudo
+        self.inspect_needs_sudo = False
 
     def __enter__(self):
         return self
@@ -288,6 +290,9 @@ class Runner:
         pass
 
 
+STOP_WAIT = 10  # seconds a cancelled command gets to end after SIGTERM
+
+
 class LocalRunner(Runner):
     """Run commands on this machine."""
 
@@ -337,8 +342,9 @@ class LocalRunner(Runner):
             while proc.poll() is None:
                 self._interrupted(text)
                 time.sleep(POLL)
-        except (CommandTimeout, CommandCancelled):
-            self._stop(proc)
+        except (CommandTimeout, CommandCancelled) as exc:
+            # A cancelled job's lab must not be freed while its command runs on
+            self._stop(proc, wait_for_end=isinstance(exc, CommandCancelled))
             raise
         finally:
             for stream in (proc.stdout, proc.stderr):
@@ -351,18 +357,42 @@ class LocalRunner(Runner):
                              b"".join(chunks[proc.stderr]).decode(errors="replace"))
 
     @staticmethod
-    def _stop(proc: subprocess.Popen) -> None:
-        """End a process we stopped waiting for. One started through sudo
-        belongs to root and may not be ours to signal: it is left to finish."""
+    def _stop(proc: subprocess.Popen, wait_for_end: bool = False) -> None:
+        """End a process we stopped waiting for.
+
+        SIGTERM first: sudo passes it on to the command it runs. A process
+        that ignores it is killed, except one under sudo: SIGKILL would end
+        sudo but not the containerlab under it, which would then go on
+        changing the lab with nobody waiting for it, while the job would end
+        and let another start on the same lab. With ``wait_for_end`` (a
+        cancelled job) such a process, and one we may not signal, is waited
+        for until it ends by itself, so its job and its lab stay busy until
+        then; otherwise (a timeout) it is left to finish."""
+        under_sudo = bool(proc.args) and proc.args[0] == "sudo"
+        what = f"{shlex.join(proc.args)} (pid {proc.pid})"
         try:
             proc.terminate()
             try:
-                proc.wait(2)
+                proc.wait(STOP_WAIT)
+                return
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(2)
-        except (PermissionError, ProcessLookupError, subprocess.TimeoutExpired):
-            logger.warning("Could not stop %s (pid %s); leaving it", shlex.join(proc.args), proc.pid)
+                if not under_sudo:
+                    proc.kill()
+                    proc.wait(2)
+                    return
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        except subprocess.TimeoutExpired:
+            logger.warning("Could not stop %s; leaving it", what)
+            return
+        if not wait_for_end:
+            logger.warning("Could not stop %s; leaving it to finish", what)
+            return
+        logger.warning("Could not stop %s, which runs as root: waiting for it to finish "
+                       "before the lab is free again", what)
+        proc.wait()
 
     def makedirs(self, path):
         Path(path).mkdir(parents=True, exist_ok=True)

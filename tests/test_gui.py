@@ -542,3 +542,140 @@ def test_stop_saves_first_and_keeps_the_lab_directory(tmp_path, monkeypatch):
     _wait(job)
     assert job.status == "error" and calls == ["save"]
     assert any("not stopped" in line for line in job.lines)
+
+
+def test_root_problem_shown_in_state_and_rechecked_before_each_job(tmp_path, monkeypatch):
+    from clabfleet.gui import state as state_mod
+
+    answers = ["sudo asks for a password here"]
+    asked = []
+    monkeypatch.setattr(state_mod, "local_root_problem",
+                        lambda sudo: asked.append(sudo) or answers[0])
+    ws = Workspace(ClusterConfig(hosts=[HostInfo("localhost", sudo=True),
+                                        HostInfo("lab-b", host="10.0.0.2")]), [tmp_path])
+    (tmp_path / "t.clab.yml").write_text(TOPO)
+    ws.topologies()
+    # Local hosts only, and kept between polls
+    assert ws.root_problems() == {"localhost": "sudo asks for a password here"}
+    assert ws.root_problems() == {"localhost": "sudo asks for a password here"}
+    assert asked == [True]
+
+    class FakeDeployer:
+        def __init__(self, *a, **kw):
+            pass
+
+        def save(self, path):
+            return {"hosts": {"localhost": {"status": "saved"}}}
+
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", FakeDeployer)
+    jobs = JobManager(ws, JobHistory(None))
+    job = jobs.start("save", "t.clab.yml")
+    _wait(job)
+    assert "⚠ localhost: sudo asks for a password here" in job.lines
+    assert asked == [True, True]  # asked afresh for the job
+    # Fixed in the meantime (e.g. `sudo -v`): the job says nothing, and the
+    # banner's answer is the job's fresh one
+    answers[0] = None
+    job = jobs.start("save", "t.clab.yml")
+    _wait(job)
+    assert not [line for line in job.lines if line.startswith("⚠")]
+    assert ws.root_problems() == {}
+
+    async def scenario():
+        answers[0] = "containerlab needs root here"
+        ws.root_problems(max_age=0)
+        monkeypatch.setattr(Workspace, "runtime", lambda self: [])
+        app = server.create_app(ws, "secret-token")
+        async with TestClient(TestServer(app)) as client:
+            await client.post("/login", json={"token": "secret-token"})
+            body = await (await client.get("/api/state")).json()
+            assert body["root_problems"] == [{"host": "localhost",
+                                              "problem": "containerlab needs root here"}]
+
+    asyncio.run(scenario())
+
+
+def test_job_output_is_capped_but_keeps_clabfleets_own_lines(monkeypatch):
+    from clabfleet.gui import jobs as jobs_mod
+    monkeypatch.setattr(jobs_mod, "MAX_LINES", 5)
+    job = Job("j", "deploy", "t.clab.yml")
+    for i in range(10):
+        job.add(f"noise {i}")
+    job.add("✗ localhost: boom")
+    job.add("✓ done")
+    assert job.lines[:5] == [f"noise {i}" for i in range(5)]
+    assert "left out" in job.lines[5]
+    assert job.lines[6:] == ["✗ localhost: boom", "✓ done"]
+    # Append-only: a client that read up to an offset still reads on from it
+    assert job.view(5)["lines"] == job.lines[5:]
+
+
+def test_a_running_jobs_output_is_saved_as_it_goes(tmp_path, monkeypatch):
+    from clabfleet.gui import jobs as jobs_mod
+    monkeypatch.setattr(jobs_mod, "SAVE_EVERY", 0.05)
+    release = threading.Event()
+
+    class SlowDeployer:
+        def __init__(self, cluster, on_output=None, interactive_sudo=True):
+            self.on_output = on_output
+
+        def deploy(self, path, reconfigure=False, rollback=False):
+            self.on_output("Creating container a")
+            release.wait(5)
+            return {"hosts": {"localhost": {"status": "deployed"}}}
+
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", SlowDeployer)
+    ws = _workspace(tmp_path)
+    ws.topologies()
+    jobs = JobManager(ws)
+    job = jobs.start("deploy", "t.clab.yml")
+    saved = tmp_path / ".clabfleet" / "jobs" / f"{job.id}.json"
+    for _ in range(100):
+        if "Creating container a" in json.loads(saved.read_text())["lines"]:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("output not saved while the job runs")
+    assert json.loads(saved.read_text())["status"] == "running"
+    # The GUI dies here: the next one shows the log so far, as interrupted
+    crashed = JobHistory(tmp_path / ".clabfleet" / "jobs").load()[0]
+    assert crashed.status == "interrupted" and "Creating container a" in crashed.lines
+    release.set()
+    _wait(job)
+    time.sleep(0.15)  # a periodic save must not overwrite the final one
+    final = json.loads(saved.read_text())
+    assert final["status"] == "ok" and final["lines"][-1] == "✓ done"
+
+
+def test_recreate_keeps_the_lab_directory_and_deploys_again(tmp_path, monkeypatch):
+    calls = []
+    fail_destroy = [False]
+
+    class FakeDeployer:
+        def __init__(self, *a, **kw):
+            pass
+
+        def destroy(self, path, cleanup=True):
+            calls.append(("destroy", cleanup))
+            if fail_destroy[0]:
+                return {"hosts": {"localhost": {"error": "boom"}}}
+            return {"hosts": {"localhost": {"status": "ok"}}}
+
+        def deploy(self, path, reconfigure=False, rollback=False):
+            calls.append(("deploy", reconfigure))
+            return {"hosts": {"localhost": {"status": "deployed"}}}
+
+    monkeypatch.setattr("clabfleet.gui.jobs.LabDeployer", FakeDeployer)
+    ws = _workspace(tmp_path)
+    ws.topologies()
+    jobs = JobManager(ws, JobHistory(None))
+    job = jobs.start("recreate", "t.clab.yml")
+    _wait(job)
+    assert job.status == "ok"
+    assert calls == [("destroy", False), ("deploy", False)]  # kept, not reconfigured
+    calls.clear()
+    fail_destroy[0] = True
+    job = jobs.start("recreate", "t.clab.yml")
+    _wait(job)
+    assert job.status == "error" and calls == [("destroy", False)]
+    assert any("not deployed again" in line for line in job.lines)

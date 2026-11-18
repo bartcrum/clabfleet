@@ -379,6 +379,7 @@ clabfleet user add alice                  # operator: everything; asks for a pas
 clabfleet user add bob --role viewer      # read-only
 clabfleet user add ci --token             # a login token instead of a password
 clabfleet user passwd alice               # new password, ends alice's sessions
+clabfleet user passwd alice --temporary   # prints a random one, changed at the next login
 clabfleet user rotate ci                  # new token, ends ci's sessions
 clabfleet user list
 clabfleet user remove bob                 # ends bob's sessions
@@ -408,7 +409,8 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
   `user_login_reset`, `user_removed`).
 - **Login:** each user logs in at `https://<server>:8650/` with their name
   and password (or opens their token link), once per browser: the login
-  lasts up to 30 days and survives GUI restarts. **Password** in the top
+  lasts up to 30 days (7 when the GUI listens on the network) and
+  survives GUI restarts. **Password** in the top
   bar changes your own password and logs out your other browsers. See
   [Login and sessions](#login-and-sessions). The header shows who you are
   and your role.
@@ -417,7 +419,9 @@ clabfleet --sudo gui --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem
     and layout saves
   - `viewer`: topologies, diagrams, YAML, node state, job output and node
     logs (the Logs tab) of the labs defined by the workspace's topologies.
-    Viewers cannot see config diffs (configs hold password hashes), open
+    Viewers cannot see config diffs (configs hold password hashes) or
+    inline `startup-config` blocks in the YAML, which they see replaced by
+    a note (paths to config files are shown as they are), cannot open
     terminals or follow logs of other labs on the hosts, and topology
     files that are symlinks to somewhere outside the workspace are not
     shown at all. Controls they cannot use are hidden. The server
@@ -604,7 +608,10 @@ clabfleet directory check --user alice    # LDAP: alice's entry, and the role he
   users file, it is not used if other users could change it. In
   single-token mode each start prints a new token, but browsers already
   logged in stay logged in; delete the file to log every browser out.
-- A session ends after 7 days idle, 30 days after login, on **Log out**,
+- A session ends after 7 days idle and 30 days after login when the GUI
+  listens on this machine only; with `--bind` to a network address,
+  after 12 hours idle and 7 days after login. `--session-idle HOURS` and
+  `--session-max HOURS` set them. It also ends on **Log out**,
   when the user's password or token changes, or when the user is
   removed. Each user keeps at most 20 sessions; another login ends the
   oldest.

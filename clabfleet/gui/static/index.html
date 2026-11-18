@@ -56,6 +56,8 @@
   <!-- D3: the GUI's own server stopped answering -->
   <div id="offline" class="offline" role="alert" hidden>Cannot reach the clabfleet server; retrying.
     What you see is the last state it sent.</div>
+  <!-- Deploy, stop, save and destroy would fail here for want of root -->
+  <div id="rootwarn" class="offline rootwarn" role="status" hidden></div>
 
   <div class="layout">
     <aside id="sidebar" class="sidebar">
@@ -109,6 +111,14 @@
             <span id="lab-state" class="badge"></span>
             <button id="lab-path" class="icon-btn" hidden><svg class="ico" aria-hidden="true"><use href="#i-copy"/></svg></button>
             <div id="lab-stats" class="lab-stats"></div>
+          </div>
+          <!-- Some nodes exited (e.g. after the host restarted): what happened and the way back -->
+          <div id="lab-halfup" class="halfup" role="status" hidden>
+            <p id="lab-halfup-text"></p>
+            <div class="actions operator-only">
+              <button class="btn primary" data-recover="recreate" title="Remove the containers, keep the lab directory with the saved configs, and deploy again"><svg class="ico" aria-hidden="true"><use href="#i-redeploy"/></svg>Recreate, keeping saved configs</button>
+              <button class="btn" data-recover="redeploy" title="Destroy and recreate all nodes from the topology's startup configs"><svg class="ico" aria-hidden="true"><use href="#i-redeploy"/></svg>Redeploy from startup configs</button>
+            </div>
           </div>
           <div id="lab-actions" class="actions operator-only">
             <button class="btn primary" data-action="deploy"><svg class="ico" aria-hidden="true"><use href="#i-play"/></svg>Deploy</button>

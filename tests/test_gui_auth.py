@@ -1265,3 +1265,127 @@ def test_login_bodies_are_small(tmp_path):
             assert (await client.post("/login", json=big)).status == 413
 
     asyncio.run(scenario())
+
+
+SECRET_TOPO = """name: t
+topology:
+  kinds:
+    arista_ceos:
+      startup-config: |
+        username admin secret kindsecret
+  nodes:
+    a:
+      kind: arista_ceos
+      image: ceos:4.35
+      startup-config: |-
+        hostname a
+        username admin secret topsecret
+
+        interface Ethernet1
+      labels: {role: spine}
+    b:
+      kind: linux
+      image: alpine
+      startup-config: "line one\\nenable secret quoted\\n"
+    c:
+      kind: linux
+      image: alpine
+      startup-config: configs/c.cfg
+  links:
+    - endpoints: ["a:eth1", "b:eth1"]
+"""
+
+
+def test_hide_inline_configs_keeps_valid_yaml():
+    import yaml
+    from clabfleet.gui.state import HIDDEN_CONFIG, hide_inline_configs
+
+    hidden = hide_inline_configs(SECRET_TOPO)
+    assert "secret" not in hidden
+    data = yaml.safe_load(hidden)
+    nodes = data["topology"]["nodes"]
+    assert nodes["a"]["startup-config"] == HIDDEN_CONFIG
+    assert nodes["a"]["labels"] == {"role": "spine"}  # what follows the block survives
+    assert nodes["b"]["startup-config"] == HIDDEN_CONFIG
+    assert nodes["c"]["startup-config"] == "configs/c.cfg"  # a path is no secret
+    assert data["topology"]["kinds"]["arista_ceos"]["startup-config"] == HIDDEN_CONFIG
+    assert data["topology"]["links"] == yaml.safe_load(SECRET_TOPO)["topology"]["links"]
+    assert hide_inline_configs("name: x\n") == "name: x\n"
+
+
+def test_viewers_do_not_get_inline_configs(tmp_path):
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("root", password=PASSWORD)
+    users.add("vic", "viewer", password=PASSWORD)
+    ws = _workspace(tmp_path)
+    (tmp_path / "t.clab.yml").write_text(SECRET_TOPO)
+
+    async def scenario():
+        seen = {}
+        for name in ("vic", "root"):
+            app = server.create_app(ws, users=users)
+            async with TestClient(TestServer(app)) as client:
+                await client.post("/login", json={"username": name, "password": PASSWORD})
+                resp = await client.get("/api/topologies/t.clab.yml")
+                assert resp.status == 200
+                seen[name] = await resp.json()
+        return seen
+
+    seen = asyncio.run(scenario())
+    assert "topsecret" not in seen["vic"]["yaml"] and seen["vic"]["configs_hidden"]
+    assert seen["root"]["yaml"] == SECRET_TOPO and "configs_hidden" not in seen["root"]
+    assert seen["vic"]["hash"] == seen["root"]["hash"]
+
+
+def test_user_passwd_temporary(tmp_path, capsys):
+    users = str(tmp_path / "users.yaml")
+    store = UserStore(users)
+    store.add("alice", password=PASSWORD)
+    assert cli.main(["user", "passwd", "alice", "--temporary", "--users", users]) == 0
+    out = capsys.readouterr().out
+    password = out.split("\n\n")[1].strip()
+    user = UserStore(users).check_password("alice", password)
+    assert user and user.must_change
+    assert not UserStore(users).check_password("alice", PASSWORD)
+    assert cli.main(["user", "passwd", "alice", "--temporary", "--password-stdin",
+                     "--users", users]) == 1
+    assert "leave out --password-stdin" in capsys.readouterr().err
+
+
+def test_gui_session_lifetimes(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(auth, "DEFAULT_USERS_FILE", tmp_path / "home" / "users.yaml")
+    monkeypatch.setattr(server, "run", lambda *a, **kw: seen.update(kw))
+    base = ["gui", "--dir", str(tmp_path), "--no-browser"]
+    hours = lambda: (seen["session_idle"] / 3600, seen["session_max_age"] / 3600)  # noqa: E731
+    assert cli.main(base) == 0
+    assert hours() == cli.LOOPBACK_SESSION
+    assert cli.main([*base, "--bind", "0.0.0.0", "--insecure-http"]) == 0
+    assert hours() == cli.NETWORK_SESSION
+    assert cli.main([*base, "--session-idle", "1.5", "--session-max", "8"]) == 0
+    assert hours() == (1.5, 8)
+    assert cli.main([*base, "--session-max", "4"]) == 0  # the idle default fits under it
+    assert hours() == (4, 4)
+    assert cli.main([*base, "--session-idle", "9", "--session-max", "4"]) == 1
+    with pytest.raises(SystemExit):
+        cli.main([*base, "--session-idle", "0"])
+
+
+def test_session_lifetime_is_per_app(tmp_path, monkeypatch):
+    users = UserStore(tmp_path / "users.yaml")
+    users.add("alice", password=PASSWORD)
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
+
+    async def scenario():
+        app = server.create_app(_workspace(tmp_path), users=users,
+                                session_idle=60, session_max_age=600)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/login", json={"username": "alice", "password": PASSWORD})
+            assert "Max-Age=600" in resp.headers["Set-Cookie"]
+            clock[0] += 50
+            assert (await client.get("/api/me")).status == 200
+            clock[0] += 61
+            assert (await client.get("/api/state")).status == 401
+
+    asyncio.run(scenario())
