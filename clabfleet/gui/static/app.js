@@ -659,6 +659,10 @@ async function renderWelcome() {
       h("span", { class: "card-head" },
         s("svg", { class: "ico", "aria-hidden": "true" }, s("use", { href: "#i-plus" })), h("b", {}, "Blank canvas")),
       h("span", { class: "muted small" }, "Draw nodes and links, then generate configs")),
+    h("button", { class: "card new", onclick: () => window.ImportConfigs?.open() },
+      h("span", { class: "card-head" },
+        s("svg", { class: "ico", "aria-hidden": "true" }, s("use", { href: "#i-plus" })), h("b", {}, "Import configs")),
+      h("span", { class: "muted small" }, "Upload EOS configs (Arista AVD) and get the lab they describe")),
     ...Object.entries(welcomeTemplates).map(([name, t]) =>
       h("button", { class: "card new", onclick: () => window.Builder.newLab(name) },
         miniDiagram(`template:${name}`, t.sketch),

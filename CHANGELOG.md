@@ -36,6 +36,9 @@ Not released yet. The first release with a version tag and a package.
 - Templates (`clabfleet new`): spine-leaf, ring and campus.
 - Import from a live network (`export-live`): NAPALM, NetBox, Nautobot and
   Ansible inventories, interface name mapping, config sanitising, re-sync.
+- Import from config files (`import-configs`, and **Import** in the GUI):
+  a lab from the EOS configs Arista AVD generates, with links worked out
+  from the interface descriptions and checked against the link addresses.
 
 ### Building labs: spare ports
 

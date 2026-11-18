@@ -342,6 +342,16 @@ and the tests check every template and kind with `validate`. Only `linux`
 labs have been deployed and pinged so far; the cEOS and IOL configs have
 not been booted.
 
+## Build a lab from config files
+
+```bash
+clabfleet import-configs avd/intended/configs/ -o labs/dc1/dc1.clab.yml --lab-name dc1
+```
+
+One cEOS node per EOS config file, with links worked out from the
+interface descriptions and the link addresses, and the configs sanitised.
+See [Import from config files](import-configs.md).
+
 ## Node images
 
 Before deploying, clabfleet checks that every node's image exists on the

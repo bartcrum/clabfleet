@@ -65,7 +65,10 @@
                autocomplete="off" spellcheck="false">
         <div class="side-head">
           <h2>Topologies</h2>
-          <button id="new-lab" class="btn ghost small operator-only" title="Draw a new lab, or start from a template"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>New lab</button>
+          <span class="side-actions">
+            <button id="import-cfg" class="btn ghost small operator-only" title="Build a lab from device config files, such as the ones Arista AVD writes">Import</button>
+            <button id="new-lab" class="btn ghost small operator-only" title="Draw a new lab, or start from a template"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg>New lab</button>
+          </span>
         </div>
         <ul id="topo-list" class="lab-list">
           <li class="skeleton"></li><li class="skeleton"></li><li class="skeleton"></li>
@@ -403,6 +406,40 @@
     </form>
   </dialog>
 
+  <!-- Import configs: a lab from uploaded device configs (importcfg.js) -->
+  <dialog id="importcfg-dlg" class="confirm importcfg-dlg" aria-labelledby="importcfg-title">
+    <form id="importcfg-form" method="dialog" class="newlab">
+      <h2 id="importcfg-title">Import configs</h2>
+      <div id="importcfg-fields" class="newlab">
+        <p class="muted small">Builds a lab of cEOS nodes from EOS config files, such as the
+          <span class="mono">intended/configs/*.cfg</span> Arista AVD writes: one node per file, links from the
+          interface descriptions, checked against the link addresses.</p>
+        <div id="importcfg-drop" class="dropzone">
+          <p><b>Drop config files here</b>, or
+            <button id="importcfg-browse" type="button" class="btn small">Choose files…</button></p>
+          <input id="importcfg-input" type="file" multiple accept=".cfg,.conf,.txt,text/plain" hidden>
+          <ul id="importcfg-files" class="importcfg-files" aria-label="Chosen config files"></ul>
+        </div>
+        <label>Lab name <input id="importcfg-name" class="sans" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]*"
+               maxlength="61" autocomplete="off" spellcheck="false" placeholder="dc1-fabric"></label>
+        <label>cEOS image <input id="importcfg-image" class="mono" autocomplete="off" spellcheck="false"></label>
+        <label class="check"><input id="importcfg-sanitise" type="checkbox" checked>
+          Sanitise the configs: remove users, AAA and SNMP secrets and management addresses, replace protocol keys</label>
+        <label id="importcfg-residual-row" class="check" hidden><input id="importcfg-residual" type="checkbox">
+          Import anyway, with the lines the check flagged</label>
+      </div>
+      <div id="importcfg-result" class="importcfg-result" hidden>
+        <p id="importcfg-summary"></p>
+        <ul id="importcfg-warnings" class="importcfg-warnings small"></ul>
+      </div>
+      <p id="importcfg-error" class="login-error small importcfg-error" role="alert" hidden></p>
+      <div class="confirm-actions">
+        <button id="importcfg-cancel" class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button id="importcfg-ok" class="btn primary" value="ok">Import</button>
+      </div>
+    </form>
+  </dialog>
+
   <!-- Builder: configs for the drawn lab -->
   <dialog id="gen-dlg" class="confirm" aria-labelledby="gen-title">
     <form id="gen-form" method="dialog" class="newlab">
@@ -489,6 +526,7 @@
   <script src="/static/account.js"></script>
   <script src="/static/routing.js"></script>
   <script src="/static/builder.js"></script>
+  <script src="/static/importcfg.js"></script>
   <script src="/static/palette.js"></script>
   <script src="/static/export.js"></script>
   <script src="/static/run.js"></script>
